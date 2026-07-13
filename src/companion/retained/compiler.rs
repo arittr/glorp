@@ -75,7 +75,7 @@ pub(super) struct StaticVertex {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 /// GPU-facing per-node upload ABI shared with the Task 9 shader layout.
 pub(super) struct NodeGpuValue {
     world: [[f32; 4]; 4],
@@ -84,6 +84,20 @@ pub(super) struct NodeGpuValue {
     material_parameter_offset: u32,
     material_parameter_count: u32,
     depth_cue: [f32; 4],
+}
+
+impl std::fmt::Debug for NodeGpuValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeGpuValue")
+            .field("world", &self.world)
+            .field("opacity", &"<redacted>")
+            .field("visible", &self.visible)
+            .field("material_parameter_offset", &self.material_parameter_offset)
+            .field("material_parameter_count", &self.material_parameter_count)
+            .field("depth_cue", &self.depth_cue)
+            .finish()
+    }
 }
 
 #[repr(C)]
@@ -164,7 +178,7 @@ struct ContentGlobalsGpuValue {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 /// GPU-facing frame-global upload ABI.
 struct FrameGlobalsGpuValue {
     view: [[f32; 4]; 4],
@@ -177,6 +191,22 @@ struct FrameGlobalsGpuValue {
     light_count: u32,
     // Storage-buffer tail padding only; it carries no scene or host semantics.
     _padding: [u32; 2],
+}
+
+impl std::fmt::Debug for FrameGlobalsGpuValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrameGlobalsGpuValue")
+            .field("view", &self.view)
+            .field("projection", &self.projection)
+            .field("viewport_points", &self.viewport_points)
+            .field("viewport_pixels", &self.viewport_pixels)
+            .field("aperture", &self.aperture)
+            .field("gauges", &"<redacted>")
+            .field("dim_amount", &"<redacted>")
+            .field("light_count", &self.light_count)
+            .finish_non_exhaustive()
+    }
 }
 
 #[repr(C)]
@@ -323,7 +353,7 @@ impl ContentMirrors {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(super) struct FrameMirrors {
     globals: FixedPodMirror<FrameGlobalsGpuValue, 1>,
     nodes: FixedPodMirror<NodeGpuValue, MAX_SCENE_NODES>,
@@ -345,6 +375,21 @@ impl FrameMirrors {
             hud: FixedPodMirror::zeroed(),
             lights: FixedPodMirror::zeroed(),
         }
+    }
+}
+
+impl std::fmt::Debug for FrameMirrors {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrameMirrors")
+            .field("globals", &self.globals)
+            .field("node_count", &self.nodes.as_slice().len())
+            .field("prop_slot_count", &self.props.as_slice().len())
+            .field("tank_cell_count", &self.tank_cells.as_slice().len())
+            .field("ambient_slot_count", &self.ambient.as_slice().len())
+            .field("hud_slot_count", &self.hud.as_slice().len())
+            .field("light_slot_count", &self.lights.as_slice().len())
+            .finish()
     }
 }
 
@@ -702,6 +747,7 @@ fn content_delta_has_values(delta: &ContentDelta) -> bool {
     delta.palette.is_some()
         || delta.mood.is_some()
         || delta.weather.is_some()
+        || delta.day_phase.is_some()
         || !delta.pet_art_slots.is_empty()
         || !delta.prop_slots.is_empty()
         || !delta.tank_slots.is_empty()
@@ -1276,6 +1322,9 @@ fn apply_content_delta_in_place(content: &mut SceneContent, delta: &ContentDelta
     }
     if let Some(weather) = delta.weather {
         content.weather = weather;
+    }
+    if let Some(day_phase) = delta.day_phase {
+        content.day_phase = day_phase;
     }
     for changed in &delta.pet_art_slots {
         content.pet_art_slots[usize::from(changed.slot)] = *changed;
@@ -2790,6 +2839,71 @@ mod tests {
     }
 
     #[test]
+    fn candidate_debug_redacts_exact_frame_globals() {
+        fn fixture_with_private_frame(gauges: [f32; 4], dim: f32) -> SceneFixture {
+            let mut fixture = SceneFixture::valid();
+            fixture.frame.gauges = gauges;
+            fixture.frame.dim_amount = dim;
+            let dim_alias =
+                crate::presentation::companion_scene::scene::CanonicalAlias::new("chrome.dim")
+                    .unwrap();
+            let dim_node = NodeId::from_alias(&dim_alias);
+            let parent = fixture.template.nodes[0].id;
+            fixture.template.nodes.push(
+                crate::presentation::companion_scene::scene::NodeTemplate {
+                    id: dim_node,
+                    alias: dim_alias,
+                    parent: Some(parent),
+                    base_transform:
+                        crate::presentation::companion_scene::scene::Transform3::IDENTITY,
+                    local_bounds: Bounds3 { min: [0.0; 3], max: [360.0, 360.0, 0.0] },
+                    depth_cue: crate::presentation::companion_scene::DepthCue::NEUTRAL,
+                },
+            );
+            fixture.frame.nodes.push(
+                crate::presentation::companion_scene::scene::NodeFrameState {
+                    node: dim_node,
+                    local_transform:
+                        crate::presentation::companion_scene::scene::Transform3::IDENTITY,
+                    visible: dim > 0.0,
+                    opacity: dim,
+                },
+            );
+            fixture
+        }
+
+        let first_gauges = [0.123_456_79, 0.234_567_9, 0.345_678_93, 0.456_789_02];
+        let second_gauges = [0.176_543_2, 0.213_579_24, 0.398_765_44, 0.487_654_33];
+        let first_dim = 0.567_890_1;
+        let second_dim = 0.678_901_2;
+        let first = compile_fixture(&fixture_with_private_frame(first_gauges, first_dim));
+        let second = compile_fixture(&fixture_with_private_frame(second_gauges, second_dim));
+        let first_debug = format!("{first:?}");
+        let second_debug = format!("{second:?}");
+        let first_node_debug = format!("{:?}", first.frame.nodes.as_slice());
+        let second_node_debug = format!("{:?}", second.frame.nodes.as_slice());
+
+        for private_value in first_gauges
+            .into_iter()
+            .chain(second_gauges)
+            .chain([first_dim, second_dim])
+            .map(|value| format!("{value:?}"))
+        {
+            assert!(
+                !first_debug.contains(&private_value),
+                "leaked {private_value}: {first_debug}"
+            );
+            assert!(
+                !second_debug.contains(&private_value),
+                "leaked {private_value}: {second_debug}"
+            );
+            assert!(!first_node_debug.contains(&private_value));
+            assert!(!second_node_debug.contains(&private_value));
+        }
+        assert!(first_debug.contains("<redacted>"));
+    }
+
+    #[test]
     fn initial_mirrors_preserve_globals_fixed_slots_lights_and_empty_tail() {
         let mut fixture = SceneFixture::valid();
         fixture.content.palette[2] = [11, 22, 33];
@@ -2962,13 +3076,12 @@ mod tests {
         assert_ne!(resource_a.resources, resource_b.resources);
 
         let mut depth_cue = fixture.clone();
-        depth_cue.template.nodes[1].depth_cue =
-            crate::presentation::companion_scene::scene::DepthCue {
-                scale: 0.9,
-                y_offset_points_up: 3.0,
-                opacity: 0.8,
-                saturation: 0.7,
-            };
+        depth_cue.template.nodes[1].depth_cue = crate::presentation::companion_scene::DepthCue {
+            scale: 0.9,
+            y_offset_points_up: 3.0,
+            opacity: 0.8,
+            saturation: 0.7,
+        };
         let depth_cue = compile_fixture(&depth_cue);
         assert_ne!(depth_cue.static_checksum, baseline.static_checksum);
         assert_eq!(depth_cue.nodes[1].depth_cue, [0.9, 3.0, 0.8, 0.7]);
@@ -3124,6 +3237,7 @@ mod tests {
             crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
         );
         content.palette = Some([[17; 3]; 8]);
+        content.day_phase = Some(crate::presentation::companion_scene::CompanionDayPhase::Dusk);
         let mut pet = candidate.logical_content.pet_art_slots[0];
         pet.palette_role = PetPaletteRole::Eye;
         content.pet_art_slots.push(pet);
@@ -3290,6 +3404,10 @@ mod tests {
         assert_eq!(after_frame_globals.aperture, before_frame_globals.aperture);
         assert_eq!(after_frame_globals._padding, before_frame_globals._padding);
         assert_eq!(after_frame_globals.light_count, 1);
+        assert_eq!(
+            candidate.logical_content.day_phase,
+            crate::presentation::companion_scene::CompanionDayPhase::Dusk
+        );
 
         let (mut noop_content, noop_frame) = paired_deltas(
             &candidate,

@@ -1,5 +1,6 @@
 use super::scene::{
-    is_world_blended, NodeId, OrthographicCamera, SceneContent, SceneFrame, SceneTemplate,
+    is_world_blended, CaptureFramePrivacyProjection, NodeId, OrthographicCamera, SceneContent,
+    SceneFrame, SceneTemplate,
 };
 use super::validate::{validate_full_generation, SceneValidationError};
 use super::{GaugeLevelSnapshot, SceneVersion};
@@ -572,6 +573,7 @@ impl SceneArtifacts {
         frame: &SceneFrame,
     ) -> Result<Self, SceneValidationError> {
         validate_full_generation(template, content, frame)?;
+        let privacy = CaptureFramePrivacyProjection::from_frame(frame);
 
         let mut occupied_pet_art_slots = content
             .pet_art_slots
@@ -601,10 +603,15 @@ impl SceneArtifacts {
         let mut nodes = frame
             .nodes
             .iter()
-            .map(|node| SceneFrameNodeArtifact {
-                node: node.node,
-                visible: node.visible,
-                opacity: node.opacity,
+            .map(|node| {
+                let template_node = template
+                    .nodes
+                    .iter()
+                    .find(|template_node| template_node.id == node.node)
+                    .expect("validated frame nodes have matching template nodes");
+                let (visible, opacity) =
+                    privacy.node_state(template_node.alias.as_str(), node.visible, node.opacity);
+                SceneFrameNodeArtifact { node: node.node, visible, opacity }
             })
             .collect::<Vec<_>>();
         nodes.sort_by_key(|node| node.node);
@@ -642,10 +649,8 @@ impl SceneArtifacts {
                 schema_version: SCENE_ARTIFACT_SCHEMA_VERSION,
                 camera: frame.camera,
                 nodes,
-                gauges: frame
-                    .gauges
-                    .map(|gauge| GaugeLevelSnapshot::from_fraction(f64::from(gauge))),
-                dimmed: frame.dim_amount > 0.0,
+                gauges: privacy.gauges(),
+                dimmed: privacy.dimmed(),
                 light_count: frame.lights.len(),
             },
         })

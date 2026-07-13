@@ -485,7 +485,9 @@ pub(crate) fn classify_snapshot_changes(
     if previous.frame.room_glyphs != newest.frame.room_glyphs {
         changes.frame.insert(FrameChangeMask::ROOM_GLYPHS);
     }
-    if previous.content.room_weather != newest.content.room_weather {
+    if previous.content.room_weather != newest.content.room_weather
+        || previous.content.day_phase != newest.content.day_phase
+    {
         changes.semantic.insert(SemanticChangeMask::MOOD_WEATHER);
     }
     if previous.content.mood != newest.content.mood {
@@ -566,6 +568,8 @@ pub(crate) fn classify_snapshot_changes(
                 + newest.frame.breath_offset_y_points
                 + newest.frame.bob_offset_y_points
         || previous.frame.pet_depth != newest.frame.pet_depth
+        || previous.frame.pet_depth_cue != newest.frame.pet_depth_cue
+        || previous.frame.calm != newest.frame.calm
         || previous.frame.facing != newest.frame.facing
     {
         changes.frame.insert(FrameChangeMask::PET_TRANSFORM);
@@ -577,10 +581,14 @@ pub(crate) fn classify_snapshot_changes(
     if previous.frame.helper_trouble != newest.frame.helper_trouble {
         changes.frame.insert(FrameChangeMask::TROUBLE_VISIBILITY);
     }
-    if previous.frame.gauges != newest.frame.gauges {
+    if previous.frame.gauge_fractions != newest.frame.gauge_fractions
+        || previous.frame.gauge_levels != newest.frame.gauge_levels
+    {
         changes.frame.insert(FrameChangeMask::GAUGES);
     }
-    if previous.frame.dim_amount != newest.frame.dim_amount {
+    if previous.frame.dim_amount != newest.frame.dim_amount
+        || previous.frame.dimmed != newest.frame.dimmed
+    {
         changes.frame.insert(FrameChangeMask::DIM);
     }
     // Raw clocks, grid helpers, and formatted HUD lines are producer inputs.
@@ -629,6 +637,15 @@ pub(crate) fn validate_snapshot(
             .iter()
             .all(|value| value.is_finite())
         || !snapshot.frame.pet_depth.is_finite()
+        || !snapshot.frame.pet_depth_cue.scale.is_finite()
+        || !snapshot.frame.pet_depth_cue.y_offset_points_up.is_finite()
+        || !snapshot.frame.pet_depth_cue.opacity.is_finite()
+        || !snapshot.frame.pet_depth_cue.saturation.is_finite()
+        || !snapshot
+            .frame
+            .gauge_fractions
+            .iter()
+            .all(|value| value.is_finite())
         || !snapshot.frame.breath_offset_y_points.is_finite()
         || !snapshot.frame.bob_offset_y_points.is_finite()
         || !snapshot.frame.dim_amount.is_finite()
@@ -666,6 +683,14 @@ pub(crate) fn validate_snapshot(
         || !matches!(snapshot.frame.facing, -1 | 1)
         || !(0.0..=1.0).contains(&snapshot.frame.dim_amount)
         || !(-1.0..=1.0).contains(&snapshot.frame.pet_depth)
+        || snapshot.frame.pet_depth_cue.scale <= 0.0
+        || !(0.0..=1.0).contains(&snapshot.frame.pet_depth_cue.opacity)
+        || !(0.0..=1.0).contains(&snapshot.frame.pet_depth_cue.saturation)
+        || snapshot
+            .frame
+            .gauge_fractions
+            .iter()
+            .any(|value| !(0.0..=1.0).contains(value))
         || snapshot
             .frame
             .ambient_instances
@@ -709,6 +734,36 @@ pub(crate) fn validate_snapshot(
     if snapshot.content.prop_animation_states.len() != snapshot.topology.visible_props.len()
         || snapshot.content.tank_animation_states.len()
             != snapshot.topology.visible_tank_inhabitants.len()
+    {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
+    if snapshot.frame.gauge_levels
+        != snapshot
+            .frame
+            .gauge_fractions
+            .map(|value| super::GaugeLevelSnapshot::from_fraction(f64::from(value)))
+    {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
+    if snapshot.frame.dimmed != (snapshot.frame.dim_amount > 0.0) {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
+    if snapshot.frame.asleep && !snapshot.frame.calm {
+        return Err(SnapshotRejection::InconsistentIdentity);
+    }
+    let resolved_depth = crate::round::depth::resolve_smooth_depth(
+        snapshot.frame.pet_depth,
+        crate::round::depth::depth_lifecycle_scale(snapshot.frame.asleep, snapshot.frame.calm),
+    )
+    .map_err(|_| SnapshotRejection::InvalidValue)?;
+    if snapshot.frame.pet_depth_cue
+        != (super::DepthCue {
+            scale: resolved_depth.scale,
+            y_offset_points_up: -resolved_depth.perspective_y
+                * snapshot.topology.glyph_grid.cell_extent_points[1],
+            opacity: resolved_depth.atmosphere,
+            saturation: 1.0,
+        })
     {
         return Err(SnapshotRejection::InconsistentIdentity);
     }
@@ -1391,7 +1446,11 @@ impl CaptureLease<'_> {
         super::contract::CaptureSourceIdentity::new(
             self.template().generation_checksum,
             self.content_checksum(),
-            self.frame_checksum(),
+            // A lease can only reference an active generation, and activation requires the
+            // complete template/content/frame set to pass validation first.
+            self.frame()
+                .capture_source_checksum(self.template())
+                .expect("an active companion scene frame is already validated"),
         )
     }
 
@@ -1400,7 +1459,7 @@ impl CaptureLease<'_> {
         super::contract::CompanionCaptureStateAlias::resolve(
             snapshot.frame.helper_trouble,
             snapshot.frame.asleep,
-            snapshot.frame.dim_amount > 0.0,
+            snapshot.frame.dimmed,
             super::canonical_activity_pulse_state(snapshot).0,
         )
     }
@@ -2386,15 +2445,15 @@ mod tests {
     use crate::pet::generation::Species;
     use crate::presentation::companion_scene::{
         AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
-        AuthoredDepthSnapshot, CompanionGlyphGrid, CompanionLogicalLayout, CompanionSceneSnapshot,
-        ContentSnapshot, FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot, HudGlyphSnapshot,
-        LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot, PetLatticeSnapshot,
-        PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
-        PropTopologySnapshot, PropZoneSnapshot, RoomGlyphContentSnapshot, RoomGlyphFrameSnapshot,
-        RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot,
-        TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
-        TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
-        PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
+        AuthoredDepthSnapshot, CompanionDayPhase, CompanionGlyphGrid, CompanionLogicalLayout,
+        CompanionSceneSnapshot, ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot,
+        HudFrameSnapshot, HudGlyphSnapshot, LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot,
+        PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
+        PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomGlyphContentSnapshot,
+        RoomGlyphFrameSnapshot, RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot,
+        TankCellSnapshot, TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot,
+        TankTopologySnapshot, TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION,
+        COMPANION_SCENE_SCHEMA_VERSION, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
     };
     use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
     use std::sync::Arc;
@@ -2402,7 +2461,7 @@ mod tests {
     type SnapshotMutation = (&'static str, Box<dyn Fn(&mut CompanionSceneSnapshot)>);
 
     fn snapshot() -> Arc<CompanionSceneSnapshot> {
-        Arc::new(CompanionSceneSnapshot {
+        let mut snapshot = CompanionSceneSnapshot {
             schema_version: COMPANION_SCENE_SCHEMA_VERSION,
             privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
             topology: TopologySnapshot {
@@ -2447,6 +2506,7 @@ mod tests {
             content: ContentSnapshot {
                 mood: Mood::Happy,
                 room_weather: "clear",
+                day_phase: CompanionDayPhase::Day,
                 pet_lines: vec!["             ".to_owned(); usize::from(PET_LATTICE_HEIGHT)],
                 pet_roles: vec![PetRoleSpanSnapshot {
                     line_index: 0,
@@ -2513,12 +2573,21 @@ mod tests {
                 elapsed_ms: 1_000,
                 pet_anchor_points: [120.0, 140.0],
                 pet_depth: 0.5,
+                pet_depth_cue: DepthCue {
+                    scale: 1.06,
+                    y_offset_points_up: -1.8,
+                    opacity: 1.0,
+                    saturation: 1.0,
+                },
                 facing: 1,
                 breath_offset_y_points: 0.0,
                 bob_offset_y_points: 5.0,
                 asleep: false,
+                calm: false,
                 helper_trouble: false,
-                gauges: [GaugeLevelSnapshot::Medium; 4],
+                gauge_levels: [GaugeLevelSnapshot::Medium; 4],
+                gauge_fractions: [0.375; 4],
+                dimmed: false,
                 dim_amount: 0.0,
                 hud_lines: ["today".to_owned(), "daily".to_owned(), "pace".to_owned()],
                 room_glyphs: Vec::new(),
@@ -2539,7 +2608,29 @@ mod tests {
                     })
                     .collect(),
             },
-        })
+        };
+        set_pet_depth(&mut snapshot, 0.5);
+        Arc::new(snapshot)
+    }
+
+    fn set_pet_depth(snapshot: &mut CompanionSceneSnapshot, raw_depth: f32) {
+        snapshot.frame.pet_depth = raw_depth;
+        let resolved = crate::round::depth::resolve_smooth_depth(
+            raw_depth,
+            crate::round::depth::depth_lifecycle_scale(snapshot.frame.asleep, snapshot.frame.calm),
+        )
+        .unwrap();
+        snapshot.frame.pet_depth_cue = DepthCue {
+            scale: resolved.scale,
+            y_offset_points_up: -resolved.perspective_y
+                * snapshot.topology.glyph_grid.cell_extent_points[1],
+            opacity: resolved.atmosphere,
+            saturation: 1.0,
+        };
+    }
+
+    fn offset_pet_depth(snapshot: &mut CompanionSceneSnapshot, delta: f32) {
+        set_pet_depth(snapshot, snapshot.frame.pet_depth + delta);
     }
 
     fn classify(mutator: impl FnOnce(&mut CompanionSceneSnapshot)) -> SnapshotChangeSet {
@@ -2803,15 +2894,25 @@ mod tests {
                 opacity: 1.0,
             }
         ));
-        assert_class!(pet_depth, frame, |s| s.frame.pet_depth += 0.1);
+        assert_class!(pet_depth, frame, |s| offset_pet_depth(s, 0.1));
         assert_class!(facing, frame, |s| s.frame.facing = -1);
         assert_class!(breath, frame, |s| s.frame.breath_offset_y_points = 20.0);
         assert_class!(bob, frame, |s| s.frame.bob_offset_y_points += 0.1);
         assert_class!(asleep, frame, |s| s.frame.asleep = true);
         assert_class!(helper, frame, |s| s.frame.helper_trouble = true);
-        assert_class!(gauges, frame, |s| s.frame.gauges[0] =
+        assert_class!(gauge_levels, frame, |s| s.frame.gauge_levels[0] =
             GaugeLevelSnapshot::High);
-        assert_class!(dim, frame, |s| s.frame.dim_amount = 0.35);
+        assert_class!(gauge_fractions, frame, |s| s.frame.gauge_fractions[0] =
+            0.75);
+        assert_class!(day_phase, semantic, |s| s.content.day_phase =
+            CompanionDayPhase::Dusk);
+        assert_class!(calm, frame, |s| s.frame.calm = true);
+        assert_class!(depth_cue, frame, |s| s.frame.pet_depth_cue.scale = 1.01);
+        assert_class!(dim, frame, |s| {
+            s.frame.dimmed = true;
+            s.frame.dim_amount = 0.35;
+        });
+        assert_class!(dim_derivative, frame, |s| s.frame.dimmed = true);
         assert_class!(hud, ChangeFamilies::NONE, |s| s.frame.hud_lines[0] =
             "new".to_owned());
 
@@ -3047,14 +3148,30 @@ mod tests {
                     };
                 }),
             ),
-            ("pet transform", Box::new(|s| s.frame.pet_depth += 0.1)),
-            ("asleep", Box::new(|s| s.frame.asleep = true)),
+            ("pet transform", Box::new(|s| offset_pet_depth(s, 0.1))),
+            (
+                "asleep",
+                Box::new(|s| {
+                    s.frame.asleep = true;
+                    s.frame.calm = true;
+                    set_pet_depth(s, s.frame.pet_depth);
+                }),
+            ),
             ("helper", Box::new(|s| s.frame.helper_trouble = true)),
             (
                 "gauges",
-                Box::new(|s| s.frame.gauges[0] = GaugeLevelSnapshot::High),
+                Box::new(|s| {
+                    s.frame.gauge_levels[0] = GaugeLevelSnapshot::High;
+                    s.frame.gauge_fractions[0] = 0.75;
+                }),
             ),
-            ("dim", Box::new(|s| s.frame.dim_amount = 0.25)),
+            (
+                "dim",
+                Box::new(|s| {
+                    s.frame.dimmed = true;
+                    s.frame.dim_amount = 0.25;
+                }),
+            ),
         ];
         let base = snapshot();
         let key = SceneGenerationKey {
@@ -3100,7 +3217,7 @@ mod tests {
         assert!(mood.semantic().contains(SemanticChangeMask::MOOD_WEATHER));
         assert!(!mood.semantic().contains(SemanticChangeMask::PET_ART));
 
-        let pet_motion = classify(|s| s.frame.pet_depth += 0.1);
+        let pet_motion = classify(|s| offset_pet_depth(s, 0.1));
         assert!(pet_motion.frame().contains(FrameChangeMask::PET_TRANSFORM));
         let trouble = classify(|s| s.frame.helper_trouble = true);
         assert!(trouble
@@ -3279,7 +3396,8 @@ mod tests {
         let mut desired = (*generated_snapshot).clone();
         desired.content.palette.body[0] ^= 1;
         desired.content.prop_animation_states[0].motion_phase = Some(1);
-        desired.frame.gauges[0] = GaugeLevelSnapshot::High;
+        desired.frame.gauge_levels[0] = GaugeLevelSnapshot::High;
+        desired.frame.gauge_fractions[0] = 0.75;
         let desired = Arc::new(desired);
         commit_snapshot(&mut runtime, Arc::clone(&desired));
         runtime.rebase_ready_candidate().unwrap();
@@ -3322,6 +3440,7 @@ mod tests {
         assert_eq!(lease.frame_checksum(), expected.frame_checksum());
 
         let mut active_update = (*desired).clone();
+        active_update.frame.dimmed = true;
         active_update.frame.dim_amount = 0.25;
         active_update.content.prop_animation_states[0].origin_points[0] += 5.0;
         let active_update = Arc::new(active_update);
@@ -3348,7 +3467,7 @@ mod tests {
         runtime.complete_candidate(request.accept_generation(built).unwrap());
 
         let mut changed = (**runtime.snapshot()).clone();
-        changed.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut changed, 0.1);
         commit_snapshot(&mut runtime, Arc::new(changed));
         let pending = runtime.pending.as_mut().unwrap();
         let PendingPhase::Ready(candidate) = &mut pending.phase else {
@@ -3375,7 +3494,7 @@ mod tests {
         let before_version = runtime.active_version().unwrap();
         let before_generation = runtime.active.as_ref().unwrap().generation.clone();
         let mut target = (*before_snapshot).clone();
-        target.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut target, 0.1);
         let mut prepared = runtime.prepare_snapshot(Arc::new(target)).unwrap();
         Arc::make_mut(&mut prepared.snapshot).frame.pet_depth = f32::NAN;
         assert!(matches!(
@@ -3559,8 +3678,14 @@ mod tests {
             assert_coalesced_rebase(
                 phase,
                 vec![
-                    ("frame one", Box::new(|s| s.frame.pet_depth += 0.1)),
-                    ("frame two", Box::new(|s| s.frame.dim_amount = 0.25)),
+                    ("frame one", Box::new(|s| offset_pet_depth(s, 0.1))),
+                    (
+                        "frame two",
+                        Box::new(|s| {
+                            s.frame.dimmed = true;
+                            s.frame.dim_amount = 0.25;
+                        }),
+                    ),
                 ],
             );
             assert_coalesced_rebase(
@@ -3570,13 +3695,14 @@ mod tests {
                         "mixed one",
                         Box::new(|s| {
                             s.content.mood = Mood::Content;
-                            s.frame.pet_depth += 0.1;
+                            offset_pet_depth(s, 0.1);
                         }),
                     ),
                     (
                         "mixed two",
                         Box::new(|s| {
                             s.content.palette.eye[0] ^= 1;
+                            s.frame.dimmed = true;
                             s.frame.dim_amount = 0.25;
                         }),
                     ),
@@ -3585,8 +3711,8 @@ mod tests {
             assert_coalesced_rebase(
                 phase,
                 vec![
-                    ("forward", Box::new(|s| s.frame.pet_depth += 0.1)),
-                    ("revert", Box::new(|s| s.frame.pet_depth -= 0.1)),
+                    ("forward", Box::new(|s| offset_pet_depth(s, 0.1))),
+                    ("revert", Box::new(|s| offset_pet_depth(s, -0.1))),
                 ],
             );
         }
@@ -3755,7 +3881,7 @@ mod tests {
         let stale = runtime.prepare_snapshot(Arc::new(first)).unwrap();
         let mut latest = (*initial_snapshot).clone();
         latest.content.palette.eye[0] += 1;
-        latest.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut latest, 0.1);
         let latest = runtime.prepare_snapshot(Arc::new(latest)).unwrap();
         assert!(latest
             .changes()
@@ -3818,7 +3944,7 @@ mod tests {
         let request = take_start(commit_snapshot(&mut runtime, next));
         runtime.complete_candidate(request.accept());
         let mut frame = (**runtime.snapshot()).clone();
-        frame.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut frame, 0.1);
         commit_snapshot(&mut runtime, Arc::new(frame));
 
         runtime.rebase_ready_candidate().unwrap();
@@ -3834,12 +3960,12 @@ mod tests {
         let original_depth = runtime.snapshot().frame.pet_depth;
 
         let mut forward = (**runtime.snapshot()).clone();
-        forward.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut forward, 0.1);
         commit_snapshot(&mut runtime, Arc::new(forward));
         runtime.rebase_ready_candidate().unwrap();
 
         let mut backward = (**runtime.snapshot()).clone();
-        backward.frame.pet_depth = original_depth;
+        set_pet_depth(&mut backward, original_depth);
         commit_snapshot(&mut runtime, Arc::new(backward));
         runtime.rebase_ready_candidate().unwrap();
         let PendingPhase::Ready(candidate) = &runtime.pending.as_ref().unwrap().phase else {
@@ -3973,7 +4099,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<SnapshotChangeSet>(), 32);
         let mut runtime = runtime();
         let mut frame = (**runtime.snapshot()).clone();
-        frame.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut frame, 0.1);
         let next = Arc::new(frame);
         let prepared = runtime.prepare_snapshot(Arc::clone(&next)).unwrap();
         assert!(Arc::ptr_eq(prepared.snapshot(), &next));
@@ -4099,6 +4225,13 @@ mod tests {
             Box::new(|s| s.privacy.surface = PresentationSurface::WatchTui),
             Box::new(|s| s.privacy.source_names_visible = true),
             Box::new(|s| s.frame.pet_depth = f32::NAN),
+            Box::new(|s| s.frame.pet_depth_cue.scale += 0.01),
+            Box::new(|s| s.frame.pet_depth_cue.y_offset_points_up += 0.01),
+            Box::new(|s| s.frame.pet_depth_cue.opacity -= 0.01),
+            Box::new(|s| s.frame.pet_depth_cue.saturation -= 0.01),
+            Box::new(|s| s.frame.calm = true),
+            Box::new(|s| s.frame.asleep = true),
+            Box::new(|s| s.frame.dimmed = true),
             Box::new(|s| s.topology.glyph_grid.cell_extent_points[0] = 0.0),
             Box::new(|s| s.topology.glyph_grid.cell_extent_points[1] = f32::NAN),
             Box::new(|s| {
@@ -4167,6 +4300,50 @@ mod tests {
     }
 
     #[test]
+    fn resolved_depth_and_calm_are_canonical_snapshot_identity() {
+        let base = snapshot();
+        assert_eq!(validate_snapshot(&base), Ok(()));
+
+        let cases: Vec<SnapshotMutation> = vec![
+            (
+                "scale",
+                Box::new(|snapshot| snapshot.frame.pet_depth_cue.scale += 0.01),
+            ),
+            (
+                "perspective",
+                Box::new(|snapshot| {
+                    snapshot.frame.pet_depth_cue.y_offset_points_up += 0.01;
+                }),
+            ),
+            (
+                "atmosphere",
+                Box::new(|snapshot| snapshot.frame.pet_depth_cue.opacity -= 0.01),
+            ),
+            (
+                "depth-saturation",
+                Box::new(|snapshot| snapshot.frame.pet_depth_cue.saturation -= 0.01),
+            ),
+            (
+                "calm lifecycle",
+                Box::new(|snapshot| snapshot.frame.calm = true),
+            ),
+            (
+                "asleep implies calm",
+                Box::new(|snapshot| snapshot.frame.asleep = true),
+            ),
+        ];
+        for (name, mutate) in cases {
+            let mut invalid = (*base).clone();
+            mutate(&mut invalid);
+            assert_eq!(
+                validate_snapshot(&invalid),
+                Err(SnapshotRejection::InconsistentIdentity),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn every_owned_counter_overflow_is_typed_and_non_mutating() {
         let mut layout_runtime = runtime();
         let initial = layout_runtime.active_version().unwrap();
@@ -4197,7 +4374,7 @@ mod tests {
         let mut frame_runtime = runtime();
         frame_runtime.reconciler.frame_revision = FrameRevision(u64::MAX);
         let mut frame = (**frame_runtime.snapshot()).clone();
-        frame.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut frame, 0.1);
         assert_eq!(
             frame_runtime.prepare_snapshot(Arc::new(frame)).unwrap_err(),
             RuntimeError::CounterOverflow(CounterKind::FrameRevision)
@@ -4849,7 +5026,7 @@ mod tests {
         let mut latest = None;
         for step in 0..10 {
             let mut next = (**runtime.snapshot()).clone();
-            next.frame.pet_depth = 0.5 + step as f32 * 0.01;
+            set_pet_depth(&mut next, 0.5 + step as f32 * 0.01);
             if step == 9 {
                 next.topology.pet.stage = Stage::S4;
             }
@@ -4877,7 +5054,7 @@ mod tests {
         let before = runtime.active_version();
         let before_snapshot = Arc::clone(runtime.snapshot());
         let mut hidden = (*before_snapshot).clone();
-        hidden.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut hidden, 0.1);
         let hidden = Arc::new(hidden);
         runtime
             .coalesce_hidden_snapshot(Arc::clone(&hidden))
@@ -4899,7 +5076,7 @@ mod tests {
         runtime.set_hidden();
         let prepared = runtime.prepare_reveal().unwrap();
         let mut late = (**runtime.snapshot()).clone();
-        late.frame.pet_depth += 0.1;
+        offset_pet_depth(&mut late, 0.1);
         let late = Arc::new(late);
         runtime.coalesce_hidden_snapshot(Arc::clone(&late)).unwrap();
 
@@ -4965,13 +5142,95 @@ mod tests {
             super::super::contract::CaptureSourceIdentity::new(
                 lease.template().generation_checksum,
                 lease.content_checksum(),
-                lease.frame_checksum(),
+                lease
+                    .frame()
+                    .capture_source_checksum(lease.template())
+                    .unwrap(),
             )
         );
         assert_eq!(
             lease.logical_state_alias(),
             super::super::contract::CompanionCaptureStateAlias::Normal
         );
+    }
+
+    #[test]
+    fn capture_identity_quantizes_private_gauge_and_dim_detail() {
+        fn identity_for(
+            gauge_fraction: f32,
+            dim_amount: f32,
+        ) -> (
+            super::super::contract::CaptureSourceIdentity,
+            String,
+            String,
+            u64,
+        ) {
+            let mut source = (*snapshot()).clone();
+            source.frame.gauge_fractions = [gauge_fraction; 4];
+            source.frame.gauge_levels =
+                [GaugeLevelSnapshot::from_fraction(f64::from(gauge_fraction)); 4];
+            source.frame.dimmed = dim_amount > 0.0;
+            source.frame.dim_amount = dim_amount;
+            let runtime = CompanionSceneRuntimeState::with_active(Arc::new(source)).unwrap();
+            let lease = runtime.capture_lease().unwrap();
+            let identity = lease.source_identity();
+            let artifacts = super::super::contract::SceneArtifacts::try_from_parts(
+                lease.template(),
+                lease.content(),
+                lease.frame(),
+            )
+            .unwrap();
+            (
+                identity,
+                serde_json::to_string(&identity).unwrap(),
+                serde_json::to_string(&artifacts).unwrap(),
+                lease.frame_checksum(),
+            )
+        }
+
+        let (first, first_json, first_artifact_json, first_internal_checksum) =
+            identity_for(0.31, 0.1);
+        let (
+            same_public_state,
+            same_public_json,
+            same_public_artifact_json,
+            second_internal_checksum,
+        ) = identity_for(0.49, 0.9);
+        assert_ne!(
+            first_internal_checksum, second_internal_checksum,
+            "retained rendering must keep exact frame identity"
+        );
+        assert_eq!(first, same_public_state);
+        assert_eq!(first_json, same_public_json);
+        assert_eq!(first_artifact_json, same_public_artifact_json);
+
+        let (different_gauge_band, _, different_gauge_artifact_json, _) = identity_for(0.51, 0.9);
+        assert_ne!(first, different_gauge_band);
+        assert_ne!(first_artifact_json, different_gauge_artifact_json);
+
+        let (not_dimmed, _, not_dimmed_artifact_json, _) = identity_for(0.31, 0.0);
+        assert_ne!(first, not_dimmed);
+        assert_ne!(first_artifact_json, not_dimmed_artifact_json);
+    }
+
+    #[test]
+    fn serialized_snapshot_exposes_only_boolean_dim_state() {
+        fn json_for(dim_amount: f32) -> String {
+            let mut source = (*snapshot()).clone();
+            source.frame.dimmed = dim_amount > 0.0;
+            source.frame.dim_amount = dim_amount;
+            assert_eq!(validate_snapshot(&source), Ok(()));
+            serde_json::to_string(&source).unwrap()
+        }
+
+        let first_positive = json_for(0.123_456_79);
+        let second_positive = json_for(0.987_654_3);
+        assert_eq!(first_positive, second_positive);
+        assert!(!first_positive.contains("0.12345679"));
+        assert!(!second_positive.contains("0.9876543"));
+
+        let not_dimmed = json_for(0.0);
+        assert_ne!(first_positive, not_dimmed);
     }
 
     #[test]

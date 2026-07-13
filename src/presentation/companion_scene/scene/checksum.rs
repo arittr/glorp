@@ -339,6 +339,7 @@ pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGener
     }
     hash.u8(mood_content_tag(content.mood));
     hash.u8(weather_content_tag(content.weather));
+    hash.u8(day_phase_tag(content.day_phase));
     for slot in &content.pet_art_slots {
         hash.u16(slot.slot);
         match slot.glyph {
@@ -417,7 +418,35 @@ pub(super) fn checksum_frame(
     template: &SceneTemplate,
     frame: &SceneFrame,
 ) -> Result<u64, SceneGenerationError> {
-    let mut hash = Fnv1a64::domain(b"glorp.scene-frame.v2\0");
+    checksum_frame_with_projection(template, frame, FrameChecksumProjection::InternalExact)
+}
+
+impl SceneFrame {
+    pub(crate) fn capture_source_checksum(
+        &self,
+        template: &SceneTemplate,
+    ) -> Result<u64, SceneGenerationError> {
+        checksum_frame_with_projection(template, self, FrameChecksumProjection::CapturePrivacy)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FrameChecksumProjection {
+    InternalExact,
+    CapturePrivacy,
+}
+
+fn checksum_frame_with_projection(
+    template: &SceneTemplate,
+    frame: &SceneFrame,
+    projection: FrameChecksumProjection,
+) -> Result<u64, SceneGenerationError> {
+    let mut hash = Fnv1a64::domain(match projection {
+        FrameChecksumProjection::InternalExact => b"glorp.scene-frame.v2\0",
+        FrameChecksumProjection::CapturePrivacy => b"glorp.capture-frame.v1\0",
+    });
+    let capture_privacy = matches!(projection, FrameChecksumProjection::CapturePrivacy)
+        .then(|| CaptureFramePrivacyProjection::from_frame(frame));
     hash.u16(frame.schema_version);
     hash.u16(frame.renderer_schema_version);
     hash.f32(frame.camera.width_points)
@@ -443,8 +472,11 @@ pub(super) fn checksum_frame(
             .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
         hash.u32(node.node.0);
         encode_transform(&mut hash, node.local_transform)?;
-        hash.bool(node.visible);
-        hash.f32(node.opacity)
+        let (visible, opacity) = capture_privacy.map_or((node.visible, node.opacity), |privacy| {
+            privacy.node_state(template_node.alias.as_str(), node.visible, node.opacity)
+        });
+        hash.bool(visible);
+        hash.f32(opacity)
             .map_err(|_| SceneGenerationError::NonFinite)?;
         previous_alias = Some(&template_node.alias);
     }
@@ -493,12 +525,25 @@ pub(super) fn checksum_frame(
         hash.f32(slot.opacity)
             .map_err(|_| SceneGenerationError::NonFinite)?;
     }
-    for gauge in frame.gauges {
-        hash.f32(gauge)
-            .map_err(|_| SceneGenerationError::NonFinite)?;
+    match capture_privacy {
+        Some(privacy) => {
+            for gauge in privacy.gauges() {
+                hash.u8(gauge_level_tag(gauge));
+            }
+        }
+        None => {
+            for gauge in frame.gauges {
+                hash.f32(gauge)
+                    .map_err(|_| SceneGenerationError::NonFinite)?;
+            }
+        }
     }
-    hash.f32(frame.dim_amount)
-        .map_err(|_| SceneGenerationError::NonFinite)?;
+    match capture_privacy {
+        Some(privacy) => hash.bool(privacy.dimmed()),
+        None => hash
+            .f32(frame.dim_amount)
+            .map_err(|_| SceneGenerationError::NonFinite)?,
+    }
     hash.usize(frame.lights.len());
     for light in &frame.lights {
         for value in light.direction {
@@ -513,6 +558,25 @@ pub(super) fn checksum_frame(
             .map_err(|_| SceneGenerationError::NonFinite)?;
     }
     Ok(hash.finish())
+}
+
+fn gauge_level_tag(level: super::super::GaugeLevelSnapshot) -> u8 {
+    match level {
+        super::super::GaugeLevelSnapshot::Empty => 0,
+        super::super::GaugeLevelSnapshot::Low => 1,
+        super::super::GaugeLevelSnapshot::Medium => 2,
+        super::super::GaugeLevelSnapshot::High => 3,
+        super::super::GaugeLevelSnapshot::Full => 4,
+    }
+}
+
+fn day_phase_tag(phase: super::super::CompanionDayPhase) -> u8 {
+    match phase {
+        super::super::CompanionDayPhase::Dawn => 0,
+        super::super::CompanionDayPhase::Day => 1,
+        super::super::CompanionDayPhase::Dusk => 2,
+        super::super::CompanionDayPhase::Night => 3,
+    }
 }
 
 fn encode_transform(hash: &mut Fnv1a64, transform: Transform3) -> Result<(), SceneGenerationError> {

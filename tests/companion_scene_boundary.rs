@@ -20,7 +20,7 @@ const FORBIDDEN_RENDERER_IDENTIFIERS: &[&str] = &[
 
 const FORBIDDEN_ADAPTER_DEPENDENCIES: &[&str] = &["WatchViewModel"];
 
-const ALLOWED_INPUT_TUI_MODULES: &[&str] = &["life", "room", "view_model", "wander"];
+const ALLOWED_INPUT_TUI_MODULES: &[&str] = &["day", "life", "room", "view_model", "wander"];
 
 const FORBIDDEN_IMPORT_ROOTS: &[&str] = &[
     "crate::presentation::smooth",

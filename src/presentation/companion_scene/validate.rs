@@ -1,4 +1,5 @@
 use super::scene::*;
+use super::DepthCue;
 use super::COMPANION_RENDERER_SCHEMA_VERSION;
 use crate::presentation::privacy::PresentationSurface;
 use std::collections::{HashMap, HashSet};
@@ -575,7 +576,6 @@ pub fn validate_frame_delta(
     if let Some(dim_amount) = delta.dim_amount {
         validate_unit_interval(dim_amount)?;
     }
-
     let mut node_overlay = [None; MAX_SCENE_NODES];
     let mut changed_dense_indices = [None; MAX_SCENE_NODES];
     let mut affected_path_seen = [false; MAX_STATIC_PRIMITIVES];
@@ -2208,7 +2208,7 @@ mod tests {
     }
 
     #[test]
-    fn full_validation_rejects_non_finite_cues_and_zero_quaternions() {
+    fn full_validation_rejects_non_finite_authored_cues_and_zero_quaternions() {
         let mut template = SceneFixture::valid().template;
         template.nodes[0].depth_cue.opacity = f32::NAN;
         assert_eq!(

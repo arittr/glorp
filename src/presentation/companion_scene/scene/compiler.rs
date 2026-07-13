@@ -37,6 +37,7 @@ impl SceneGenerationData {
         content.palette = None;
         content.mood = None;
         content.weather = None;
+        content.day_phase = None;
         content.pet_art_slots.clear();
         content.room_glyph_slots.clear();
         content.prop_slots.clear();
@@ -87,6 +88,7 @@ impl SceneGenerationData {
                 crate::game::metabolism::Mood::Wilted => MoodContentKind::Wilted,
             });
             content.weather = Some(weather_content(snapshot.content.room_weather)?);
+            content.day_phase = Some(snapshot.content.day_phase);
         }
         if semantic
             .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::PET_ART)
@@ -181,6 +183,18 @@ impl SceneGenerationData {
                 local_transform: pet_transform(snapshot),
                 ..node
             });
+            if snapshot.frame.pet_depth_cue != self.source_snapshot.frame.pet_depth_cue
+                && !frame_mask.contains(
+                    crate::presentation::companion_scene::runtime::FrameChangeMask::STATUS_VISIBILITY,
+                )
+            {
+                project_pet_attached_node_deltas(
+                    snapshot,
+                    &self.template,
+                    &self.frame,
+                    &mut frame.nodes,
+                )?;
+            }
         }
         if frame_mask
             .contains(crate::presentation::companion_scene::runtime::FrameChangeMask::ROOM_GLYPHS)
@@ -240,8 +254,13 @@ impl SceneGenerationData {
                     .copied()
                     .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
                 match name {
-                    "pet.body" => node.opacity = if snapshot.frame.asleep { 0.65 } else { 1.0 },
-                    "pet.particles" => node.visible = !snapshot.frame.asleep,
+                    "pet.body" => {
+                        node.opacity = pet_body_opacity(snapshot);
+                    }
+                    "pet.particles" => {
+                        node.visible = !snapshot.frame.asleep;
+                        node.opacity = snapshot.frame.pet_depth_cue.opacity;
+                    }
                     "chrome.status" => {
                         node.visible = status_visible;
                         node.opacity = status_opacity;
@@ -297,7 +316,7 @@ impl SceneGenerationData {
         if frame_mask
             .contains(crate::presentation::companion_scene::runtime::FrameChangeMask::GAUGES)
         {
-            frame.gauges = Some(snapshot.frame.gauges.map(gauge_value));
+            frame.gauges = Some(snapshot.frame.gauge_fractions);
         }
         if frame_mask.contains(crate::presentation::companion_scene::runtime::FrameChangeMask::DIM)
         {
@@ -553,12 +572,50 @@ fn pet_transform(
     ];
     let mut transform = Transform3::translated([
         snapshot.frame.pet_anchor_points[0],
-        snapshot.topology.layout.height_points - y - pet_extent[1],
+        snapshot.topology.layout.height_points - y - pet_extent[1]
+            + snapshot.frame.pet_depth_cue.y_offset_points_up,
         snapshot.frame.pet_depth,
     ]);
-    transform.scale[0] = f32::from(snapshot.frame.facing);
+    transform.scale[0] = f32::from(snapshot.frame.facing) * snapshot.frame.pet_depth_cue.scale;
+    transform.scale[1] = snapshot.frame.pet_depth_cue.scale;
     transform.pivot = [pet_extent[0] * 0.5, pet_extent[1] * 0.5, 0.0];
     transform
+}
+
+fn pet_body_opacity(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+) -> f32 {
+    let lifecycle_opacity = if snapshot.frame.asleep { 0.65 } else { 1.0 };
+    lifecycle_opacity * snapshot.frame.pet_depth_cue.opacity
+}
+
+fn project_pet_attached_node_deltas(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    template: &SceneTemplate,
+    current_frame: &SceneFrame,
+    output: &mut Vec<NodeFrameState>,
+) -> Result<(), SceneGenerationError> {
+    for name in ["pet.body", "pet.particles"] {
+        let node_id = template
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == name)
+            .map(|node| node.id)
+            .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+        let mut node = current_frame
+            .nodes
+            .iter()
+            .find(|node| node.node == node_id)
+            .copied()
+            .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+        node.opacity = match name {
+            "pet.body" => pet_body_opacity(snapshot),
+            "pet.particles" => snapshot.frame.pet_depth_cue.opacity,
+            _ => unreachable!("closed pet-attached node set"),
+        };
+        output.push(node);
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -642,17 +699,6 @@ fn project_tank_frame_delta(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn gauge_value(gauge: crate::presentation::companion_scene::GaugeLevelSnapshot) -> f32 {
-    match gauge {
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Empty => 0.0,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Low => 0.125,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Medium => 0.375,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::High => 0.75,
-        crate::presentation::companion_scene::GaugeLevelSnapshot::Full => 1.0,
-    }
-}
-
 #[allow(dead_code)] // Used by the Task 8 same-generation commit seam above.
 fn apply_content_delta(content: &mut SceneContent, delta: &ContentDelta) {
     if let Some(palette) = delta.palette {
@@ -663,6 +709,9 @@ fn apply_content_delta(content: &mut SceneContent, delta: &ContentDelta) {
     }
     if let Some(weather) = delta.weather {
         content.weather = weather;
+    }
+    if let Some(day_phase) = delta.day_phase {
+        content.day_phase = day_phase;
     }
     for changed in &delta.pet_art_slots {
         content.pet_art_slots[usize::from(changed.slot)] = *changed;
@@ -1390,6 +1439,7 @@ fn build_content(
         crate::game::metabolism::Mood::Wilted => MoodContentKind::Wilted,
     };
     content.weather = weather_content(snapshot.content.room_weather)?;
+    content.day_phase = snapshot.content.day_phase;
     let mut occupied_roles = [false; MAX_PET_ART_SLOTS];
     for span in &snapshot.content.pet_roles {
         if span.line_index >= crate::presentation::companion_scene::PET_LATTICE_HEIGHT
@@ -1803,14 +1853,14 @@ fn build_frame(
         "pet.body",
         None,
         None,
-        Some(if snapshot.frame.asleep { 0.65 } else { 1.0 }),
+        Some(pet_body_opacity(snapshot)),
     )?;
     set_node(
         &mut frame,
         "pet.particles",
         None,
         Some(!snapshot.frame.asleep),
-        None,
+        Some(snapshot.frame.pet_depth_cue.opacity),
     )?;
     let (status_visible, status_opacity) = super::super::canonical_activity_pulse_state(snapshot);
     set_node(
@@ -1937,7 +1987,7 @@ fn build_frame(
             opacity: if occupied { source.opacity } else { 0.0 },
         };
     }
-    frame.gauges = snapshot.frame.gauges.map(gauge_value);
+    frame.gauges = snapshot.frame.gauge_fractions;
     frame.dim_amount = snapshot.frame.dim_amount;
     frame.lights.clear();
     Ok(frame)

@@ -1,14 +1,14 @@
 use super::{
     AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
-    AuthoredDepthSnapshot, CompanionSceneProjectionError, CompanionSceneProjectionInput,
-    CompanionSceneSnapshot, ContentSnapshot, FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot,
-    HudGlyphSnapshot, PaletteSnapshot, PetLatticeSnapshot, PetRoleSpanSnapshot,
-    PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot, PropTopologySnapshot,
-    PropZoneSnapshot, RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot,
-    TankCellSnapshot, TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
-    TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
-    MAX_VISIBLE_PROPS, MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS,
-    PET_LATTICE_WIDTH,
+    AuthoredDepthSnapshot, CompanionDayPhase, CompanionSceneProjectionError,
+    CompanionSceneProjectionInput, CompanionSceneSnapshot, ContentSnapshot, DepthCue,
+    FrameSnapshot, GaugeLevelSnapshot, HudFrameSnapshot, HudGlyphSnapshot, PaletteSnapshot,
+    PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
+    PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
+    TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot,
+    TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
+    COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS,
+    MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
 };
 use crate::game::habitat::{HabitatPetLayer, HabitatPropZone, TankLifeRouteFamily};
 use crate::pet::palette::{body_glow, ResolvedPalette, Rgb};
@@ -17,6 +17,7 @@ use crate::presentation::privacy::{PresentationSurface, PrivacyProjection};
 use crate::round::hud::{
     companion_pace_fraction, daily_fraction_for_gauge, daily_overage_marker_fraction,
 };
+use crate::tui::day::DayPhase;
 use crate::tui::room::{derive_room_life_profile, RoomBiomeTag, RoomLifeProfile, RoomWeatherLayer};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
 use time::{Duration, OffsetDateTime};
@@ -200,7 +201,14 @@ impl CompanionSceneSnapshot {
             project_room_glyphs(&room_profile, vm, motion, input, cell_extent_points)?;
         let (hud_glyphs, hud_instances) = project_hud_slots(&hud, layout);
         let asleep = vm.day_context.asleep;
-        let dimmed = asleep || vm.life_profile.calm_mode;
+        let calm = vm.life_profile.calm_mode || asleep;
+        let dimmed = asleep || calm;
+        let gauge_fractions = project_gauge_fractions(vm);
+        let depth = crate::round::depth::resolve_smooth_depth(
+            motion.normalized_depth,
+            crate::round::depth::depth_lifecycle_scale(asleep, calm),
+        )
+        .map_err(|_| CompanionSceneProjectionError::InvalidDepthProjection)?;
 
         Ok(Self {
             schema_version: COMPANION_SCENE_SCHEMA_VERSION,
@@ -233,6 +241,7 @@ impl CompanionSceneSnapshot {
             content: ContentSnapshot {
                 mood: vm.pet_render.mood,
                 room_weather: room_weather_alias(room_profile.room_weather),
+                day_phase: companion_day_phase(vm.day_context.day_phase),
                 pet_lines,
                 pet_roles,
                 room_glyphs,
@@ -247,29 +256,24 @@ impl CompanionSceneSnapshot {
                 elapsed_ms,
                 pet_anchor_points: motion.motion_top_left_points,
                 pet_depth: motion.normalized_depth,
+                pet_depth_cue: DepthCue {
+                    scale: depth.scale,
+                    y_offset_points_up: -depth.perspective_y * cell_extent_points[1],
+                    opacity: depth.atmosphere,
+                    saturation: 1.0,
+                },
                 facing: motion.facing,
                 breath_offset_y_points: f32::from(motion.breath_offset_y_cells)
                     * (layout.height_points / f32::from(input.grid_rows.max(1))),
                 bob_offset_y_points: motion.bob_offset_y_cells
                     * (layout.height_points / f32::from(input.grid_rows.max(1))),
                 asleep,
+                calm,
                 helper_trouble: helper_health == SemanticHelperHealth::Trouble,
-                gauges: [
-                    gauge_level(if vm.progress.is_max_stage {
-                        1.0
-                    } else {
-                        f64::from(vm.progress.fraction)
-                    }),
-                    gauge_level(daily_fraction_for_gauge(
-                        vm.daily_comparison.fraction_of_yesterday,
-                    )),
-                    gauge_level(daily_overage_marker_fraction(
-                        vm.daily_comparison.fraction_of_yesterday,
-                    )),
-                    gauge_level(companion_pace_fraction(
-                        vm.rate_momentum.pulse.current_tokens,
-                    )),
-                ],
+                gauge_levels: gauge_fractions
+                    .map(|value| GaugeLevelSnapshot::from_fraction(f64::from(value))),
+                gauge_fractions,
+                dimmed,
                 dim_amount: if dimmed { 0.35 } else { 0.0 },
                 hud_lines: [hud.today_total, hud.daily_percent, hud.pace],
                 room_glyphs: room_glyph_frames,
@@ -280,13 +284,33 @@ impl CompanionSceneSnapshot {
     }
 }
 
-fn gauge_level(value: f64) -> GaugeLevelSnapshot {
-    let value = if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    GaugeLevelSnapshot::from_fraction(value)
+fn project_gauge_fractions(vm: &WatchViewModel) -> [f32; 4] {
+    [
+        if vm.progress.is_max_stage {
+            1.0
+        } else {
+            vm.progress.fraction
+        },
+        daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday) as f32,
+        daily_overage_marker_fraction(vm.daily_comparison.fraction_of_yesterday) as f32,
+        companion_pace_fraction(vm.rate_momentum.pulse.current_tokens) as f32,
+    ]
+    .map(|value| {
+        if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    })
+}
+
+const fn companion_day_phase(phase: DayPhase) -> CompanionDayPhase {
+    match phase {
+        DayPhase::Dawn => CompanionDayPhase::Dawn,
+        DayPhase::Day => CompanionDayPhase::Day,
+        DayPhase::Dusk => CompanionDayPhase::Dusk,
+        DayPhase::Night => CompanionDayPhase::Night,
+    }
 }
 
 pub(super) fn companion_motion_input(
@@ -852,8 +876,8 @@ mod tests {
     use crate::pet::render::{render_pet, AnimationFrame, PaletteRoleName, StyledSegment};
     use crate::presentation::companion_scene::{
         CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionError,
-        CompanionSceneProjectionInput, CompanionSceneSnapshot, PropAnimationSnapshot,
-        PET_LATTICE_HEIGHT, PET_LATTICE_WIDTH,
+        CompanionSceneProjectionInput, CompanionSceneSnapshot, GaugeLevelSnapshot,
+        PropAnimationSnapshot, PET_LATTICE_HEIGHT, PET_LATTICE_WIDTH,
     };
     use crate::tui::view_model::WatchViewModel;
     use time::macros::datetime;
@@ -1219,12 +1243,36 @@ mod tests {
         )
         .expect("privacy-aware gauges");
         let json = serde_json::to_string(&snapshot).expect("serialize privacy-aware gauges");
+        let debug = format!("{snapshot:?}");
+
+        assert_eq!(
+            snapshot.frame.gauge_fractions,
+            [
+                vm.progress.fraction,
+                exact_daily,
+                crate::round::hud::daily_overage_marker_fraction(
+                    vm.daily_comparison.fraction_of_yesterday,
+                ) as f32,
+                exact_pace,
+            ]
+        );
+        assert_eq!(
+            snapshot.frame.gauge_levels,
+            snapshot
+                .frame
+                .gauge_fractions
+                .map(|value| GaugeLevelSnapshot::from_fraction(f64::from(value)))
+        );
 
         for exact in [vm.progress.fraction, exact_daily, exact_pace] {
             let exact = serde_json::to_string(&exact).unwrap();
             assert!(
                 !json.contains(&exact),
                 "serialized exact live gauge {exact}: {json}"
+            );
+            assert!(
+                !debug.contains(&exact),
+                "debug output leaked exact live gauge {exact}: {debug}"
             );
         }
     }
@@ -1698,6 +1746,18 @@ mod tests {
             );
             assert_eq!(snapshot.frame.pet_depth, depth);
             assert_eq!(snapshot.frame.pet_depth, shared.normalized_depth);
+            let expected = crate::round::depth::resolve_smooth_depth(
+                depth,
+                crate::round::depth::depth_lifecycle_scale(false, false),
+            )
+            .unwrap();
+            assert_eq!(snapshot.frame.pet_depth_cue.scale, expected.scale);
+            assert_eq!(
+                snapshot.frame.pet_depth_cue.y_offset_points_up,
+                -expected.perspective_y * snapshot.topology.glyph_grid.cell_extent_points[1]
+            );
+            assert_eq!(snapshot.frame.pet_depth_cue.opacity, expected.atmosphere);
+            assert_eq!(snapshot.frame.pet_depth_cue.saturation, 1.0);
             assert_eq!(
                 snapshot.frame.pet_anchor_points,
                 shared.motion_top_left_points

@@ -1,3 +1,4 @@
+use super::DepthCue;
 use crate::presentation::privacy::PrivacyProjection;
 use std::fmt;
 use std::ops::Mul;
@@ -317,23 +318,6 @@ impl Transform3 {
             * Mat4::scale(self.scale)
             * Mat4::translation(negative_pivot))
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
-pub struct DepthCue {
-    pub scale: f32,
-    pub y_offset_points_up: f32,
-    pub opacity: f32,
-    pub saturation: f32,
-}
-
-impl DepthCue {
-    pub const NEUTRAL: Self = Self {
-        scale: 1.0,
-        y_offset_points_up: 0.0,
-        opacity: 1.0,
-        saturation: 1.0,
-    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -951,6 +935,7 @@ pub struct SceneContent {
     pub palette: [[u8; 3]; 8],
     pub mood: MoodContentKind,
     pub weather: WeatherContentKind,
+    pub day_phase: super::CompanionDayPhase,
     pub pet_art_slots: Vec<PetArtSlot>,
     pub room_glyph_slots: Vec<RoomGlyphContentSlot>,
     pub prop_slots: Vec<PropContentSlot>,
@@ -975,6 +960,7 @@ impl SceneContent {
             palette: [[0; 3]; 8],
             mood: MoodContentKind::Content,
             weather: WeatherContentKind::Clear,
+            day_phase: super::CompanionDayPhase::Day,
             pet_art_slots: (0..MAX_PET_ART_SLOTS)
                 .map(|slot| PetArtSlot {
                     slot: slot as u16,
@@ -1009,12 +995,24 @@ impl SceneContent {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct NodeFrameState {
     pub node: NodeId,
     pub local_transform: Transform3,
     pub visible: bool,
     pub opacity: f32,
+}
+
+impl fmt::Debug for NodeFrameState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NodeFrameState")
+            .field("node", &self.node)
+            .field("local_transform", &self.local_transform)
+            .field("visible", &self.visible)
+            .field("opacity", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -1152,6 +1150,44 @@ impl SceneFrame {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CaptureFramePrivacyProjection {
+    gauges: [super::GaugeLevelSnapshot; 4],
+    dimmed: bool,
+}
+
+impl CaptureFramePrivacyProjection {
+    pub(crate) fn from_frame(frame: &SceneFrame) -> Self {
+        Self {
+            gauges: frame
+                .gauges
+                .map(|gauge| super::GaugeLevelSnapshot::from_fraction(f64::from(gauge))),
+            dimmed: frame.dim_amount > 0.0,
+        }
+    }
+
+    pub(crate) const fn gauges(self) -> [super::GaugeLevelSnapshot; 4] {
+        self.gauges
+    }
+
+    pub(crate) const fn dimmed(self) -> bool {
+        self.dimmed
+    }
+
+    pub(crate) fn node_state(
+        self,
+        canonical_alias: &str,
+        visible: bool,
+        opacity: f32,
+    ) -> (bool, f32) {
+        if canonical_alias == "chrome.dim" {
+            (self.dimmed, if self.dimmed { 1.0 } else { 0.0 })
+        } else {
+            (visible, opacity)
+        }
+    }
+}
+
 impl fmt::Debug for SceneFrame {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1159,12 +1195,12 @@ impl fmt::Debug for SceneFrame {
             .field("schema_version", &self.schema_version)
             .field("renderer_schema_version", &self.renderer_schema_version)
             .field("camera", &self.camera)
-            .field("nodes", &self.nodes)
-            .field("room_glyph_slots", &self.room_glyph_slots)
-            .field("prop_slots", &self.prop_slots)
-            .field("tank_slots", &self.tank_slots)
-            .field("ambient_slots", &self.ambient_slots)
-            .field("hud_slots", &self.hud_slots)
+            .field("node_count", &self.nodes.len())
+            .field("room_glyph_slot_count", &self.room_glyph_slots.len())
+            .field("prop_slot_count", &self.prop_slots.len())
+            .field("tank_slot_count", &self.tank_slots.len())
+            .field("ambient_slot_count", &self.ambient_slots.len())
+            .field("hud_slot_count", &self.hud_slots.len())
             .field("gauges", &"<redacted>")
             .field("dim_amount", &"<redacted>")
             .field("light_count", &self.lights.len())
@@ -1182,6 +1218,7 @@ pub struct ContentDelta {
     pub palette: Option<[[u8; 3]; 8]>,
     pub mood: Option<MoodContentKind>,
     pub weather: Option<WeatherContentKind>,
+    pub day_phase: Option<super::CompanionDayPhase>,
     pub pet_art_slots: Vec<PetArtSlot>,
     pub room_glyph_slots: Vec<RoomGlyphContentSlot>,
     pub prop_slots: Vec<PropContentSlot>,
@@ -1201,6 +1238,7 @@ impl ContentDelta {
             palette: None,
             mood: None,
             weather: None,
+            day_phase: None,
             pet_art_slots: Vec::new(),
             room_glyph_slots: Vec::new(),
             prop_slots: Vec::new(),
@@ -1237,7 +1275,12 @@ impl fmt::Debug for FrameDelta {
             .field("schema_version", &self.schema_version)
             .field("renderer_schema_version", &self.renderer_schema_version)
             .field("camera", &self.camera)
-            .field("nodes", &self.nodes)
+            .field("node_count", &self.nodes.len())
+            .field("room_glyph_slot_count", &self.room_glyph_slots.len())
+            .field("prop_slot_count", &self.prop_slots.len())
+            .field("tank_slot_count", &self.tank_slots.len())
+            .field("ambient_slot_count", &self.ambient_slots.len())
+            .field("hud_slot_count", &self.hud_slots.len())
             .field("gauges", &self.gauges.map(|_| "<redacted>"))
             .field("dim_amount", &self.dim_amount.map(|_| "<redacted>"))
             .field("light_count", &self.lights.len())
@@ -1267,7 +1310,7 @@ impl FrameDelta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SceneGenerationData {
     generation_key: super::SceneGenerationKey,
     source_revisions: super::AppliedRevisions,
@@ -1280,6 +1323,34 @@ pub struct SceneGenerationData {
     frame_checksum: u64,
     pub(crate) delta_scratch: SceneDeltaScratch,
     accepted: super::validate::AcceptedSceneState,
+}
+
+impl fmt::Debug for SceneGenerationData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SceneGenerationData")
+            .field("generation_key", &self.generation_key)
+            .field("source_revisions", &self.source_revisions)
+            .field("scene_schema_version", &self.template.schema_version)
+            .field(
+                "renderer_schema_version",
+                &self.template.renderer_schema_version,
+            )
+            .field("template_checksum", &self.template.generation_checksum)
+            .field("content_checksum", &self.content_checksum)
+            .field("frame_checksum", &"<redacted>")
+            .field(
+                "capture_frame_checksum",
+                &self.frame.capture_source_checksum(&self.template).ok(),
+            )
+            .field("node_count", &self.template.nodes.len())
+            .field("primitive_count", &self.template.primitives.len())
+            .field("light_count", &self.frame.lights.len())
+            .field("source_snapshot", &"<redacted exact frame>")
+            .field("frame", &"<redacted exact frame>")
+            .field("delta_scratch", &"<redacted exact frame deltas>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1300,6 +1371,7 @@ impl SceneDeltaScratch {
                 palette: None,
                 mood: None,
                 weather: None,
+                day_phase: None,
                 pet_art_slots: Vec::with_capacity(MAX_PET_ART_SLOTS),
                 room_glyph_slots: Vec::with_capacity(MAX_ROOM_GLYPH_SLOTS),
                 prop_slots: Vec::with_capacity(MAX_VISIBLE_PROPS),
@@ -1449,6 +1521,7 @@ impl SceneFixture {
                 palette: [[0; 3]; 8],
                 mood: MoodContentKind::Content,
                 weather: WeatherContentKind::Clear,
+                day_phase: super::CompanionDayPhase::Day,
                 pet_art_slots: (0..MAX_PET_ART_SLOTS)
                     .map(|slot| PetArtSlot {
                         slot: slot as u16,
@@ -1524,6 +1597,27 @@ mod tests {
             layout: super::super::LayoutGeneration(value + 1),
             resources: super::super::ResourceGeneration(value + 2),
         }
+    }
+
+    fn set_depth_lifecycle(
+        snapshot: &mut super::super::CompanionSceneSnapshot,
+        asleep: bool,
+        calm: bool,
+    ) {
+        snapshot.frame.asleep = asleep;
+        snapshot.frame.calm = calm || asleep;
+        let resolved = crate::round::depth::resolve_smooth_depth(
+            snapshot.frame.pet_depth,
+            crate::round::depth::depth_lifecycle_scale(snapshot.frame.asleep, snapshot.frame.calm),
+        )
+        .unwrap();
+        snapshot.frame.pet_depth_cue = super::super::DepthCue {
+            scale: resolved.scale,
+            y_offset_points_up: -resolved.perspective_y
+                * snapshot.topology.glyph_grid.cell_extent_points[1],
+            opacity: resolved.atmosphere,
+            saturation: 1.0,
+        };
     }
 
     fn snapshot_for(species: Species, stage: Stage) -> CompanionSceneSnapshot {
@@ -1611,6 +1705,7 @@ mod tests {
             content: super::super::ContentSnapshot {
                 mood: Mood::Content,
                 room_weather: "clear",
+                day_phase: super::super::CompanionDayPhase::Day,
                 pet_lines,
                 pet_roles,
                 room_glyphs: Vec::new(),
@@ -1640,12 +1735,16 @@ mod tests {
                 elapsed_ms: 1_000,
                 pet_anchor_points: [120.0, 140.0],
                 pet_depth: 0.0,
+                pet_depth_cue: super::super::DepthCue::NEUTRAL,
                 facing: 1,
                 breath_offset_y_points: 0.0,
                 bob_offset_y_points: 0.0,
                 asleep: false,
+                calm: false,
                 helper_trouble: false,
-                gauges: [super::super::GaugeLevelSnapshot::Empty; 4],
+                gauge_levels: [super::super::GaugeLevelSnapshot::Empty; 4],
+                gauge_fractions: [0.0; 4],
+                dimmed: false,
                 dim_amount: 0.0,
                 hud_lines,
                 room_glyphs: Vec::new(),
@@ -1974,7 +2073,7 @@ mod tests {
         )
         .unwrap();
         let mut asleep = (*initial).clone();
-        asleep.frame.asleep = true;
+        set_depth_lifecycle(&mut asleep, true, true);
         let asleep = std::sync::Arc::new(asleep);
         let changes = super::super::runtime::classify_snapshot_changes(&initial, &asleep);
         let before = built.clone();
@@ -2491,12 +2590,13 @@ mod tests {
     #[test]
     fn hierarchy_depth_gauges_and_raw_clock_contracts_are_exact() {
         let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
-        snapshot.frame.gauges = [
+        snapshot.frame.gauge_levels = [
             super::super::GaugeLevelSnapshot::Empty,
             super::super::GaugeLevelSnapshot::Low,
             super::super::GaugeLevelSnapshot::Medium,
             super::super::GaugeLevelSnapshot::High,
         ];
+        snapshot.frame.gauge_fractions = [0.0, 0.125, 0.375, 0.75];
         let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
         let nodes = built
             .template
@@ -2547,6 +2647,176 @@ mod tests {
         );
         assert_eq!(built.content_checksum, facing_built.content_checksum);
         assert_ne!(built.frame_checksum, facing_built.frame_checksum);
+    }
+
+    #[test]
+    fn exact_depth_and_gauges_match_fresh_and_compatible_projection() {
+        let initial = std::sync::Arc::new(snapshot_for(Species::Fuzz, Stage::S3));
+        for raw_depth in [-1.0, 0.0, 1.0] {
+            let mut desired = (*initial).clone();
+            let resolved = crate::round::depth::resolve_smooth_depth(
+                raw_depth,
+                crate::round::depth::depth_lifecycle_scale(false, true),
+            )
+            .unwrap();
+            desired.content.day_phase = super::super::CompanionDayPhase::Dusk;
+            desired.frame.pet_depth = raw_depth;
+            desired.frame.pet_depth_cue = super::super::DepthCue {
+                scale: resolved.scale,
+                y_offset_points_up: -resolved.perspective_y
+                    * desired.topology.glyph_grid.cell_extent_points[1],
+                opacity: resolved.atmosphere,
+                saturation: 1.0,
+            };
+            desired.frame.calm = true;
+            desired.frame.dimmed = true;
+            desired.frame.dim_amount = 0.35;
+            desired.frame.gauge_fractions = [0.123_456_79, 0.432_109, 0.765_432_1, 1.0];
+            desired.frame.gauge_levels = desired
+                .frame
+                .gauge_fractions
+                .map(|value| super::super::GaugeLevelSnapshot::from_fraction(f64::from(value)));
+            let desired = std::sync::Arc::new(desired);
+            let fresh = build_scene_generation_owned(
+                std::sync::Arc::clone(&desired),
+                generation_key(1),
+                super::super::AppliedRevisions::new(1, 1),
+            )
+            .unwrap();
+
+            let mut from_initial = build_scene_generation_owned(
+                std::sync::Arc::clone(&initial),
+                generation_key(1),
+                super::super::AppliedRevisions::new(0, 0),
+            )
+            .unwrap();
+            let changes = super::super::runtime::classify_snapshot_changes(&initial, &desired);
+            from_initial
+                .apply_compatible_snapshot(
+                    std::sync::Arc::clone(&desired),
+                    changes,
+                    super::super::AppliedRevisions::new(0, 0),
+                    super::super::AppliedRevisions::new(1, 1),
+                )
+                .unwrap();
+
+            assert_eq!(from_initial.frame, fresh.frame);
+            assert_eq!(from_initial.content, fresh.content);
+            assert_eq!(from_initial.frame_checksum, fresh.frame_checksum);
+            assert_eq!(from_initial.content_checksum, fresh.content_checksum);
+            assert_eq!(
+                fresh.content.day_phase,
+                super::super::CompanionDayPhase::Dusk
+            );
+            assert_eq!(fresh.frame.gauges, desired.frame.gauge_fractions);
+            let pet = fresh
+                .template
+                .nodes
+                .iter()
+                .find(|node| node.alias.as_str() == "pet")
+                .unwrap();
+            let pet_frame = fresh
+                .frame
+                .nodes
+                .iter()
+                .find(|node| node.node == pet.id)
+                .unwrap();
+            assert_eq!(pet_frame.local_transform.translation[2], raw_depth);
+            assert_eq!(pet_frame.local_transform.scale[1], resolved.scale);
+            let body = fresh
+                .template
+                .nodes
+                .iter()
+                .find(|node| node.alias.as_str() == "pet.body")
+                .unwrap();
+            let body_frame = fresh
+                .frame
+                .nodes
+                .iter()
+                .find(|node| node.node == body.id)
+                .unwrap();
+            assert_eq!(body_frame.opacity, resolved.atmosphere);
+        }
+    }
+
+    #[test]
+    fn pet_depth_projection_covers_active_calm_and_asleep_lifecycles() {
+        for (lifecycle, asleep, calm) in [
+            ("active", false, false),
+            ("calm", false, true),
+            ("asleep", true, true),
+        ] {
+            for raw_depth in [-1.0, 0.0, 1.0] {
+                let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+                snapshot.frame.pet_depth = raw_depth;
+                set_depth_lifecycle(&mut snapshot, asleep, calm);
+                let resolved = crate::round::depth::resolve_smooth_depth(
+                    raw_depth,
+                    crate::round::depth::depth_lifecycle_scale(asleep, calm),
+                )
+                .unwrap();
+                let generation = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+                let node_frame = |alias: &str| {
+                    let id = generation
+                        .template
+                        .nodes
+                        .iter()
+                        .find(|node| node.alias.as_str() == alias)
+                        .unwrap()
+                        .id;
+                    generation
+                        .frame
+                        .nodes
+                        .iter()
+                        .find(|node| node.node == id)
+                        .copied()
+                        .unwrap()
+                };
+                let pet = node_frame("pet");
+                let body = node_frame("pet.body");
+                let particles = node_frame("pet.particles");
+                let cell = snapshot.topology.glyph_grid.cell_extent_points;
+                let extent = [
+                    f32::from(super::super::PET_LATTICE_WIDTH) * cell[0],
+                    f32::from(super::super::PET_LATTICE_HEIGHT) * cell[1],
+                ];
+                let expected_y = snapshot.topology.layout.height_points
+                    - snapshot.frame.pet_anchor_points[1]
+                    - snapshot.frame.breath_offset_y_points
+                    - snapshot.frame.bob_offset_y_points
+                    - extent[1]
+                    - resolved.perspective_y * cell[1];
+
+                assert_eq!(
+                    pet.local_transform.translation,
+                    [snapshot.frame.pet_anchor_points[0], expected_y, raw_depth],
+                    "{lifecycle} at depth {raw_depth}"
+                );
+                assert_eq!(
+                    pet.local_transform.scale,
+                    [resolved.scale, resolved.scale, 1.0],
+                    "{lifecycle} at depth {raw_depth}"
+                );
+                assert_eq!(
+                    pet.local_transform.pivot,
+                    [extent[0] * 0.5, extent[1] * 0.5, 0.0],
+                    "{lifecycle} at depth {raw_depth}"
+                );
+                assert_eq!(
+                    body.opacity,
+                    if asleep { 0.65 } else { 1.0 } * resolved.atmosphere,
+                    "{lifecycle} at depth {raw_depth}"
+                );
+                assert_eq!(
+                    particles.visible, !asleep,
+                    "{lifecycle} at depth {raw_depth}"
+                );
+                assert_eq!(
+                    particles.opacity, resolved.atmosphere,
+                    "{lifecycle} at depth {raw_depth}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2653,8 +2923,9 @@ mod tests {
             (true, true, 0.35),
         ] {
             let mut state = base.clone();
-            state.frame.asleep = asleep;
+            set_depth_lifecycle(&mut state, asleep, asleep);
             state.frame.helper_trouble = helper;
+            state.frame.dimmed = dim > 0.0;
             state.frame.dim_amount = dim;
             let built = build_scene_generation(&state, generation_key(1)).unwrap();
             assert_eq!(
@@ -3156,11 +3427,132 @@ mod tests {
 
     #[test]
     fn frame_delta_debug_redacts_exact_gauges_and_dim() {
-        let mut delta = FrameDelta::empty();
-        delta.gauges = Some([0.123_456_79, 0.234_567_9, 0.345_678_9, 0.456_789]);
-        delta.dim_amount = Some(0.567_891);
-        let debug = format!("{delta:?}");
-        assert!(!debug.contains("0.12345679"));
-        assert!(!debug.contains("0.567891"));
+        let mut baseline =
+            build_scene_generation(&snapshot_with_private_frame(0.0, 0.0), generation_key(71))
+                .unwrap();
+        let first = Arc::new(snapshot_with_private_frame(0.312_345_68, 0.567_890_1));
+        let first_changes =
+            super::super::runtime::classify_snapshot_changes(baseline.source_snapshot(), &first);
+        let first_debug = format!(
+            "{:?}",
+            baseline
+                .project_snapshot_changes(
+                    &first,
+                    first_changes,
+                    super::super::AppliedRevisions::new(0, 0),
+                    super::super::AppliedRevisions::new(1, 1),
+                )
+                .unwrap()
+                .frame
+        );
+
+        let mut baseline =
+            build_scene_generation(&snapshot_with_private_frame(0.0, 0.0), generation_key(71))
+                .unwrap();
+        let second = Arc::new(snapshot_with_private_frame(0.423_456_8, 0.678_901_2));
+        let second_changes =
+            super::super::runtime::classify_snapshot_changes(baseline.source_snapshot(), &second);
+        let second_debug = format!(
+            "{:?}",
+            baseline
+                .project_snapshot_changes(
+                    &second,
+                    second_changes,
+                    super::super::AppliedRevisions::new(0, 0),
+                    super::super::AppliedRevisions::new(1, 1),
+                )
+                .unwrap()
+                .frame
+        );
+
+        assert_eq!(first_debug, second_debug);
+        for private_value in [0.312_345_68_f32, 0.567_890_1, 0.423_456_8, 0.678_901_2] {
+            assert!(!first_debug.contains(&format!("{private_value:?}")));
+            assert!(!second_debug.contains(&format!("{private_value:?}")));
+        }
+    }
+
+    fn snapshot_with_private_frame(gauge: f32, dim: f32) -> CompanionSceneSnapshot {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.frame.gauge_fractions = [gauge; 4];
+        snapshot.frame.gauge_levels =
+            [super::super::GaugeLevelSnapshot::from_fraction(f64::from(gauge)); 4];
+        snapshot.frame.dimmed = dim > 0.0;
+        snapshot.frame.dim_amount = dim;
+        snapshot
+    }
+
+    #[test]
+    fn production_frame_debug_redacts_private_gauge_and_dim_state() {
+        let first = build_scene_generation(
+            &snapshot_with_private_frame(0.312_345_68, 0.567_890_1),
+            generation_key(72),
+        )
+        .unwrap();
+        let second = build_scene_generation(
+            &snapshot_with_private_frame(0.423_456_8, 0.678_901_2),
+            generation_key(72),
+        )
+        .unwrap();
+        assert_ne!(first.frame_checksum(), second.frame_checksum());
+
+        let first_debug = format!("{:?}", first.frame());
+        let second_debug = format!("{:?}", second.frame());
+        assert_eq!(first_debug, second_debug);
+        let dim_node = first
+            .template()
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == "chrome.dim")
+            .unwrap()
+            .id;
+        let first_node_debug = format!(
+            "{:?}",
+            first
+                .frame()
+                .nodes
+                .iter()
+                .find(|node| node.node == dim_node)
+                .unwrap()
+        );
+        let second_node_debug = format!(
+            "{:?}",
+            second
+                .frame()
+                .nodes
+                .iter()
+                .find(|node| node.node == dim_node)
+                .unwrap()
+        );
+        assert_eq!(first_node_debug, second_node_debug);
+        for private_value in [0.312_345_68_f32, 0.567_890_1, 0.423_456_8, 0.678_901_2] {
+            assert!(!first_debug.contains(&format!("{private_value:?}")));
+            assert!(!second_debug.contains(&format!("{private_value:?}")));
+            assert!(!first_node_debug.contains(&format!("{private_value:?}")));
+            assert!(!second_node_debug.contains(&format!("{private_value:?}")));
+        }
+    }
+
+    #[test]
+    fn production_generation_debug_redacts_exact_frame_identity() {
+        let first = build_scene_generation(
+            &snapshot_with_private_frame(0.312_345_68, 0.567_890_1),
+            generation_key(73),
+        )
+        .unwrap();
+        let second = build_scene_generation(
+            &snapshot_with_private_frame(0.423_456_8, 0.678_901_2),
+            generation_key(73),
+        )
+        .unwrap();
+        assert_ne!(first.frame_checksum(), second.frame_checksum());
+
+        let first_internal_checksum = first.frame_checksum().to_string();
+        let second_internal_checksum = second.frame_checksum().to_string();
+        let first_debug = format!("{first:?}");
+        let second_debug = format!("{second:?}");
+        assert_eq!(first_debug, second_debug);
+        assert!(!first_debug.contains(&first_internal_checksum));
+        assert!(!second_debug.contains(&second_internal_checksum));
     }
 }

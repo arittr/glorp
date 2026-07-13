@@ -50,6 +50,7 @@ pub enum CompanionSceneProjectionError {
     InvalidRoomGlyphColor,
     InvalidProjectionGrid,
     InvalidProjectionLayout,
+    InvalidDepthProjection,
 }
 
 impl std::fmt::Display for CompanionSceneProjectionError {
@@ -83,6 +84,9 @@ impl std::fmt::Display for CompanionSceneProjectionError {
             Self::InvalidProjectionGrid => write!(f, "companion projection grid is empty"),
             Self::InvalidProjectionLayout => {
                 write!(f, "companion projection layout must be finite and positive")
+            }
+            Self::InvalidDepthProjection => {
+                write!(f, "companion depth projection must be finite and bounded")
             }
         }
     }
@@ -278,6 +282,7 @@ pub enum AuthoredDepthSnapshot {
 pub struct ContentSnapshot {
     pub mood: Mood,
     pub room_weather: &'static str,
+    pub day_phase: CompanionDayPhase,
     pub pet_lines: Vec<String>,
     pub pet_roles: Vec<PetRoleSpanSnapshot>,
     pub room_glyphs: Vec<RoomGlyphContentSnapshot>,
@@ -418,22 +423,88 @@ pub struct PaletteSnapshot {
     pub corruption: [u8; 3],
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Clone, PartialEq, serde::Serialize)]
 pub struct FrameSnapshot {
     pub elapsed_ms: u64,
     pub pet_anchor_points: [f32; 2],
+    /// Raw normalized world Z used by depth testing and occlusion. This is
+    /// separate from the resolved visual cue and is not a sorting key.
     pub pet_depth: f32,
+    pub pet_depth_cue: DepthCue,
     pub facing: i8,
     pub breath_offset_y_points: f32,
     pub bob_offset_y_points: f32,
     pub asleep: bool,
+    pub calm: bool,
     pub helper_trouble: bool,
-    pub gauges: [GaugeLevelSnapshot; 4],
+    /// The privacy-safe projection used by serialized snapshots.
+    pub gauge_levels: [GaugeLevelSnapshot; 4],
+    /// Exact renderer input. Live ratios must not cross the serialization or
+    /// Debug boundary; review artifacts derive their own quantized levels.
+    #[serde(skip)]
+    pub gauge_fractions: [f32; 4],
+    /// The privacy-safe dim projection used by serialized snapshots.
+    pub dimmed: bool,
+    /// Exact renderer input. The live overlay opacity must not cross the
+    /// serialization or Debug boundary.
+    #[serde(skip)]
     pub dim_amount: f32,
     pub hud_lines: [String; 3],
     pub room_glyphs: Vec<RoomGlyphFrameSnapshot>,
     pub ambient_instances: Vec<AmbientFrameSnapshot>,
     pub hud_instances: Vec<HudFrameSnapshot>,
+}
+
+impl std::fmt::Debug for FrameSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrameSnapshot")
+            .field("elapsed_ms", &self.elapsed_ms)
+            .field("pet_anchor_points", &self.pet_anchor_points)
+            .field("pet_depth", &self.pet_depth)
+            .field("pet_depth_cue", &self.pet_depth_cue)
+            .field("facing", &self.facing)
+            .field("breath_offset_y_points", &self.breath_offset_y_points)
+            .field("bob_offset_y_points", &self.bob_offset_y_points)
+            .field("asleep", &self.asleep)
+            .field("calm", &self.calm)
+            .field("helper_trouble", &self.helper_trouble)
+            .field("gauge_levels", &self.gauge_levels)
+            .field("gauge_fractions", &"<redacted>")
+            .field("dimmed", &self.dimmed)
+            .field("dim_amount", &"<redacted>")
+            .field("hud_lines", &self.hud_lines)
+            .field("room_glyphs", &self.room_glyphs)
+            .field("ambient_instances", &self.ambient_instances)
+            .field("hud_instances", &self.hud_instances)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompanionDayPhase {
+    Dawn,
+    Day,
+    Dusk,
+    Night,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct DepthCue {
+    pub scale: f32,
+    pub y_offset_points_up: f32,
+    pub opacity: f32,
+    pub saturation: f32,
+}
+
+impl DepthCue {
+    pub const NEUTRAL: Self = Self {
+        scale: 1.0,
+        y_offset_points_up: 0.0,
+        opacity: 1.0,
+        saturation: 1.0,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
