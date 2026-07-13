@@ -717,6 +717,98 @@ fn retained_source_regression_guard_rejects_removed_hud_mirror_identifiers() {
 }
 
 #[test]
+fn retained_hud_sidecar_is_nominal_dedicated_and_not_republished_through_group_eight() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let hud = fs::read_to_string(root.join("src/companion/retained/hud.rs"))
+        .expect("read retained HUD source");
+    let render = fs::read_to_string(root.join("src/companion/retained/render.rs"))
+        .expect("read retained render source");
+    let compiler = fs::read_to_string(root.join("src/companion/retained/compiler.rs"))
+        .expect("read retained compiler source");
+    let neutral = fs::read_to_string(root.join("src/presentation/companion_scene/scene.rs"))
+        .expect("read neutral scene source");
+
+    for required in [
+        "struct GpuHudResources",
+        "encode_sensitive(",
+        "encode_redacted_capture(",
+        "encoder: &mut wgpu::CommandEncoder",
+        "staging_belt: &mut wgpu::util::StagingBelt",
+        "target: &wgpu::TextureView",
+        "fn encode_hud(",
+        "set_bind_group(0",
+        "set_bind_group(1",
+        "set_bind_group(3",
+        "draw(0..6, 0..HUD_GPU_DRAW_INSTANCES)",
+    ] {
+        assert!(
+            hud.contains(required),
+            "retained HUD sidecar is missing {required}"
+        );
+    }
+    assert!(!hud.contains("queue.write_buffer"));
+    for forbidden in [
+        "StagedSensitiveHud",
+        "StagedCaptureSafeHud",
+        "into_bind_group",
+        "pub(super) fn bind_group",
+        "pub(super) fn stage_exact_records",
+        "pub(super) fn encode_hud",
+    ] {
+        assert!(
+            !hud.contains(forbidden),
+            "retained HUD API leaks {forbidden}"
+        );
+    }
+    let sensitive_encode = hud
+        .split("pub(super) fn encode_sensitive(")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn encode_redacted_capture(").next())
+        .expect("bounded sensitive HUD encode");
+    let validate = sensitive_encode
+        .find("validate_staging_generation(")
+        .expect("sensitive generation validation");
+    let atomic_encode = sensitive_encode
+        .find("encode_hud(")
+        .expect("atomic HUD encode");
+    assert!(validate < atomic_encode);
+
+    let private_encode = hud
+        .split("fn encode_hud(")
+        .nth(1)
+        .expect("private atomic HUD encoder");
+    let copy = private_encode
+        .find("stage_exact_records(")
+        .expect("fixed HUD staging copy");
+    let pass = private_encode
+        .find("begin_render_pass(")
+        .expect("same-encoder HUD pass");
+    assert!(copy < pass);
+
+    for required in [
+        "encode_sensitive_hud_hook",
+        "encode_redacted_hud_hook",
+        "encoder: &mut wgpu::CommandEncoder",
+        "staging_belt: &mut wgpu::util::StagingBelt",
+        "target: &wgpu::TextureView",
+    ] {
+        assert!(
+            render.contains(required),
+            "retained HUD draw hook is missing {required}"
+        );
+    }
+
+    assert!(compiler.contains("InstanceGroupBinding::Hud) => (8, 0)"));
+    assert_eq!(neutral.matches("\"chrome.hud\"").count(), 1);
+    for forbidden in ["GpuHudResources", "HudGlyphGpuValue"] {
+        assert!(
+            !neutral.contains(forbidden),
+            "neutral scene owns retained HUD type {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn gauge_value_source_regression_guard_rejects_duplicate_shipping_formulas() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let neutral_path = root.join("src/presentation/gauge_values.rs");

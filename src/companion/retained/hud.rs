@@ -1,11 +1,13 @@
-//! Renderer-owned preparation for the companion's sensitive live HUD.
+//! Renderer-owned preparation, GPU storage, and atomic encoding for the
+//! companion's sensitive live HUD.
 //!
 //! Exact values enter the renderer through [`SealedHudFrame`]. They never enter
 //! the semantic scene snapshot, its checksums, or its artifacts. This module
 //! turns a sealed live input into fixed-size records that remain sensitive
 //! exact-value material: atlas ids, rectangles, and visibility holes fingerprint
-//! the live HUD even though their `Debug` output is redacted. GPU ownership and
-//! binding intentionally live in a later slice.
+//! the live HUD even though their `Debug` output is redacted. A nominal live or
+//! redacted encode validates, stages, and records its HUD pass on one caller-owned
+//! command encoder, so no safe retained caller can separate upload from draw.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,6 +23,56 @@ use crate::round::hud::{
     COMPANION_HUD_GLYPH_REPERTOIRE, HUD_STACK_INITIAL_SCALE, HUD_STACK_MIN,
     MAX_COMPANION_HUD_GLYPHS,
 };
+
+pub(super) const HUD_GPU_BUFFER_BYTES: u64 =
+    (MAX_COMPANION_HUD_GLYPHS * std::mem::size_of::<HudGlyphGpuValue>()) as u64;
+pub(super) const HUD_GPU_DRAW_INSTANCES: u32 = MAX_COMPANION_HUD_GLYPHS as u32;
+
+pub(super) struct HudGpuBufferUsages;
+
+impl HudGpuBufferUsages {
+    pub(super) const RECORDS: wgpu::BufferUsages =
+        wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum HudGpuStagingError {
+    ResourceGenerationMismatch,
+}
+
+impl fmt::Debug for HudGpuStagingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HudGpuStagingError::ResourceGenerationMismatch")
+    }
+}
+
+impl fmt::Display for HudGpuStagingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("companion HUD GPU generation mismatch")
+    }
+}
+
+impl std::error::Error for HudGpuStagingError {}
+
+/// The fixed bindings consumed by the private atomic HUD encoder.
+///
+/// Fields are intentionally private: this value can select the retained
+/// resources for an encode, but it cannot expose or replay a raw HUD bind group.
+pub(super) struct HudDrawBindings<'resources> {
+    pipeline: &'resources wgpu::RenderPipeline,
+    scene: &'resources wgpu::BindGroup,
+    atlas: &'resources wgpu::BindGroup,
+}
+
+impl<'resources> HudDrawBindings<'resources> {
+    pub(super) fn new(
+        pipeline: &'resources wgpu::RenderPipeline,
+        scene: &'resources wgpu::BindGroup,
+        atlas: &'resources wgpu::BindGroup,
+    ) -> Self {
+        Self { pipeline, scene, atlas }
+    }
+}
 
 /// Nominal marker for exact live-value HUD material.
 pub(crate) struct LiveHudProjection;
@@ -296,12 +348,272 @@ impl PreparedHudAtlas {
             resource_identity: self.resource_identity,
         })
     }
+
+    #[cfg(test)]
+    pub(super) fn shader_contract_fixture_for_test(&self) -> CaptureSafePreparedHudFrame {
+        let mut records = [HudGlyphGpuValue::zeroed(); MAX_COMPANION_HUD_GLYPHS];
+        for (slot, (glyph, rect_points, role)) in [
+            ('r', [32.0, 32.0, 16.0, 16.0], 0),
+            ('e', [64.0, 32.0, 16.0, 16.0], 0),
+            ('e', [96.0, 32.0, 16.0, 16.0], 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            records[slot] = HudGlyphGpuValue {
+                rect_points,
+                glyph_entry_index: self
+                    .metrics
+                    .get(&glyph)
+                    .expect("shader contract fixture glyph is preflighted")
+                    .entry_index,
+                role,
+                visible: 1,
+                padding: 0,
+            };
+        }
+        CaptureSafePreparedHudFrame {
+            records,
+            draw_count: HUD_GPU_DRAW_INSTANCES,
+            resource_generation: self.resource_identity,
+        }
+    }
 }
 
 impl fmt::Debug for PreparedHudAtlas {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("PreparedHudAtlas(<static>)")
     }
+}
+
+/// Candidate-owned GPU state for the renderer-only HUD sidecar.
+///
+/// The two buffers are deliberately separate rather than suballocated: the
+/// fixed 832-byte extent is not a portable storage-buffer offset alignment.
+/// Both begin as canonical zero data by WebGPU initialization rules and are
+/// updated only through the caller-owned staging belt.
+pub(super) struct GpuHudResources {
+    prepared_atlas: PreparedHudAtlas,
+    live_buffer: wgpu::Buffer,
+    redacted_buffer: wgpu::Buffer,
+    live_bind_group: wgpu::BindGroup,
+    redacted_bind_group: wgpu::BindGroup,
+    #[cfg(test)]
+    sensitive_copies: u64,
+    #[cfg(test)]
+    redacted_copies: u64,
+    #[cfg(test)]
+    copied_bytes: u64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HudStagingFacts {
+    pub(super) sensitive_copies: u64,
+    pub(super) redacted_copies: u64,
+    pub(super) copied_bytes: u64,
+}
+
+impl GpuHudResources {
+    pub(super) fn create_unscoped(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        prepared_atlas: PreparedHudAtlas,
+    ) -> Self {
+        let live_buffer = create_hud_buffer(device, "glorp-scene-live-hud-records");
+        let redacted_buffer = create_hud_buffer(device, "glorp-scene-redacted-hud-records");
+        let live_bind_group = create_hud_bind_group(
+            device,
+            layout,
+            &live_buffer,
+            "glorp-scene-live-hud-bind-group",
+        );
+        let redacted_bind_group = create_hud_bind_group(
+            device,
+            layout,
+            &redacted_buffer,
+            "glorp-scene-redacted-hud-bind-group",
+        );
+        Self {
+            prepared_atlas,
+            live_buffer,
+            redacted_buffer,
+            live_bind_group,
+            redacted_bind_group,
+            #[cfg(test)]
+            sensitive_copies: 0,
+            #[cfg(test)]
+            redacted_copies: 0,
+            #[cfg(test)]
+            copied_bytes: 0,
+        }
+    }
+
+    pub(super) fn prepared_atlas(&self) -> &PreparedHudAtlas {
+        &self.prepared_atlas
+    }
+
+    #[cfg(test)]
+    pub(super) fn buffer_contract_for_test(&self) -> [(u64, wgpu::BufferUsages); 2] {
+        [
+            (self.live_buffer.size(), self.live_buffer.usage()),
+            (self.redacted_buffer.size(), self.redacted_buffer.usage()),
+        ]
+    }
+
+    #[cfg(test)]
+    pub(super) const fn staging_facts_for_test(&self) -> HudStagingFacts {
+        HudStagingFacts {
+            sensitive_copies: self.sensitive_copies,
+            redacted_copies: self.redacted_copies,
+            copied_bytes: self.copied_bytes,
+        }
+    }
+
+    pub(super) fn encode_sensitive(
+        &mut self,
+        staging_belt: &mut wgpu::util::StagingBelt,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bindings: HudDrawBindings<'_>,
+        prepared: &SensitivePreparedHudFrame,
+    ) -> Result<(), HudGpuStagingError> {
+        validate_staging_generation(
+            self.prepared_atlas.resource_identity,
+            prepared.resource_generation,
+        )?;
+        encode_hud(
+            staging_belt,
+            encoder,
+            target,
+            bindings,
+            &self.live_buffer,
+            &self.live_bind_group,
+            &prepared.records,
+        );
+        #[cfg(test)]
+        {
+            self.sensitive_copies += 1;
+            self.copied_bytes += HUD_GPU_BUFFER_BYTES;
+        }
+        Ok(())
+    }
+
+    pub(super) fn encode_redacted_capture(
+        &mut self,
+        staging_belt: &mut wgpu::util::StagingBelt,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bindings: HudDrawBindings<'_>,
+        prepared: &CaptureSafePreparedHudFrame,
+    ) -> Result<(), HudGpuStagingError> {
+        validate_staging_generation(
+            self.prepared_atlas.resource_identity,
+            prepared.resource_generation,
+        )?;
+        encode_hud(
+            staging_belt,
+            encoder,
+            target,
+            bindings,
+            &self.redacted_buffer,
+            &self.redacted_bind_group,
+            &prepared.records,
+        );
+        #[cfg(test)]
+        {
+            self.redacted_copies += 1;
+            self.copied_bytes += HUD_GPU_BUFFER_BYTES;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for GpuHudResources {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GpuHudResources(<private>)")
+    }
+}
+
+fn create_hud_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: HUD_GPU_BUFFER_BYTES,
+        usage: HudGpuBufferUsages::RECORDS,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_hud_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+    label: &'static str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    })
+}
+
+fn validate_staging_generation(
+    resources: ResourceGeneration,
+    prepared: ResourceGeneration,
+) -> Result<(), HudGpuStagingError> {
+    if resources != prepared {
+        return Err(HudGpuStagingError::ResourceGenerationMismatch);
+    }
+    Ok(())
+}
+
+fn stage_exact_records(
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::Buffer,
+    records: &[HudGlyphGpuValue; MAX_COMPANION_HUD_GLYPHS],
+) {
+    let bytes = bytemuck::cast_slice(records);
+    debug_assert_eq!(bytes.len() as u64, HUD_GPU_BUFFER_BYTES);
+    let size = wgpu::BufferSize::new(HUD_GPU_BUFFER_BYTES).expect("fixed HUD extent is nonzero");
+    let mut view = staging_belt.write_buffer(encoder, target, 0, size);
+    view.copy_from_slice(bytes);
+}
+
+fn encode_hud(
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    bindings: HudDrawBindings<'_>,
+    buffer: &wgpu::Buffer,
+    bind_group: &wgpu::BindGroup,
+    records: &[HudGlyphGpuValue; MAX_COMPANION_HUD_GLYPHS],
+) {
+    stage_exact_records(staging_belt, encoder, buffer, records);
+    // Task 10 may split the chrome phase here at the authored `chrome.hud`
+    // marker. Load/store preserves all earlier work in the intermediate while
+    // keeping this nominal upload and its draw inseparable on one encoder.
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-hud-hook"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_pipeline(bindings.pipeline);
+    pass.set_bind_group(0, bindings.scene, &[]);
+    pass.set_bind_group(1, bindings.atlas, &[]);
+    pass.set_bind_group(3, bind_group, &[]);
+    pass.draw(0..6, 0..HUD_GPU_DRAW_INSTANCES);
 }
 
 /// Private common storage used only while constructing one of the two nominal
@@ -333,6 +645,14 @@ impl SensitivePreparedHudFrame {
     fn byte_len(&self) -> usize {
         std::mem::size_of_val(&self.records)
     }
+
+    #[cfg(test)]
+    pub(super) fn set_resource_generation_for_test(
+        &mut self,
+        resource_generation: ResourceGeneration,
+    ) {
+        self.resource_generation = resource_generation;
+    }
 }
 
 impl fmt::Debug for SensitivePreparedHudFrame {
@@ -360,6 +680,15 @@ impl CaptureSafePreparedHudFrame {
 
     fn byte_len(&self) -> usize {
         std::mem::size_of_val(&self.records)
+    }
+
+    #[cfg(test)]
+    pub(super) fn zeroed_for_test(resource_generation: ResourceGeneration) -> Self {
+        Self {
+            records: [HudGlyphGpuValue::zeroed(); MAX_COMPANION_HUD_GLYPHS],
+            draw_count: HUD_GPU_DRAW_INSTANCES,
+            resource_generation,
+        }
     }
 }
 
@@ -539,6 +868,7 @@ fn validate_static_metric(entry: GlyphAtlasEntry) -> Result<(), HudPreparationEr
     let has_positive_ink = entry.ink_size[0] > 0.0 && entry.ink_size[1] > 0.0;
     let has_any_ink = entry.ink_size[0] != 0.0 || entry.ink_size[1] != 0.0;
     if !finite
+        || entry.kind != super::resources::GlyphEntryKind::Mask
         || entry.advance <= 0.0
         || entry.line_height <= 0.0
         || entry.safe_padding < 0.0
@@ -874,6 +1204,16 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_gpu_storage_contract_is_exact() {
+        assert_eq!(HUD_GPU_BUFFER_BYTES, 832);
+        assert_eq!(HUD_GPU_DRAW_INSTANCES, 26);
+        assert_eq!(
+            HudGpuBufferUsages::RECORDS,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+        );
+    }
+
+    #[test]
     fn static_resource_identity_and_metrics_ignore_live_values() {
         let source = prepared_atlas();
         let atlas_a = PreparedHudAtlas::from_scene_atlas(&source).unwrap();
@@ -1006,6 +1346,9 @@ mod tests {
         assert_invalid_static_metric(|entry| entry.visible_uv = Some([0.6, 0.0, 0.4, 1.0]));
         assert_invalid_static_metric(|entry| entry.visible_uv = Some([-0.1, 0.0, 0.4, 1.0]));
         assert_invalid_static_metric(|entry| entry.ink_origin[0] = -4.0);
+        assert_invalid_static_metric(|entry| {
+            entry.kind = GlyphEntryKind::PremultipliedColorRgba;
+        });
 
         // The declared space is intentionally inkless but still carries positive
         // advance and line height, so its zero raster extent is the sole exception.

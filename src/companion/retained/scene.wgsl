@@ -100,6 +100,18 @@ struct GlyphEntryBuffer {
     values: array<GlyphAtlasGpuEntry>,
 }
 
+struct HudGlyphGpuValue {
+    rect_points: vec4<f32>,
+    glyph_entry_index: u32,
+    role: u32,
+    visible: u32,
+    padding: u32,
+}
+
+struct HudGlyphBuffer {
+    values: array<HudGlyphGpuValue>,
+}
+
 @group(0) @binding(0) var<storage, read> node_buffer: NodeBuffer;
 @group(0) @binding(1) var<storage, read> content_globals_buffer: ContentGlobalsBuffer;
 @group(0) @binding(2) var<storage, read> frame_buffer: FrameBuffer;
@@ -112,6 +124,8 @@ struct GlyphEntryBuffer {
 @group(1) @binding(2) var atlas_sampler: sampler;
 
 @group(2) @binding(0) var intermediate_texture: texture_2d<f32>;
+
+@group(3) @binding(0) var<storage, read> hud_glyph_buffer: HudGlyphBuffer;
 
 struct SceneVertexInput {
     @location(0) local_position: vec3<f32>,
@@ -349,6 +363,80 @@ fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
     return output;
+}
+
+struct HudVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) glyph_entry_index: u32,
+    @location(2) @interpolate(flat) role: u32,
+    @location(3) @interpolate(flat) visible: u32,
+}
+
+fn hud_quad_corner(vertex_index: u32) -> vec2<f32> {
+    switch vertex_index {
+        case 0u: { return vec2<f32>(0.0, 0.0); }
+        case 1u: { return vec2<f32>(1.0, 0.0); }
+        case 2u: { return vec2<f32>(0.0, 1.0); }
+        case 3u: { return vec2<f32>(0.0, 1.0); }
+        case 4u: { return vec2<f32>(1.0, 0.0); }
+        default: { return vec2<f32>(1.0, 1.0); }
+    }
+}
+
+@vertex
+fn vs_hud(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> HudVertexOutput {
+    let instance = hud_glyph_buffer.values[instance_index];
+    var output: HudVertexOutput;
+    output.uv = vec2<f32>(0.0);
+    output.glyph_entry_index = instance.glyph_entry_index;
+    output.role = instance.role;
+    output.visible = instance.visible;
+    if (instance.visible == 0u || instance.rect_points.z <= 0.0 || instance.rect_points.w <= 0.0) {
+        output.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+        return output;
+    }
+
+    let corner = hud_quad_corner(vertex_index);
+    let point_position = instance.rect_points.xy + corner * instance.rect_points.zw;
+    let normalized = vec2<f32>(
+        point_position.x * 2.0 / frame_buffer.globals.viewport_points.x - 1.0,
+        point_position.y * 2.0 / frame_buffer.globals.viewport_points.y - 1.0,
+    );
+    output.position = vec4<f32>(normalized, 0.0, 1.0);
+    output.uv = corner;
+    return output;
+}
+
+@fragment
+fn fs_hud(input: HudVertexOutput) -> @location(0) vec4<f32> {
+    if (input.visible == 0u || input.role > 2u) {
+        discard;
+    }
+    if (input.glyph_entry_index >= arrayLength(&glyph_entry_buffer.values)) {
+        discard;
+    }
+    let entry = glyph_entry_buffer.values[input.glyph_entry_index];
+    if ((entry.flags & GLYPH_FLAG_VISIBLE) == 0u || (entry.flags & GLYPH_FLAG_COLOR) != 0u) {
+        discard;
+    }
+
+    let atlas_local = vec2<f32>(input.uv.x, 1.0 - input.uv.y);
+    let uv = mix(entry.visible_uv.xy, entry.visible_uv.zw, atlas_local);
+    let coverage = textureSampleLevel(coverage_texture, atlas_sampler, uv, 0.0).r;
+    if (coverage <= 0.0) {
+        discard;
+    }
+    var straight_srgb = vec4<f32>(0.62, 0.63, 0.77, 1.0);
+    if (input.role == 0u) {
+        straight_srgb = vec4<f32>(0.93, 0.93, 0.97, 1.0);
+    }
+    let alpha = straight_srgb.a * coverage;
+    let linear_rgb = srgb_to_linear(straight_srgb.rgb);
+    return vec4<f32>(linear_rgb * alpha, alpha);
 }
 
 struct FinalVertexOutput {

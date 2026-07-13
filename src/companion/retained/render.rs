@@ -794,9 +794,9 @@ pub(super) struct SceneGpuSharedFacts {
 
 impl SceneGpuSharedFacts {
     pub(super) const EXPECTED: Self = Self {
-        bind_group_layouts: 3,
+        bind_group_layouts: 4,
         samplers: 1,
-        pipelines: 6,
+        pipelines: 7,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -818,10 +818,10 @@ pub(super) struct GpuSceneCandidateFacts {
 
 impl GpuSceneCandidateFacts {
     pub(super) const EXPECTED: Self = Self {
-        buffers: 8,
+        buffers: 10,
         textures: 2,
         texture_views: 2,
-        bind_groups: 2,
+        bind_groups: 4,
         static_uploads: 10,
     };
 
@@ -889,6 +889,7 @@ pub(super) enum SceneGpuError {
         requested: crate::presentation::companion_scene::DeviceEpoch,
     },
     InvalidAtlas,
+    InvalidHudAtlas,
     InvalidUpload,
     InvalidTargetKey(SceneTargetKeyError),
     Gpu(ScopedGpuErrorCategory),
@@ -944,6 +945,7 @@ pub(super) struct SceneBasePipelines {
     pub(super) world_source_over_glyph: wgpu::RenderPipeline,
     pub(super) chrome_analytic: wgpu::RenderPipeline,
     pub(super) chrome_glyph: wgpu::RenderPipeline,
+    pub(super) chrome_hud: wgpu::RenderPipeline,
     pub(super) final_surface: wgpu::RenderPipeline,
 }
 
@@ -954,6 +956,7 @@ pub(super) struct SceneGpuShared {
     pub(super) scene_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) atlas_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) final_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) hud_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) linear_sampler: wgpu::Sampler,
     pub(super) pipelines: SceneBasePipelines,
 }
@@ -1014,6 +1017,20 @@ impl SceneGpuShared {
                     count: None,
                 }],
             });
+        let hud_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glorp-scene-hud-storage-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(super::hud::HUD_GPU_BUFFER_BYTES),
+                    },
+                    count: None,
+                }],
+            });
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("glorp-scene-linear-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1026,12 +1043,14 @@ impl SceneGpuShared {
             &scene_bind_group_layout,
             &atlas_bind_group_layout,
             &final_bind_group_layout,
+            &hud_bind_group_layout,
         );
         Self {
             device_epoch,
             scene_bind_group_layout,
             atlas_bind_group_layout,
             final_bind_group_layout,
+            hud_bind_group_layout,
             linear_sampler,
             pipelines,
         }
@@ -1060,6 +1079,7 @@ fn create_scene_base_pipelines(
     scene_layout: &wgpu::BindGroupLayout,
     atlas_layout: &wgpu::BindGroupLayout,
     final_layout: &wgpu::BindGroupLayout,
+    hud_layout: &wgpu::BindGroupLayout,
 ) -> SceneBasePipelines {
     const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
         0 => Float32x3,
@@ -1087,6 +1107,16 @@ fn create_scene_base_pipelines(
     let final_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("glorp-scene-final-pipeline-layout"),
         bind_group_layouts: &[None, None, Some(final_layout)],
+        immediate_size: 0,
+    });
+    let hud_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("glorp-scene-hud-pipeline-layout"),
+        bind_group_layouts: &[
+            Some(scene_layout),
+            Some(atlas_layout),
+            None,
+            Some(hud_layout),
+        ],
         immediate_size: 0,
     });
     let source_over = Some(wgpu::BlendState {
@@ -1173,6 +1203,31 @@ fn create_scene_base_pipelines(
         source_over,
         None,
     );
+    let chrome_hud = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("glorp-scene-chrome-hud"),
+        layout: Some(&hud_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_hud"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_hud"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SceneTextureContract::INTERMEDIATE,
+                blend: source_over,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
     let final_surface = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("glorp-scene-final-surface"),
         layout: Some(&final_pipeline_layout),
@@ -1204,6 +1259,7 @@ fn create_scene_base_pipelines(
         world_source_over_glyph,
         chrome_analytic,
         chrome_glyph,
+        chrome_hud,
         final_surface,
     }
 }
@@ -1223,6 +1279,7 @@ pub(super) struct GpuSceneCandidate {
     pub(super) color_view: wgpu::TextureView,
     pub(super) scene_bind_group: wgpu::BindGroup,
     pub(super) atlas_bind_group: wgpu::BindGroup,
+    pub(super) hud: super::hud::GpuHudResources,
     pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
     pub(super) static_checksum: u64,
@@ -1234,6 +1291,42 @@ impl GpuSceneCandidate {
     pub(super) const fn facts(&self) -> GpuSceneCandidateFacts {
         GpuSceneCandidateFacts::EXPECTED
     }
+}
+
+pub(super) fn encode_sensitive_hud_hook(
+    encoder: &mut wgpu::CommandEncoder,
+    staging_belt: &mut wgpu::util::StagingBelt,
+    target: &wgpu::TextureView,
+    shared: &SceneGpuShared,
+    candidate: &mut GpuSceneCandidate,
+    prepared: &super::hud::SensitivePreparedHudFrame,
+) -> Result<(), super::hud::HudGpuStagingError> {
+    let bindings = super::hud::HudDrawBindings::new(
+        &shared.pipelines.chrome_hud,
+        &candidate.scene_bind_group,
+        &candidate.atlas_bind_group,
+    );
+    candidate
+        .hud
+        .encode_sensitive(staging_belt, encoder, target, bindings, prepared)
+}
+
+pub(super) fn encode_redacted_hud_hook(
+    encoder: &mut wgpu::CommandEncoder,
+    staging_belt: &mut wgpu::util::StagingBelt,
+    target: &wgpu::TextureView,
+    shared: &SceneGpuShared,
+    candidate: &mut GpuSceneCandidate,
+    prepared: &super::hud::CaptureSafePreparedHudFrame,
+) -> Result<(), super::hud::HudGpuStagingError> {
+    let bindings = super::hud::HudDrawBindings::new(
+        &shared.pipelines.chrome_hud,
+        &candidate.scene_bind_group,
+        &candidate.atlas_bind_group,
+    );
+    candidate
+        .hud
+        .encode_redacted_capture(staging_belt, encoder, target, bindings, prepared)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1314,6 +1407,8 @@ pub(super) fn materialize_gpu_candidate(
     atlas: &PreparedSceneAtlas,
 ) -> Result<GpuSceneCandidate, SceneGpuError> {
     validate_gpu_candidate_preflight(shared, upload, atlas)?;
+    let prepared_hud_atlas = super::hud::PreparedHudAtlas::from_scene_atlas(atlas)
+        .map_err(|_| SceneGpuError::InvalidHudAtlas)?;
 
     create_in_gpu_error_scopes(device, || {
         let vertex_buffer = create_initial_buffer(
@@ -1443,6 +1538,11 @@ pub(super) fn materialize_gpu_candidate(
                 },
             ],
         });
+        let hud = super::hud::GpuHudResources::create_unscoped(
+            device,
+            &shared.hud_bind_group_layout,
+            prepared_hud_atlas,
+        );
         GpuSceneCandidate {
             vertex_buffer,
             index_buffer,
@@ -1458,6 +1558,7 @@ pub(super) fn materialize_gpu_candidate(
             color_view,
             scene_bind_group,
             atlas_bind_group,
+            hud,
             generation_key: upload.generation_key,
             source_revisions: upload.source_revisions,
             static_checksum: upload.static_checksum,
@@ -2217,9 +2318,79 @@ mod tests {
             &CompiledGlyphAtlas {
                 width: 2,
                 height: 1,
-                rgba: vec![0; 8],
+                rgba: vec![255; 8],
                 entries,
             },
+            resource_generation,
+        )
+        .unwrap()
+    }
+
+    fn full_hud_atlas_for(
+        scalar: char,
+        resource_generation: crate::presentation::companion_scene::ResourceGeneration,
+        missing_regular: Option<char>,
+        color_regular: Option<char>,
+    ) -> super::super::resources::PreparedSceneAtlas {
+        use super::super::resources::{
+            AtlasCell, CompiledGlyphAtlas, GlyphAtlasEntry, GlyphEntryKind, GlyphKey,
+            PreparedSceneAtlas,
+        };
+        let mut glyphs = crate::round::hud::COMPANION_HUD_GLYPH_REPERTOIRE
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        glyphs.insert(scalar);
+        let keys = glyphs
+            .into_iter()
+            .flat_map(|glyph| [false, true].map(move |bold| (glyph, bold)))
+            .filter(|(glyph, bold)| *bold || missing_regular != Some(*glyph))
+            .collect::<Vec<_>>();
+        const CELL_EXTENT: u32 = 4;
+        let width = u32::try_from(keys.len()).unwrap() * CELL_EXTENT;
+        let height = CELL_EXTENT;
+        let mut entries = std::collections::BTreeMap::new();
+        let mut rgba = vec![0; usize::try_from(width * height).unwrap() * 4];
+        for (entry_index, (glyph, bold)) in keys.into_iter().enumerate() {
+            let origin_x = u32::try_from(entry_index).unwrap() * CELL_EXTENT;
+            let cell = AtlasCell {
+                origin: [origin_x, 0],
+                extent: [CELL_EXTENT; 2],
+            };
+            let mut entry = if glyph == ' ' {
+                GlyphAtlasEntry::whitespace(29.0, 52.0, cell)
+            } else {
+                let kind = if !bold && color_regular == Some(glyph) {
+                    GlyphEntryKind::PremultipliedColorRgba
+                } else {
+                    GlyphEntryKind::Mask
+                };
+                GlyphAtlasEntry::synthetic_visible(kind, cell)
+            };
+            if glyph != ' ' {
+                entry.visible_uv = Some([
+                    (origin_x as f32 + 1.5) / width as f32,
+                    1.5 / height as f32,
+                    (origin_x as f32 + 2.5) / width as f32,
+                    2.5 / height as f32,
+                ]);
+                for row in 1..=2_u32 {
+                    let alpha = match (glyph, row) {
+                        ('r', 1) => 64,
+                        ('r', 2) => 192,
+                        ('e', _) => 128,
+                        _ => 255,
+                    };
+                    for column in 1..=2_u32 {
+                        let pixel = ((row * width + origin_x + column) * 4) as usize;
+                        rgba[pixel..pixel + 4].copy_from_slice(&[alpha, alpha, alpha, alpha]);
+                    }
+                }
+            }
+            entries.insert(GlyphKey::new(glyph.to_string(), bold), entry);
+        }
+        PreparedSceneAtlas::from_compiled_for_generation(
+            &CompiledGlyphAtlas { width, height, rgba, entries },
             resource_generation,
         )
         .unwrap()
@@ -2787,13 +2958,13 @@ mod tests {
 
     #[test]
     fn gpu_resource_accounting_is_exact_and_not_a_live_global_metric() {
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 3);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 4);
         assert_eq!(SceneGpuSharedFacts::EXPECTED.samplers, 1);
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 6);
-        assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 8);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 7);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 10);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.textures, 2);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.texture_views, 2);
-        assert_eq!(GpuSceneCandidateFacts::EXPECTED.bind_groups, 2);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.bind_groups, 4);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.static_uploads, 10);
         assert_eq!(SceneTargetFacts::EXPECTED.textures, 2);
         assert_eq!(SceneTargetFacts::EXPECTED.texture_views, 2);
@@ -2802,8 +2973,58 @@ mod tests {
             SceneGpuSharedFacts::EXPECTED.persistent_owned_handles()
                 + GpuSceneCandidateFacts::EXPECTED.persistent_owned_handles()
                 + SceneTargetFacts::EXPECTED.persistent_owned_handles(),
-            29,
+            35,
         );
+    }
+
+    #[test]
+    fn dedicated_hud_shader_contract_matches_fixed_rust_abi_and_private_group() {
+        for required in [
+            "struct HudGlyphGpuValue {",
+            "rect_points: vec4<f32>",
+            "glyph_entry_index: u32",
+            "role: u32",
+            "visible: u32",
+            "padding: u32",
+            "@group(3) @binding(0) var<storage, read> hud_glyph_buffer",
+            "fn vs_hud(",
+            "@builtin(vertex_index) vertex_index: u32",
+            "@builtin(instance_index) instance_index: u32",
+            "fn fs_hud(",
+            "arrayLength(&glyph_entry_buffer.values)",
+            "vec4<f32>(0.93, 0.93, 0.97, 1.0)",
+            "vec4<f32>(0.62, 0.63, 0.77, 1.0)",
+        ] {
+            assert!(SCENE_SHADER_SOURCE.contains(required), "missing {required}");
+        }
+
+        let vertex = SCENE_SHADER_SOURCE
+            .split("fn vs_hud(")
+            .nth(1)
+            .expect("HUD vertex entry")
+            .split("@fragment")
+            .next()
+            .expect("bounded HUD vertex body");
+        let invisible = vertex
+            .find("instance.visible == 0u")
+            .expect("invisible guard");
+        let off_clip = vertex
+            .find("vec4<f32>(2.0, 2.0, 0.0, 1.0)")
+            .expect("off-clip output");
+        assert!(invisible < off_clip);
+
+        let fragment = SCENE_SHADER_SOURCE
+            .split("fn fs_hud(")
+            .nth(1)
+            .expect("HUD fragment entry");
+        let visible = fragment.find("input.visible == 0u").expect("visible guard");
+        let bounds = fragment
+            .find("arrayLength(&glyph_entry_buffer.values)")
+            .expect("glyph bounds guard");
+        let lookup = fragment
+            .find("glyph_entry_buffer.values[input.glyph_entry_index]")
+            .expect("glyph lookup");
+        assert!(visible < bounds && bounds < lookup);
     }
 
     #[test]
@@ -2967,10 +3188,10 @@ mod tests {
         let candidate = compile_fixture(&SceneFixture::valid());
         let upload = prepare_scene_upload(
             &candidate,
-            &two_weight_atlas_for('^', candidate.generation_key.resources),
+            &full_hud_atlas_for('^', candidate.generation_key.resources, None, None),
         )
         .unwrap();
-        let atlas = two_weight_atlas_for('^', upload.generation_key.resources);
+        let atlas = full_hud_atlas_for('^', upload.generation_key.resources, None, None);
         let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
         assert_eq!(shared.facts(), SceneGpuSharedFacts::EXPECTED);
 
@@ -2985,18 +3206,392 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    enum TestPreparedHud<'prepared> {
+        Sensitive(&'prepared super::super::hud::SensitivePreparedHudFrame),
+        Redacted(&'prepared super::super::hud::CaptureSafePreparedHudFrame),
+    }
+
+    #[cfg(target_os = "macos")]
+    fn finish_hud_readback(
+        gpu: (&wgpu::Device, &wgpu::Queue),
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        staging_belt: &mut wgpu::util::StagingBelt,
+        prepared: TestPreparedHud<'_>,
+        clear: wgpu::Color,
+    ) -> Vec<u8> {
+        const EXTENT: u32 = 360;
+        let (device, queue) = gpu;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glorp-hud-hook-test-target"),
+            size: wgpu::Extent3d {
+                width: EXTENT,
+                height: EXTENT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SceneTextureContract::INTERMEDIATE,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glorp-hud-hook-test-encoder"),
+        });
+        {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glorp-hud-hook-test-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+        match prepared {
+            TestPreparedHud::Sensitive(prepared) => encode_sensitive_hud_hook(
+                &mut encoder,
+                staging_belt,
+                &view,
+                shared,
+                candidate,
+                prepared,
+            ),
+            TestPreparedHud::Redacted(prepared) => encode_redacted_hud_hook(
+                &mut encoder,
+                staging_belt,
+                &view,
+                shared,
+                candidate,
+                prepared,
+            ),
+        }
+        .expect("valid HUD hook encode");
+
+        let bytes_per_row = (EXTENT * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glorp-hud-hook-test-readback"),
+            size: u64::from(bytes_per_row) * u64::from(EXTENT),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(EXTENT),
+                },
+            },
+            wgpu::Extent3d {
+                width: EXTENT,
+                height: EXTENT,
+                depth_or_array_layers: 1,
+            },
+        );
+        staging_belt.finish();
+        let submission = queue.submit([encoder.finish()]);
+        staging_belt.recall();
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .expect("HUD hook readback poll");
+        let mapped = readback.slice(..).get_mapped_range().expect("map HUD hook");
+        let mut pixels = Vec::with_capacity((EXTENT * EXTENT * 4) as usize);
+        for row in mapped.chunks_exact(bytes_per_row as usize) {
+            pixels.extend_from_slice(&row[..(EXTENT * 4) as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+        pixels
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hud_geometry(
+        generation: crate::presentation::companion_scene::ResourceGeneration,
+    ) -> super::super::hud::HudPreparationGeometry {
+        super::super::hud::HudPreparationGeometry {
+            gap: crate::round::hud::StatGap {
+                center_x: 180.0,
+                baseline_y: 180.0,
+                max_width: 300.0,
+            },
+            aperture_radius: 180.0,
+            view_width: 360.0,
+            view_height: 360.0,
+            hud_font_size: 32.0,
+            resource_generation: generation,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hud_pixel_y_up(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
+        const EXTENT: u32 = 360;
+        let row = EXTENT - 1 - y;
+        let offset = ((row * EXTENT + x) * 4) as usize;
+        pixels[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn expected_hud_bgra(straight_srgb: [f32; 3], coverage: f32, clear: wgpu::Color) -> [u8; 4] {
+        let clear_linear = [clear.r as f32, clear.g as f32, clear.b as f32];
+        let output_linear: [f32; 3] = std::array::from_fn(|channel| {
+            scene_srgb_to_linear(straight_srgb[channel]) * coverage
+                + clear_linear[channel] * (1.0 - coverage)
+        });
+        let encoded = output_linear
+            .map(|channel| (scene_linear_to_srgb(channel).clamp(0.0, 1.0) * 255.0).round() as u8);
+        let alpha = (coverage + clear.a as f32 * (1.0 - coverage)).clamp(0.0, 1.0);
+        [
+            encoded[2],
+            encoded[1],
+            encoded[0],
+            (alpha * 255.0).round() as u8,
+        ]
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_bgra_close(actual: [u8; 4], expected: [u8; 4]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(
+                actual.abs_diff(expected) <= 2,
+                "actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_hud_hooks_reuse_caller_belt_render_redaction_and_keep_zero_slots_blank() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&SceneFixture::valid());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        assert_eq!(
+            candidate.hud.buffer_contract_for_test(),
+            [(
+                super::super::hud::HUD_GPU_BUFFER_BYTES,
+                super::super::hud::HudGpuBufferUsages::RECORDS,
+            ); 2]
+        );
+
+        let generation = upload.generation_key.resources;
+        let redacted_a = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(generation),
+            )
+            .unwrap();
+        let redacted_b = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(generation),
+            )
+            .unwrap();
+        let live_text_a = crate::round::hud::companion_hud_text(12.0, Some(0.1), 34.0);
+        let live_text_b =
+            crate::round::hud::companion_hud_text(98_700_000.0, Some(7.0), 6_500_000.0);
+        let live_a = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_sensitive(
+                &super::super::hud::SealedHudFrame::from_live(&live_text_a).unwrap(),
+                hud_geometry(generation),
+            )
+            .unwrap();
+        let live_b = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_sensitive(
+                &super::super::hud::SealedHudFrame::from_live(&live_text_b).unwrap(),
+                hud_geometry(generation),
+            )
+            .unwrap();
+        let zero = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(generation);
+        let shader_contract = candidate
+            .hud
+            .prepared_atlas()
+            .shader_contract_fixture_for_test();
+        let mut belt =
+            wgpu::util::StagingBelt::new(device.clone(), super::super::hud::HUD_GPU_BUFFER_BYTES);
+        let mut mismatched = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_sensitive(
+                &super::super::hud::SealedHudFrame::from_live(&live_text_a).unwrap(),
+                hud_geometry(generation),
+            )
+            .unwrap();
+        mismatched.set_resource_generation_for_test(
+            crate::presentation::companion_scene::ResourceGeneration(generation.0 + 1),
+        );
+        let before_failed_stage = candidate.hud.staging_facts_for_test();
+        let mut failed_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glorp-rejected-hud-stage-test"),
+        });
+        let failed_target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glorp-rejected-hud-stage-target"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SceneTextureContract::INTERMEDIATE,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let failed_view = failed_target.create_view(&wgpu::TextureViewDescriptor::default());
+        let error = encode_sensitive_hud_hook(
+            &mut failed_encoder,
+            &mut belt,
+            &failed_view,
+            &shared,
+            &mut candidate,
+            &mismatched,
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{error:?} {error}"),
+            "HudGpuStagingError::ResourceGenerationMismatch companion HUD GPU generation mismatch"
+        );
+        assert_eq!(candidate.hud.staging_facts_for_test(), before_failed_stage);
+        belt.finish();
+        queue.submit([failed_encoder.finish()]);
+        belt.recall();
+
+        let redacted_pixels_a = finish_hud_readback(
+            (&device, &queue),
+            &shared,
+            &mut candidate,
+            &mut belt,
+            TestPreparedHud::Redacted(&redacted_a),
+            wgpu::Color::TRANSPARENT,
+        );
+        let redacted_pixels_b = finish_hud_readback(
+            (&device, &queue),
+            &shared,
+            &mut candidate,
+            &mut belt,
+            TestPreparedHud::Redacted(&redacted_b),
+            wgpu::Color::TRANSPARENT,
+        );
+        let zero_pixels = finish_hud_readback(
+            (&device, &queue),
+            &shared,
+            &mut candidate,
+            &mut belt,
+            TestPreparedHud::Redacted(&zero),
+            wgpu::Color::TRANSPARENT,
+        );
+        let live_pixels_a = finish_hud_readback(
+            (&device, &queue),
+            &shared,
+            &mut candidate,
+            &mut belt,
+            TestPreparedHud::Sensitive(&live_a),
+            wgpu::Color::TRANSPARENT,
+        );
+        let live_pixels_b = finish_hud_readback(
+            (&device, &queue),
+            &shared,
+            &mut candidate,
+            &mut belt,
+            TestPreparedHud::Sensitive(&live_b),
+            wgpu::Color::TRANSPARENT,
+        );
+        let contract_clear = wgpu::Color { r: 0.10, g: 0.20, b: 0.30, a: 0.50 };
+        let shader_pixels = finish_hud_readback(
+            (&device, &queue),
+            &shared,
+            &mut candidate,
+            &mut belt,
+            TestPreparedHud::Redacted(&shader_contract),
+            contract_clear,
+        );
+
+        assert_eq!(redacted_pixels_a, redacted_pixels_b);
+        assert!(redacted_pixels_a
+            .chunks_exact(4)
+            .any(|pixel| pixel != [0, 0, 0, 0]));
+        assert!(zero_pixels
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 0]));
+        assert_ne!(live_pixels_a, live_pixels_b);
+        assert_ne!(live_pixels_a, redacted_pixels_a);
+        assert_ne!(live_pixels_b, redacted_pixels_a);
+
+        // The fixed shader probe uses an asymmetric 'r' cell (top 25%, bottom
+        // 75%), then two uniform 50%-coverage 'e' cells in total/subline roles.
+        // These known regions jointly lock entry indexing, the atlas Y flip,
+        // role paint selection, fractional coverage, BGRA storage, and
+        // premultiplied source-over blending over a nontransparent destination.
+        let r_bottom = hud_pixel_y_up(&shader_pixels, 40, 34);
+        let r_top = hud_pixel_y_up(&shader_pixels, 40, 46);
+        let total_half = hud_pixel_y_up(&shader_pixels, 72, 40);
+        let subline_half = hud_pixel_y_up(&shader_pixels, 104, 40);
+        assert!(r_bottom[3] > total_half[3] && total_half[3] > r_top[3]);
+        assert_bgra_close(
+            total_half,
+            expected_hud_bgra([0.93, 0.93, 0.97], 128.0 / 255.0, contract_clear),
+        );
+        assert_bgra_close(
+            subline_half,
+            expected_hud_bgra([0.62, 0.63, 0.77], 128.0 / 255.0, contract_clear),
+        );
+        assert_ne!(total_half, subline_half);
+        assert_eq!(
+            candidate.hud.staging_facts_for_test(),
+            super::super::hud::HudStagingFacts {
+                sensitive_copies: 2,
+                redacted_copies: 4,
+                copied_bytes: 6 * super::super::hud::HUD_GPU_BUFFER_BYTES,
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn native_candidate_rejects_atlas_and_device_epoch_mismatch_before_allocation() {
         let (device, queue) = native_device();
         let candidate = compile_fixture(&SceneFixture::valid());
-        let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
+        let atlas = full_hud_atlas_for('^', candidate.generation_key.resources, None, None);
         let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
         let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
-        let wrong_atlas = two_weight_atlas_for(
+        let wrong_atlas = full_hud_atlas_for(
             '^',
             crate::presentation::companion_scene::ResourceGeneration(
                 upload.generation_key.resources.0 + 1,
             ),
+            None,
+            None,
         );
         assert!(matches!(
             materialize_gpu_candidate(&device, &queue, &shared, &upload, &wrong_atlas),
@@ -3019,6 +3614,35 @@ mod tests {
             materialize_gpu_candidate(&device, &queue, &shared, &empty_upload, &atlas),
             Err(SceneGpuError::InvalidUpload),
         ));
+
+        for invalid_hud_atlas in [
+            full_hud_atlas_for('^', upload.generation_key.resources, Some('w'), None),
+            full_hud_atlas_for('^', upload.generation_key.resources, None, Some('w')),
+        ] {
+            let invalid_upload = prepare_scene_upload(&candidate, &invalid_hud_atlas).unwrap();
+            let error = match materialize_gpu_candidate(
+                &device,
+                &queue,
+                &shared,
+                &invalid_upload,
+                &invalid_hud_atlas,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid HUD atlas allocated a candidate"),
+            };
+            assert_eq!(error, SceneGpuError::InvalidHudAtlas);
+            assert_eq!(format!("{error:?}"), "InvalidHudAtlas");
+        }
+
+        let source = include_str!("render.rs");
+        let hud_preflight = source
+            .find("let prepared_hud_atlas = super::hud::PreparedHudAtlas::from_scene_atlas")
+            .expect("HUD atlas preflight");
+        let gpu_allocation_scope = source[hud_preflight..]
+            .find("create_in_gpu_error_scopes(device")
+            .map(|offset| hud_preflight + offset)
+            .expect("candidate allocation scope");
+        assert!(hud_preflight < gpu_allocation_scope);
     }
 
     #[cfg(target_os = "macos")]
@@ -3343,7 +3967,7 @@ mod tests {
     fn native_target_cache_reuses_replaces_and_retains_on_scoped_failure() {
         let (device, queue) = native_device();
         let cpu_candidate = compile_fixture(&SceneFixture::valid());
-        let atlas = two_weight_atlas_for('^', cpu_candidate.generation_key.resources);
+        let atlas = full_hud_atlas_for('^', cpu_candidate.generation_key.resources, None, None);
         let upload = prepare_scene_upload(&cpu_candidate, &atlas).unwrap();
         let device_epoch = upload.generation_key.device;
         let shared = SceneGpuShared::create(&device, device_epoch).unwrap();
