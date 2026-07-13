@@ -364,6 +364,206 @@ pub(super) struct ScenePhaseTable {
     pub(super) chrome_authored: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ScenePlannedDraw {
+    pub(super) primitive_index: u32,
+    pub(super) pipeline: ScenePipelineClass,
+    pub(super) index_range: Range<u32>,
+    pub(super) instance_range: Range<u32>,
+    pub(super) authored_order: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SceneHudMarker {
+    pub(super) primitive_index: u32,
+    pub(super) authored_order: u32,
+}
+
+/// Fixed scene-v2 screen-space schedule. The sealed HUD marker is deliberately
+/// not a [`ScenePlannedDraw`], so no general scene encoder can accidentally
+/// submit private HUD instances through the ordinary storage-buffer path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SceneChromePlan {
+    /// Gauges, status, trouble.
+    pub(super) prefix: [ScenePlannedDraw; 3],
+    pub(super) hud: SceneHudMarker,
+    /// Dim overlay.
+    pub(super) suffix: [ScenePlannedDraw; 1],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SceneDrawPlan {
+    pub(super) opaque: Vec<ScenePlannedDraw>,
+    /// Task 11 replaces this compiler order with one camera-depth stream.
+    pub(super) world_blended_unsorted: Vec<ScenePlannedDraw>,
+    pub(super) chrome: SceneChromePlan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SceneDrawPlanError {
+    MetadataLengthMismatch,
+    PrimitiveIndexOutOfBounds,
+    DuplicatePrimitive,
+    MissingPrimitive,
+    AuthoredOrderMismatch,
+    InvalidPipelineClass,
+    InvalidPhaseClass,
+    InvalidChromeSchedule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneDrawPhase {
+    Opaque,
+    WorldBlended,
+    Chrome,
+}
+
+/// Converts the complete CPU-side candidate metadata into a closed render
+/// schedule before any command encoder is allowed to begin a render pass.
+pub(super) fn validate_scene_draw_plan(
+    primitives: &[PrimitiveGpuValue],
+    draws: &[SceneDrawRecord],
+    phases: &ScenePhaseTable,
+) -> Result<SceneDrawPlan, SceneDrawPlanError> {
+    const CHROME_PREFIX_BINDINGS: [u32; 3] = [5, 3, 6];
+    const CHROME_SUFFIX_BINDINGS: [u32; 1] = [7];
+    const CHROME_DRAW_COUNT: usize =
+        CHROME_PREFIX_BINDINGS.len() + 1 + CHROME_SUFFIX_BINDINGS.len();
+
+    if primitives.len() != draws.len() {
+        return Err(SceneDrawPlanError::MetadataLengthMismatch);
+    }
+    if phases.chrome_authored.len() != CHROME_DRAW_COUNT {
+        return Err(SceneDrawPlanError::InvalidChromeSchedule);
+    }
+
+    let mut seen = vec![false; primitives.len()];
+    let mut opaque = Vec::with_capacity(phases.opaque_cutout.len());
+    for primitive_index in phases.opaque_cutout.iter().copied() {
+        opaque.push(validate_planned_draw(
+            primitives,
+            draws,
+            &mut seen,
+            primitive_index,
+            SceneDrawPhase::Opaque,
+        )?);
+    }
+    let mut world_blended_unsorted = Vec::with_capacity(phases.world_blended_unsorted.len());
+    for primitive_index in phases.world_blended_unsorted.iter().copied() {
+        world_blended_unsorted.push(validate_planned_draw(
+            primitives,
+            draws,
+            &mut seen,
+            primitive_index,
+            SceneDrawPhase::WorldBlended,
+        )?);
+    }
+
+    let mut prefix: [Option<ScenePlannedDraw>; CHROME_PREFIX_BINDINGS.len()] =
+        std::array::from_fn(|_| None);
+    let mut hud = None;
+    let mut suffix: [Option<ScenePlannedDraw>; CHROME_SUFFIX_BINDINGS.len()] =
+        std::array::from_fn(|_| None);
+    let mut previous_authored_order: Option<u32> = None;
+    for (position, primitive_index) in phases.chrome_authored.iter().copied().enumerate() {
+        let planned = validate_planned_draw(
+            primitives,
+            draws,
+            &mut seen,
+            primitive_index,
+            SceneDrawPhase::Chrome,
+        )?;
+        let primitive = primitives[primitive_index as usize];
+        if let Some(previous) = previous_authored_order {
+            if previous.checked_add(1) != Some(primitive.authored_order) {
+                return Err(SceneDrawPlanError::InvalidChromeSchedule);
+            }
+        }
+        previous_authored_order = Some(primitive.authored_order);
+        match position {
+            0..=2
+                if planned.pipeline == ScenePipelineClass::ChromeAnalytic
+                    && primitive.binding_index == CHROME_PREFIX_BINDINGS[position] =>
+            {
+                prefix[position] = Some(planned);
+            }
+            3 if planned.pipeline == ScenePipelineClass::SealedHudHook => {
+                hud = Some(SceneHudMarker {
+                    primitive_index,
+                    authored_order: primitive.authored_order,
+                });
+            }
+            4 if planned.pipeline == ScenePipelineClass::ChromeAnalytic
+                && primitive.binding_index == CHROME_SUFFIX_BINDINGS[0] =>
+            {
+                suffix[0] = Some(planned);
+            }
+            _ => return Err(SceneDrawPlanError::InvalidChromeSchedule),
+        }
+    }
+    if seen.contains(&false) {
+        return Err(SceneDrawPlanError::MissingPrimitive);
+    }
+
+    Ok(SceneDrawPlan {
+        opaque,
+        world_blended_unsorted,
+        chrome: SceneChromePlan {
+            prefix: prefix.map(|value| value.expect("validated chrome prefix is complete")),
+            hud: hud.ok_or(SceneDrawPlanError::InvalidChromeSchedule)?,
+            suffix: suffix.map(|value| value.expect("validated chrome suffix is complete")),
+        },
+    })
+}
+
+fn validate_planned_draw(
+    primitives: &[PrimitiveGpuValue],
+    draws: &[SceneDrawRecord],
+    seen: &mut [bool],
+    primitive_index: u32,
+    phase: SceneDrawPhase,
+) -> Result<ScenePlannedDraw, SceneDrawPlanError> {
+    let index = usize::try_from(primitive_index)
+        .ok()
+        .filter(|index| *index < primitives.len())
+        .ok_or(SceneDrawPlanError::PrimitiveIndexOutOfBounds)?;
+    if std::mem::replace(&mut seen[index], true) {
+        return Err(SceneDrawPlanError::DuplicatePrimitive);
+    }
+    let primitive = primitives[index];
+    let draw = &draws[index];
+    if primitive.authored_order != draw.authored_order {
+        return Err(SceneDrawPlanError::AuthoredOrderMismatch);
+    }
+    let pipeline =
+        scene_pipeline_class(primitive, draw).ok_or(SceneDrawPlanError::InvalidPipelineClass)?;
+    let valid_phase = match phase {
+        SceneDrawPhase::Opaque => pipeline == ScenePipelineClass::WorldOpaqueAnalytic,
+        SceneDrawPhase::WorldBlended => matches!(
+            pipeline,
+            ScenePipelineClass::WorldSourceOverAnalytic
+                | ScenePipelineClass::WorldSourceOverGlyph
+                | ScenePipelineClass::WorldMultiplyAnalytic
+                | ScenePipelineClass::WorldMultiplyGlyphMask
+                | ScenePipelineClass::WorldAdditiveGlyph
+        ),
+        SceneDrawPhase::Chrome => matches!(
+            pipeline,
+            ScenePipelineClass::ChromeAnalytic | ScenePipelineClass::SealedHudHook
+        ),
+    };
+    if !valid_phase {
+        return Err(SceneDrawPlanError::InvalidPhaseClass);
+    }
+    Ok(ScenePlannedDraw {
+        primitive_index,
+        pipeline,
+        index_range: draw.index_range.clone(),
+        instance_range: draw.instance_range.clone(),
+        authored_order: draw.authored_order,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PreparedSceneUpload {
     pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
@@ -1399,6 +1599,7 @@ pub(super) enum SceneGpuError {
     InvalidAtlas,
     InvalidHudAtlas,
     InvalidUpload,
+    InvalidDrawPlan(SceneDrawPlanError),
     InvalidTargetKey(SceneTargetKeyError),
     Gpu(ScopedGpuErrorCategory),
 }
@@ -1455,6 +1656,27 @@ pub(super) struct SceneBasePipelines {
     pub(super) chrome_analytic: wgpu::RenderPipeline,
     pub(super) chrome_hud: wgpu::RenderPipeline,
     pub(super) final_surface: wgpu::RenderPipeline,
+}
+
+impl SceneBasePipelines {
+    /// Closed typed lookup. Callers must first obtain the class from
+    /// [`validate_scene_draw_plan`]; raw material/blend tags never select a
+    /// production pipeline directly.
+    pub(super) const fn for_class(&self, class: ScenePipelineClass) -> &wgpu::RenderPipeline {
+        match class {
+            ScenePipelineClass::WorldOpaqueAnalytic => &self.world_opaque_analytic,
+            ScenePipelineClass::WorldSourceOverAnalytic => &self.world_source_over_analytic,
+            ScenePipelineClass::WorldSourceOverGlyph => &self.world_source_over_glyph,
+            ScenePipelineClass::WorldMultiplyAnalytic => &self.world_multiply_analytic,
+            ScenePipelineClass::WorldMultiplyGlyphMask => &self.world_multiply_glyph_mask,
+            ScenePipelineClass::WorldAdditiveGlyph => &self.world_additive_glyph,
+            ScenePipelineClass::WorldAdditiveAnalyticReserved => {
+                &self.world_additive_analytic_reserved
+            }
+            ScenePipelineClass::ChromeAnalytic => &self.chrome_analytic,
+            ScenePipelineClass::SealedHudHook => &self.chrome_hud,
+        }
+    }
 }
 
 /// Device-epoch shared handles. The render owner supplies `Device`/`Queue` to
@@ -1804,8 +2026,9 @@ pub(super) struct GpuSceneCandidate {
     pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
     pub(super) static_checksum: u64,
-    pub(super) draws: Vec<SceneDrawRecord>,
-    pub(super) phases: ScenePhaseTable,
+    /// Frozen once during materialization. Ordinary frames read this closed
+    /// schedule directly and perform no full validation or heap allocation.
+    pub(super) draw_plan: SceneDrawPlan,
 }
 
 impl GpuSceneCandidate {
@@ -1952,6 +2175,8 @@ pub(super) fn materialize_gpu_candidate(
     atlas: &PreparedSceneAtlas,
 ) -> Result<GpuSceneCandidate, SceneGpuError> {
     validate_gpu_candidate_preflight(shared, upload, atlas)?;
+    let draw_plan = validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases)
+        .map_err(SceneGpuError::InvalidDrawPlan)?;
     let prepared_hud_atlas = super::hud::PreparedHudAtlas::from_scene_atlas(atlas)
         .map_err(|_| SceneGpuError::InvalidHudAtlas)?;
 
@@ -2107,8 +2332,7 @@ pub(super) fn materialize_gpu_candidate(
             generation_key: upload.generation_key,
             source_revisions: upload.source_revisions,
             static_checksum: upload.static_checksum,
-            draws: upload.draws.clone(),
-            phases: upload.phases.clone(),
+            draw_plan,
         }
     })
 }
@@ -2589,9 +2813,11 @@ pub(super) fn scene_unpremultiply_final(color: [f32; 4]) -> [f32; 4] {
 mod tests {
     use super::*;
     use crate::presentation::companion_scene::scene::{
-        AnalyticGeometry, AnalyticSemantic, AuthoredGlyph, ContentDelta, FrameDelta,
-        InstanceGroupBinding, InstanceLayer, MaterialKind, PetArtFilter, PetPaletteRole,
-        PrimitiveBinding, PrimitiveKind, ResourceKind, SceneFixture,
+        AnalyticGeometry, AnalyticParamId, AnalyticSemantic, AuthoredGlyph, Bounds3,
+        CanonicalAlias, ContentDelta, DepthBehavior, FrameDelta, InstanceGroupBinding,
+        InstanceLayer, MaterialId, MaterialKind, MaterialTemplate, PetArtFilter, PetPaletteRole,
+        PrimitiveBinding, PrimitiveKind, PrimitiveSpace, PrimitiveTemplate, ResourceId,
+        ResourceKind, ResourceTemplate, SceneFixture, WorldBlend,
     };
 
     /// CPU-side reference vectors for the family-aware WGSL glyph placement
@@ -3112,6 +3338,177 @@ mod tests {
             .any(|(_, _, expected)| { *expected == WorldAdditiveAnalyticReserved }));
     }
 
+    fn canonical_draw_plan_fixture() -> (
+        Vec<PrimitiveGpuValue>,
+        Vec<SceneDrawRecord>,
+        ScenePhaseTable,
+    ) {
+        let mut primitives = vec![
+            pipeline_primitive(2, 2, 3, 1, 1, 1, 0, 0),
+            pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2),
+            pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 5),
+            pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 3),
+            pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 6),
+            pipeline_primitive(4, 6, 1, 3, 3, 2, 8, 0),
+            pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 7),
+        ];
+        let mut draws = vec![
+            pipeline_draw(PrimitiveSource::Analytic),
+            pipeline_draw(PrimitiveSource::Analytic),
+            pipeline_draw(PrimitiveSource::Analytic),
+            pipeline_draw(PrimitiveSource::Analytic),
+            pipeline_draw(PrimitiveSource::Analytic),
+            sealed_hud_draw(),
+            pipeline_draw(PrimitiveSource::Analytic),
+        ];
+        for (authored_order, (primitive, draw)) in primitives.iter_mut().zip(&mut draws).enumerate()
+        {
+            primitive.authored_order = authored_order as u32;
+            draw.authored_order = authored_order as u32;
+        }
+        (
+            primitives,
+            draws,
+            ScenePhaseTable {
+                opaque_cutout: vec![0],
+                world_blended_unsorted: vec![1],
+                chrome_authored: vec![2, 3, 4, 5, 6],
+            },
+        )
+    }
+
+    #[test]
+    fn draw_plan_preserves_world_phases_and_seals_the_canonical_chrome_schedule() {
+        let (primitives, draws, phases) = canonical_draw_plan_fixture();
+        let plan = validate_scene_draw_plan(&primitives, &draws, &phases).unwrap();
+
+        assert_eq!(
+            plan.opaque,
+            vec![ScenePlannedDraw {
+                primitive_index: 0,
+                pipeline: ScenePipelineClass::WorldOpaqueAnalytic,
+                index_range: 0..6,
+                instance_range: 0..1,
+                authored_order: 0,
+            }]
+        );
+        assert_eq!(
+            plan.world_blended_unsorted,
+            vec![ScenePlannedDraw {
+                primitive_index: 1,
+                pipeline: ScenePipelineClass::WorldMultiplyAnalytic,
+                index_range: 0..6,
+                instance_range: 0..1,
+                authored_order: 1,
+            }]
+        );
+        assert_eq!(
+            plan.chrome.prefix.map(|draw| draw.primitive_index),
+            [2, 3, 4],
+            "gauges, status, and trouble stay before the sealed HUD hook",
+        );
+        assert_eq!(plan.chrome.hud.primitive_index, 5);
+        assert_eq!(
+            plan.chrome.suffix.map(|draw| draw.primitive_index),
+            [6],
+            "dim is the only post-HUD chrome draw",
+        );
+    }
+
+    #[test]
+    fn draw_plan_fails_closed_on_missing_duplicate_misplaced_or_untyped_draws() {
+        let assert_invalid = |primitives: &[PrimitiveGpuValue],
+                              draws: &[SceneDrawRecord],
+                              phases: &ScenePhaseTable,
+                              expected| {
+            assert_eq!(
+                validate_scene_draw_plan(primitives, draws, phases),
+                Err(expected),
+            );
+        };
+
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases.chrome_authored.remove(3);
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::InvalidChromeSchedule,
+        );
+
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases.chrome_authored.insert(3, 5);
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::InvalidChromeSchedule,
+        );
+
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases.chrome_authored.swap(4, 3);
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::InvalidChromeSchedule,
+        );
+
+        let (mut primitives, mut draws, phases) = canonical_draw_plan_fixture();
+        primitives[1] = pipeline_primitive(1, 1, 1, 3, 2, 1, 0, 0);
+        primitives[1].authored_order = 1;
+        draws[1] = pipeline_draw(PrimitiveSource::StaticAtlas);
+        draws[1].authored_order = 1;
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::InvalidPipelineClass,
+        );
+
+        let (mut primitives, draws, phases) = canonical_draw_plan_fixture();
+        primitives[1] = pipeline_primitive(2, 5, 3, 5, 2, 1, 0, 4);
+        primitives[1].authored_order = 1;
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::InvalidPipelineClass,
+        );
+    }
+
+    #[test]
+    fn draw_plan_walks_every_primitive_once_and_bounds_checks_phase_indices() {
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases.world_blended_unsorted.push(0);
+        assert_eq!(
+            validate_scene_draw_plan(&primitives, &draws, &phases),
+            Err(SceneDrawPlanError::DuplicatePrimitive),
+        );
+
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases.opaque_cutout[0] = u32::MAX;
+        assert_eq!(
+            validate_scene_draw_plan(&primitives, &draws, &phases),
+            Err(SceneDrawPlanError::PrimitiveIndexOutOfBounds),
+        );
+
+        let (mut primitives, mut draws, phases) = canonical_draw_plan_fixture();
+        primitives.push(pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2));
+        draws.push(pipeline_draw(PrimitiveSource::Analytic));
+        assert_eq!(
+            validate_scene_draw_plan(&primitives, &draws, &phases),
+            Err(SceneDrawPlanError::MissingPrimitive),
+        );
+
+        let (primitives, mut draws, phases) = canonical_draw_plan_fixture();
+        draws[0].authored_order = 99;
+        assert_eq!(
+            validate_scene_draw_plan(&primitives, &draws, &phases),
+            Err(SceneDrawPlanError::AuthoredOrderMismatch),
+        );
+    }
+
     #[test]
     fn pipeline_selector_fails_closed_on_axis_and_source_mutations() {
         let primitive = pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2);
@@ -3557,6 +3954,135 @@ mod tests {
 
     fn compile_fixture(fixture: &SceneFixture) -> super::super::compiler::CpuSceneCandidate {
         super::super::compiler::compile_fixture_for_render_test(fixture)
+    }
+
+    fn canonical_materialization_fixture() -> SceneFixture {
+        let mut fixture = SceneFixture::valid();
+        let alias = |value: &str| CanonicalAlias::new(value).unwrap();
+        let unlit_alias = alias("material.scene-unlit-analytic");
+        let multiply_alias = alias("material.scene-multiply");
+        let chrome_alias = alias("material.scene-chrome");
+        let analytic_resource_alias = alias("resource.scene-analytic");
+        let hud_resource_alias = alias("resource.scene-hud-atlas");
+        let unlit = MaterialId::from_alias(&unlit_alias);
+        let multiply = MaterialId::from_alias(&multiply_alias);
+        let chrome = MaterialId::from_alias(&chrome_alias);
+        let analytic_resource = ResourceId::from_alias(&analytic_resource_alias);
+        let hud_resource = ResourceId::from_alias(&hud_resource_alias);
+        fixture.template.materials = vec![
+            MaterialTemplate {
+                id: unlit,
+                alias: unlit_alias,
+                kind: MaterialKind::UnlitAnalytic,
+            },
+            MaterialTemplate {
+                id: multiply,
+                alias: multiply_alias,
+                kind: MaterialKind::MultiplyShadow,
+            },
+            MaterialTemplate {
+                id: chrome,
+                alias: chrome_alias,
+                kind: MaterialKind::ScreenChrome,
+            },
+        ];
+        fixture.template.resources = vec![
+            ResourceTemplate {
+                id: analytic_resource,
+                alias: analytic_resource_alias,
+                kind: ResourceKind::AnalyticGeometry,
+            },
+            ResourceTemplate {
+                id: hud_resource,
+                alias: hud_resource_alias,
+                kind: ResourceKind::GlyphAtlas,
+            },
+        ];
+        let node = fixture.template.nodes[0].id;
+        let bounds = Bounds3 { min: [0.0; 3], max: [1.0, 1.0, 0.0] };
+        let analytic = |binding: u8,
+                        material: MaterialId,
+                        blend: WorldBlend,
+                        depth: DepthBehavior,
+                        space: PrimitiveSpace,
+                        authored_order: u16| PrimitiveTemplate {
+            node,
+            kind: PrimitiveKind::AnalyticShape,
+            material,
+            resource: Some(analytic_resource),
+            blend,
+            depth,
+            binding: PrimitiveBinding::Analytic(AnalyticParamId(binding)),
+            authored_order,
+            local_geometry: bounds,
+            space,
+        };
+        fixture.template.primitives = vec![
+            analytic(
+                0,
+                unlit,
+                WorldBlend::Opaque,
+                DepthBehavior::WorldWrite,
+                PrimitiveSpace::World,
+                0,
+            ),
+            analytic(
+                2,
+                multiply,
+                WorldBlend::Multiply,
+                DepthBehavior::WorldReadOnly,
+                PrimitiveSpace::World,
+                1,
+            ),
+            analytic(
+                5,
+                chrome,
+                WorldBlend::PremultipliedAlpha,
+                DepthBehavior::ScreenNoDepth,
+                PrimitiveSpace::Screen,
+                2,
+            ),
+            analytic(
+                3,
+                chrome,
+                WorldBlend::PremultipliedAlpha,
+                DepthBehavior::ScreenNoDepth,
+                PrimitiveSpace::Screen,
+                3,
+            ),
+            analytic(
+                6,
+                chrome,
+                WorldBlend::PremultipliedAlpha,
+                DepthBehavior::ScreenNoDepth,
+                PrimitiveSpace::Screen,
+                4,
+            ),
+            PrimitiveTemplate {
+                node,
+                kind: PrimitiveKind::InstanceQuad,
+                material: chrome,
+                resource: Some(hud_resource),
+                blend: WorldBlend::PremultipliedAlpha,
+                depth: DepthBehavior::ScreenNoDepth,
+                binding: PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
+                authored_order: 5,
+                local_geometry: bounds,
+                space: PrimitiveSpace::Screen,
+            },
+            analytic(
+                7,
+                chrome,
+                WorldBlend::PremultipliedAlpha,
+                DepthBehavior::ScreenNoDepth,
+                PrimitiveSpace::Screen,
+                6,
+            ),
+        ];
+        for slot in &mut fixture.template.static_atlas_recipes {
+            slot.recipe = None;
+        }
+        fixture
     }
 
     #[test]
@@ -4763,7 +5289,7 @@ mod tests {
     #[test]
     fn native_shared_and_candidate_materialization_validate_without_a_surface() {
         let (device, queue) = native_device();
-        let candidate = compile_fixture(&SceneFixture::valid());
+        let candidate = compile_fixture(&canonical_materialization_fixture());
         let upload = prepare_scene_upload(
             &candidate,
             &full_hud_atlas_for('^', candidate.generation_key.resources, None, None),
@@ -4778,8 +5304,99 @@ mod tests {
         assert_eq!(gpu.generation_key, upload.generation_key);
         assert_eq!(gpu.source_revisions, upload.source_revisions);
         assert_eq!(gpu.static_checksum, upload.static_checksum);
-        assert_eq!(gpu.draws, upload.draws);
-        assert_eq!(gpu.phases, upload.phases);
+        assert_eq!(
+            gpu.draw_plan,
+            validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases).unwrap(),
+        );
+        for (class, expected) in [
+            (
+                ScenePipelineClass::WorldOpaqueAnalytic,
+                &shared.pipelines.world_opaque_analytic,
+            ),
+            (
+                ScenePipelineClass::WorldSourceOverAnalytic,
+                &shared.pipelines.world_source_over_analytic,
+            ),
+            (
+                ScenePipelineClass::WorldSourceOverGlyph,
+                &shared.pipelines.world_source_over_glyph,
+            ),
+            (
+                ScenePipelineClass::WorldMultiplyAnalytic,
+                &shared.pipelines.world_multiply_analytic,
+            ),
+            (
+                ScenePipelineClass::WorldMultiplyGlyphMask,
+                &shared.pipelines.world_multiply_glyph_mask,
+            ),
+            (
+                ScenePipelineClass::WorldAdditiveGlyph,
+                &shared.pipelines.world_additive_glyph,
+            ),
+            (
+                ScenePipelineClass::WorldAdditiveAnalyticReserved,
+                &shared.pipelines.world_additive_analytic_reserved,
+            ),
+            (
+                ScenePipelineClass::ChromeAnalytic,
+                &shared.pipelines.chrome_analytic,
+            ),
+            (
+                ScenePipelineClass::SealedHudHook,
+                &shared.pipelines.chrome_hud,
+            ),
+        ] {
+            assert!(std::ptr::eq(shared.pipelines.for_class(class), expected));
+        }
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_materialization_rejects_malformed_static_and_reserved_plans_before_allocation() {
+        let (device, queue) = native_device();
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+
+        let mut malformed_upload = upload.clone();
+        malformed_upload.primitives[3].binding_index = 5;
+        malformed_upload.primitives[3].frame_base = 5;
+        assert!(matches!(
+            materialize_gpu_candidate(&device, &queue, &shared, &malformed_upload, &atlas),
+            Err(SceneGpuError::InvalidDrawPlan(
+                SceneDrawPlanError::InvalidChromeSchedule
+            )),
+        ));
+
+        let mut static_upload = upload.clone();
+        static_upload.primitives[0].primitive_kind = ATLAS_QUAD_PRIMITIVE_TAG;
+        static_upload.primitives[0].material_kind = 1;
+        static_upload.primitives[0].resource_kind = 1;
+        static_upload.primitives[0].binding_index = 0;
+        static_upload.primitives[0].content_base = NONE_U32;
+        static_upload.primitives[0].frame_base = NONE_U32;
+        static_upload.primitives[0].aux_content_base = NONE_U32;
+        static_upload.draws[0].source = PrimitiveSource::StaticAtlas;
+        assert!(matches!(
+            materialize_gpu_candidate(&device, &queue, &shared, &static_upload, &atlas),
+            Err(SceneGpuError::InvalidDrawPlan(
+                SceneDrawPlanError::InvalidPipelineClass
+            )),
+        ));
+
+        let mut reserved_upload = upload;
+        reserved_upload.primitives[1].material_kind = 5;
+        reserved_upload.primitives[1].blend = 5;
+        reserved_upload.primitives[1].binding_index = 4;
+        reserved_upload.primitives[1].frame_base = 4;
+        assert!(matches!(
+            materialize_gpu_candidate(&device, &queue, &shared, &reserved_upload, &atlas),
+            Err(SceneGpuError::InvalidDrawPlan(
+                SceneDrawPlanError::InvalidPipelineClass
+            )),
+        ));
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 
@@ -4960,7 +5577,7 @@ mod tests {
     #[test]
     fn native_hud_hooks_reuse_caller_belt_render_redaction_and_keep_zero_slots_blank() {
         let (device, queue) = native_device();
-        let cpu = compile_fixture(&SceneFixture::valid());
+        let cpu = compile_fixture(&canonical_materialization_fixture());
         let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
         let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
         let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
@@ -5159,7 +5776,7 @@ mod tests {
     #[test]
     fn native_candidate_rejects_atlas_and_device_epoch_mismatch_before_allocation() {
         let (device, queue) = native_device();
-        let candidate = compile_fixture(&SceneFixture::valid());
+        let candidate = compile_fixture(&canonical_materialization_fixture());
         let atlas = full_hud_atlas_for('^', candidate.generation_key.resources, None, None);
         let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
         let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
@@ -5604,7 +6221,7 @@ mod tests {
     #[test]
     fn native_target_cache_reuses_replaces_and_retains_on_scoped_failure() {
         let (device, queue) = native_device();
-        let cpu_candidate = compile_fixture(&SceneFixture::valid());
+        let cpu_candidate = compile_fixture(&canonical_materialization_fixture());
         let atlas = full_hud_atlas_for('^', cpu_candidate.generation_key.resources, None, None);
         let upload = prepare_scene_upload(&cpu_candidate, &atlas).unwrap();
         let device_epoch = upload.generation_key.device;
