@@ -404,7 +404,7 @@ fn placement_for_id(
     if !outcome.visible {
         return None;
     }
-    let style = tank_life_style(spec.low_color_key, input.color_capability);
+    let style = tank_life_style(spec.id, input.color_capability);
     let bounds = outcome.bounds?;
     Some(TankLifePlacement {
         inhabitant_id: id.clone(),
@@ -480,22 +480,22 @@ fn route_layer(layer: crate::presentation::tank_life::TankRouteLayer) -> Habitat
 }
 
 fn tank_life_style(
-    low_color_key: &str,
+    catalog_id: &str,
     color_capability: crate::tui::style::ColorCapability,
 ) -> Style {
     if matches!(color_capability, crate::tui::style::ColorCapability::Flat) {
         return Style::default();
     }
-    let color = match low_color_key {
-        "shrimp" => Color::Rgb(0xff, 0xc4, 0x92),
-        "fish" | "school" => Color::Rgb(0x7e, 0xee, 0xff),
-        "snail" => Color::Rgb(0xd8, 0xc0, 0x90),
-        "burrower" | "ray" => Color::Rgb(0xc8, 0xb0, 0x88),
-        "rim" => Color::Rgb(0xb8, 0xd8, 0xf0),
-        "host" => Color::Rgb(0xe8, 0xb0, 0xd0),
-        _ => crate::tui::style::tokenpet_palette().dim.rgb,
+    let Some(paint) = crate::presentation::tank_life::tank_paint_for(catalog_id) else {
+        return Style::default();
     };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    let [red, green, blue] = paint.color_srgb8;
+    let style = Style::default().fg(Color::Rgb(red, green, blue));
+    if paint.bold {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn stable_hash(input: &str) -> u64 {
@@ -517,6 +517,33 @@ mod tests {
     use time::macros::date;
 
     const SEED: &str = "glorp-tank-life-fixture";
+
+    #[test]
+    fn tank_life_style_preserves_colored_and_flat_output() {
+        let expected = [
+            (crate::game::habitat::GLASS_SHRIMP, [255, 196, 146]),
+            (crate::game::habitat::NEEDLEFISH, [126, 238, 255]),
+            (crate::game::habitat::GLASS_SNAIL, [216, 192, 144]),
+            (crate::game::habitat::BURROWER, [200, 176, 136]),
+            (crate::game::habitat::RIM_SKIMMER, [184, 216, 240]),
+            (crate::game::habitat::SAND_RAY, [200, 176, 136]),
+            (crate::game::habitat::SCHOOLLET, [126, 238, 255]),
+            (crate::game::habitat::ANEMONE_HOST, [232, 176, 208]),
+        ];
+
+        for (catalog_id, [red, green, blue]) in expected {
+            assert_eq!(
+                tank_life_style(catalog_id, crate::tui::style::ColorCapability::Truecolor),
+                Style::default()
+                    .fg(Color::Rgb(red, green, blue))
+                    .add_modifier(Modifier::BOLD)
+            );
+            assert_eq!(
+                tank_life_style(catalog_id, crate::tui::style::ColorCapability::Flat),
+                Style::default()
+            );
+        }
+    }
 
     fn earned(age_days: i64) -> Vec<EarnedTankInhabitantView> {
         crate::game::habitat::TANK_INHABITANT_CATALOG

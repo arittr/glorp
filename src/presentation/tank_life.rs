@@ -132,6 +132,25 @@ pub(crate) struct TankRouteSpriteCell {
     pub(crate) glyph: char,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TankPaint {
+    pub(crate) color_srgb8: [u8; 3],
+    pub(crate) bold: bool,
+}
+
+pub(crate) fn tank_paint_for(catalog_id: &str) -> Option<TankPaint> {
+    let color_srgb8 = match catalog_id {
+        crate::game::habitat::GLASS_SHRIMP => [255, 196, 146],
+        crate::game::habitat::NEEDLEFISH | crate::game::habitat::SCHOOLLET => [126, 238, 255],
+        crate::game::habitat::GLASS_SNAIL => [216, 192, 144],
+        crate::game::habitat::BURROWER | crate::game::habitat::SAND_RAY => [200, 176, 136],
+        crate::game::habitat::RIM_SKIMMER => [184, 216, 240],
+        crate::game::habitat::ANEMONE_HOST => [232, 176, 208],
+        _ => return None,
+    };
+    Some(TankPaint { color_srgb8, bold: true })
+}
+
 pub(crate) fn resolve_tank_route(input: TankRouteInput<'_>) -> Option<TankRouteOutcome> {
     let spec = crate::game::habitat::TANK_INHABITANT_CATALOG
         .iter()
@@ -596,6 +615,40 @@ fn stable_hash(input: &str) -> u64 {
 mod tests {
     use super::*;
     use time::macros::{date, datetime};
+
+    #[test]
+    fn tank_paint_catalog_matches_shipping_colors() {
+        let expected = [
+            (crate::game::habitat::GLASS_SHRIMP, [255, 196, 146]),
+            (crate::game::habitat::NEEDLEFISH, [126, 238, 255]),
+            (crate::game::habitat::GLASS_SNAIL, [216, 192, 144]),
+            (crate::game::habitat::BURROWER, [200, 176, 136]),
+            (crate::game::habitat::RIM_SKIMMER, [184, 216, 240]),
+            (crate::game::habitat::SAND_RAY, [200, 176, 136]),
+            (crate::game::habitat::SCHOOLLET, [126, 238, 255]),
+            (crate::game::habitat::ANEMONE_HOST, [232, 176, 208]),
+        ];
+
+        assert_eq!(
+            expected.len(),
+            crate::game::habitat::TANK_INHABITANT_CATALOG.len()
+        );
+        for (spec, (catalog_id, color_srgb8)) in crate::game::habitat::TANK_INHABITANT_CATALOG
+            .iter()
+            .zip(expected)
+        {
+            assert_eq!(spec.id, catalog_id);
+            assert_eq!(
+                tank_paint_for(catalog_id),
+                Some(TankPaint { color_srgb8, bold: true })
+            );
+        }
+    }
+
+    #[test]
+    fn tank_paint_rejects_unknown_catalog_ids() {
+        assert_eq!(tank_paint_for("future_tank_guest"), None);
+    }
 
     #[test]
     fn round_resolver_returns_only_final_cells_outside_hud_and_aperture_clips() {
