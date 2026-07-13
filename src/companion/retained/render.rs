@@ -60,8 +60,9 @@ pub(super) struct SceneContentGpuValue {
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub(super) struct GlyphAtlasGpuEntry {
     pub(super) visible_uv: [f32; 4],
+    /// Horizontal bearing, precomputed Y-up bottom bearing, width, and height.
     pub(super) ink_origin_size: [f32; 4],
-    /// Advance, line height, and top-down baseline in raster pixels.
+    /// Advance, line height, and baseline in raster pixels.
     pub(super) metrics: [f32; 3],
     pub(super) flags: u32,
     /// Integer `[origin_x, origin_y, width, height]` of the allocated cell.
@@ -81,6 +82,7 @@ pub(super) enum InstanceSource {
         layer: crate::presentation::companion_scene::scene::InstanceLayer,
     },
     Ambient,
+    WallShadowGlyphMask,
     Hud,
 }
 
@@ -150,6 +152,9 @@ pub(super) enum SceneUploadError {
     MissingGlyphKey {
         family: ContentMirrorFamily,
         slot: u32,
+        key: GlyphKey,
+    },
+    InvalidGlyphEntry {
         key: GlyphKey,
     },
 }
@@ -243,6 +248,7 @@ pub(super) fn prepare_scene_upload(
             .ok_or(SceneUploadError::InvalidPrimitiveReference { primitive_index })?;
         preflight_primitive(primitive_index, source)?;
     }
+    let glyph_entries = prepare_glyph_entries(atlas)?;
 
     let mut primitives = Vec::with_capacity(candidate.primitive_count());
     let mut draws = Vec::with_capacity(candidate.primitive_count());
@@ -298,7 +304,7 @@ pub(super) fn prepare_scene_upload(
         content_globals_bytes,
         frame_bytes,
         scene_content_bytes,
-        glyph_entries: prepare_glyph_entries(atlas),
+        glyph_entries,
     })
 }
 
@@ -309,6 +315,10 @@ fn prepare_draw_record(source: PrimitiveUploadSource) -> Option<SceneDrawRecord>
         .map(|end| source.first_index..end)?;
     let (primitive_source, instance_count) = match source.primitive_kind {
         ATLAS_QUAD_PRIMITIVE_TAG => (PrimitiveSource::StaticAtlas, 1),
+        ANALYTIC_PRIMITIVE_TAG if is_wall_shadow_glyph_mask(source) => (
+            PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
+            u32::try_from(crate::presentation::companion_scene::scene::MAX_PET_ART_SLOTS).ok()?,
+        ),
         ANALYTIC_PRIMITIVE_TAG => (PrimitiveSource::Analytic, 1),
         SHALLOW_CARD_PRIMITIVE_TAG => (PrimitiveSource::None, 0),
         INSTANCE_QUAD_PRIMITIVE_TAG => {
@@ -323,6 +333,12 @@ fn prepare_draw_record(source: PrimitiveUploadSource) -> Option<SceneDrawRecord>
         source: primitive_source,
         authored_order: source.authored_order,
     })
+}
+
+const fn is_wall_shadow_glyph_mask(source: PrimitiveUploadSource) -> bool {
+    source.primitive_kind == ANALYTIC_PRIMITIVE_TAG
+        && source.instance_group == 0
+        && source.instance_slot == 1
 }
 
 fn primitive_arena_bases(source: PrimitiveUploadSource) -> Option<(u32, u32, u32)> {
@@ -577,17 +593,25 @@ fn copy_family(
     Ok(())
 }
 
-pub(super) fn prepare_glyph_entries(atlas: &PreparedSceneAtlas) -> Vec<GlyphAtlasGpuEntry> {
+pub(super) fn prepare_glyph_entries(
+    atlas: &PreparedSceneAtlas,
+) -> Result<Vec<GlyphAtlasGpuEntry>, SceneUploadError> {
     atlas
         .entries
         .iter()
         .map(|source| {
             let entry = source.entry;
-            GlyphAtlasGpuEntry {
+            if !valid_scene_glyph_entry(entry, atlas.width, atlas.height) {
+                return Err(SceneUploadError::InvalidGlyphEntry { key: source.key.clone() });
+            }
+            Ok(GlyphAtlasGpuEntry {
                 visible_uv: entry.visible_uv.unwrap_or([0.0; 4]),
                 ink_origin_size: [
                     entry.ink_origin[0],
-                    entry.ink_origin[1],
+                    entry.raster_size[1]
+                        - 2.0 * entry.safe_padding
+                        - entry.ink_origin[1]
+                        - entry.ink_size[1],
                     entry.ink_size[0],
                     entry.ink_size[1],
                 ],
@@ -601,9 +625,86 @@ pub(super) fn prepare_glyph_entries(atlas: &PreparedSceneAtlas) -> Vec<GlyphAtla
                     entry.allocated_cell.extent[0],
                     entry.allocated_cell.extent[1],
                 ],
-            }
+            })
         })
         .collect()
+}
+
+fn valid_scene_glyph_entry(
+    entry: super::resources::GlyphAtlasEntry,
+    atlas_width: u32,
+    atlas_height: u32,
+) -> bool {
+    if atlas_width == 0 || atlas_height == 0 {
+        return false;
+    }
+    let finite = entry
+        .visible_uv
+        .into_iter()
+        .flatten()
+        .chain(entry.ink_origin)
+        .chain(entry.ink_size)
+        .chain([
+            entry.line_height,
+            entry.advance,
+            entry.baseline,
+            entry.ascent,
+            entry.descent,
+        ])
+        .chain(entry.raster_size)
+        .chain([entry.safe_padding])
+        .all(f32::is_finite);
+    let has_positive_ink = entry.ink_size[0] > 0.0 && entry.ink_size[1] > 0.0;
+    let has_any_ink = entry.ink_size[0] != 0.0 || entry.ink_size[1] != 0.0;
+    if !finite
+        || entry.advance <= 0.0
+        || entry.line_height <= 0.0
+        || entry.safe_padding < 0.0
+        || has_any_ink != has_positive_ink
+        || entry.visible_uv.is_some() != has_positive_ink
+    {
+        return false;
+    }
+
+    if let Some([u_min, v_min, u_max, v_max]) = entry.visible_uv {
+        let cell = entry.allocated_cell;
+        let Some(cell_end_x) = cell.origin[0].checked_add(cell.extent[0]) else {
+            return false;
+        };
+        let Some(cell_end_y) = cell.origin[1].checked_add(cell.extent[1]) else {
+            return false;
+        };
+        let cell_u_min = cell.origin[0] as f32 / atlas_width as f32;
+        let cell_v_min = cell.origin[1] as f32 / atlas_height as f32;
+        let cell_u_max = cell_end_x as f32 / atlas_width as f32;
+        let cell_v_max = cell_end_y as f32 / atlas_height as f32;
+        let valid_uv = u_min >= 0.0
+            && v_min >= 0.0
+            && u_min < u_max
+            && v_min < v_max
+            && u_max <= 1.0
+            && v_max <= 1.0
+            && u_min >= cell_u_min
+            && v_min >= cell_v_min
+            && u_max <= cell_u_max
+            && v_max <= cell_v_max;
+        let left = entry.ink_origin[0] + entry.safe_padding;
+        let top = entry.ink_origin[1] + entry.safe_padding;
+        let right = left + entry.ink_size[0];
+        let bottom = top + entry.ink_size[1];
+        let valid_raster = entry.raster_size[0] > 0.0
+            && entry.raster_size[1] > 0.0
+            && left >= 0.0
+            && top >= 0.0
+            && right <= entry.raster_size[0]
+            && bottom <= entry.raster_size[1];
+        valid_uv && valid_raster
+    } else {
+        entry.ink_origin == [0.0; 2]
+            && entry.ink_size == [0.0; 2]
+            && entry.raster_size == [0.0; 2]
+            && entry.safe_padding == 0.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1350,7 +1451,7 @@ fn create_scene_base_pipelines(
     );
     let world_source_over_glyph = scene_pipeline(
         "glorp-scene-world-source-over-glyph",
-        "vs_world",
+        "vs_world_glyph",
         "fs_glyph",
         source_over,
         Some(false),
@@ -1517,6 +1618,18 @@ fn expected_draw_source(primitive: PrimitiveGpuValue) -> Option<(PrimitiveSource
         ANALYTIC_PRIMITIVE_TAG
             if primitive.resource_kind == 3
                 && primitive.instance_group == 0
+                && primitive.instance_base == NONE_U32
+                && primitive.binding_index == 1 =>
+        {
+            Some((
+                PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
+                u32::try_from(crate::presentation::companion_scene::scene::MAX_PET_ART_SLOTS)
+                    .ok()?,
+            ))
+        }
+        ANALYTIC_PRIMITIVE_TAG
+            if primitive.resource_kind == 3
+                && primitive.instance_group == 0
                 && primitive.instance_base == NONE_U32 =>
         {
             Some((PrimitiveSource::Analytic, 1))
@@ -1533,6 +1646,18 @@ fn expected_draw_source(primitive: PrimitiveGpuValue) -> Option<(PrimitiveSource
 }
 
 fn expected_upload_phase(primitive: PrimitiveGpuValue) -> Option<SceneUploadPhase> {
+    if primitive.primitive_kind == ANALYTIC_PRIMITIVE_TAG
+        && primitive.instance_group == 0
+        && primitive.instance_base == NONE_U32
+        && primitive.binding_index == 1
+    {
+        return (primitive.material_kind == 4
+            && primitive.resource_kind == 3
+            && primitive.blend == 4
+            && primitive.depth == 2
+            && primitive.space == 1)
+            .then_some(SceneUploadPhase::WorldBlended);
+    }
     let material_matches_primitive = match primitive.material_kind {
         1 => matches!(
             primitive.primitive_kind,
@@ -2215,6 +2340,89 @@ mod tests {
         ResourceKind, SceneFixture,
     };
 
+    /// CPU-side reference vectors for the family-aware WGSL glyph placement
+    /// contract. The live renderer performs these operations in
+    /// `vs_world_glyph`; these helpers lock exact points without expanding the
+    /// production surface.
+    struct SceneGlyphPlacementContract;
+
+    impl SceneGlyphPlacementContract {
+        fn pet_cell_base(slot: u32, cell_extent: [f32; 2]) -> Option<[f32; 2]> {
+            if slot >= 130 {
+                return None;
+            }
+            let column = slot % 13;
+            let row = slot / 13;
+            Some([
+                column as f32 * cell_extent[0],
+                (9 - row) as f32 * cell_extent[1],
+            ])
+        }
+
+        fn metric_ink_offset(
+            quad_corner: [f32; 2],
+            entry: GlyphAtlasGpuEntry,
+            cell_extent: [f32; 2],
+        ) -> Option<[f32; 2]> {
+            let scale = Self::one_cell_scale(entry, cell_extent)?;
+            Some([
+                (entry.ink_origin_size[0] + quad_corner[0] * entry.ink_origin_size[2]) * scale,
+                (entry.ink_origin_size[1] + quad_corner[1] * entry.ink_origin_size[3]) * scale,
+            ])
+        }
+
+        fn one_cell_scale(entry: GlyphAtlasGpuEntry, cell_extent: [f32; 2]) -> Option<f32> {
+            if entry.metrics[0] <= 0.0
+                || entry.metrics[1] <= 0.0
+                || entry.ink_origin_size[2] <= 0.0
+                || entry.ink_origin_size[3] <= 0.0
+                || cell_extent[0] <= 0.0
+                || cell_extent[1] <= 0.0
+            {
+                return None;
+            }
+            Some((cell_extent[0] / entry.metrics[0]).min(cell_extent[1] / entry.metrics[1]))
+        }
+
+        fn prop_cell_base(
+            origin: [f32; 2],
+            motion: [f32; 2],
+            local_cell: [i32; 2],
+            cell_extent: [f32; 2],
+        ) -> [f32; 2] {
+            [
+                origin[0] + motion[0] + local_cell[0] as f32 * cell_extent[0],
+                origin[1] + motion[1] - local_cell[1] as f32 * cell_extent[1],
+            ]
+        }
+
+        fn tank_cell_base(center: [f32; 2], cell_extent: [f32; 2]) -> [f32; 2] {
+            [
+                center[0] - 0.5 * cell_extent[0],
+                center[1] - 0.5 * cell_extent[1],
+            ]
+        }
+
+        const fn direct_cell_base(position: [f32; 2]) -> [f32; 2] {
+            position
+        }
+
+        fn frame_opacity(flags: u32, opacity: f32) -> Option<f32> {
+            ((flags & 1) != 0).then_some(opacity)
+        }
+
+        const fn tank_cell_visible(flags: u32, layer: u32, instance_group: u32) -> bool {
+            matches!(instance_group, 5 | 6) && flags & 3 == 3 && layer == instance_group - 4
+        }
+
+        fn wall_xy(local: [f32; 2], aux_affine: [f32; 6], offset: [f32; 2]) -> [f32; 2] {
+            [
+                aux_affine[0] * local[0] + aux_affine[1] * local[1] + aux_affine[4] + offset[0],
+                aux_affine[2] * local[0] + aux_affine[3] * local[1] + aux_affine[5] + offset[1],
+            ]
+        }
+    }
+
     fn surface_capabilities() -> wgpu::SurfaceCapabilities {
         wgpu::SurfaceCapabilities {
             formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
@@ -2507,16 +2715,15 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(column, bold)| {
-                (
-                    GlyphKey::new(scalar.to_string(), bold),
-                    GlyphAtlasEntry::synthetic_visible(
-                        GlyphEntryKind::Mask,
-                        AtlasCell {
-                            origin: [column as u32, 0],
-                            extent: [1, 1],
-                        },
-                    ),
-                )
+                let mut entry = GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell {
+                        origin: [column as u32, 0],
+                        extent: [1, 1],
+                    },
+                );
+                entry.visible_uv = Some([column as f32 / 2.0, 0.0, (column + 1) as f32 / 2.0, 1.0]);
+                (GlyphKey::new(scalar.to_string(), bold), entry)
             })
             .collect();
         PreparedSceneAtlas::from_compiled_for_generation(
@@ -2989,7 +3196,7 @@ mod tests {
         wall.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
         wall.template.primitives[0].binding =
             PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id());
-        wall.template.materials[0].kind = MaterialKind::UnlitAnalytic;
+        wall.template.materials[0].kind = MaterialKind::MultiplyShadow;
         wall.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         wall.template.primitives.push(body);
         let upload = prepare_scene_upload(
@@ -3002,6 +3209,12 @@ mod tests {
         assert_eq!(
             upload.primitives[0].aux_node_index,
             upload.primitives[1].node_index
+        );
+        assert_eq!(upload.draws[0].instance_range, 0..130);
+        assert_eq!(
+            upload.draws[0].source,
+            PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
+            "the wall silhouette is a typed fixed glyph-mask draw, not an analytic quad",
         );
     }
 
@@ -3182,10 +3395,11 @@ mod tests {
             AtlasCell, CompiledGlyphAtlas, GlyphAtlasEntry, GlyphEntryKind, GlyphKey,
             PreparedSceneAtlas,
         };
-        let visible = GlyphAtlasEntry::synthetic_visible(
+        let mut visible = GlyphAtlasEntry::synthetic_visible(
             GlyphEntryKind::PremultipliedColorRgba,
             AtlasCell { origin: [0, 0], extent: [1, 1] },
         );
+        visible.visible_uv = Some([0.0, 0.0, 0.5, 1.0]);
         let whitespace =
             GlyphAtlasEntry::whitespace(12.0, 20.0, AtlasCell { origin: [1, 0], extent: [1, 1] });
         let atlas = PreparedSceneAtlas::from_compiled(&CompiledGlyphAtlas {
@@ -3201,12 +3415,222 @@ mod tests {
         })
         .unwrap();
 
-        let table = prepare_glyph_entries(&atlas);
+        let table = prepare_glyph_entries(&atlas).unwrap();
         assert_eq!(table[0].flags & GLYPH_FLAG_VISIBLE, 0);
         assert_eq!(table[0].metrics[0], 12.0);
         assert_eq!(table[1].flags, GLYPH_FLAG_VISIBLE | GLYPH_FLAG_COLOR);
         assert_eq!(table[1].visible_uv, visible.visible_uv.unwrap());
-        assert_eq!(table[1].ink_origin_size, [1.0, 2.0, 10.0, 20.0]);
+        assert_eq!(
+            table[1].ink_origin_size,
+            [1.0, 80.0 - 2.0 * 6.0 - 2.0 - 20.0, 10.0, 20.0],
+            "the GPU entry stores a Y-up bottom bearing without growing its 64-byte ABI",
+        );
+    }
+
+    #[test]
+    fn glyph_gpu_table_rejects_nonfinite_reversed_and_out_of_bounds_metrics() {
+        use super::super::resources::{
+            AtlasCell, CompiledGlyphAtlas, GlyphAtlasEntry, GlyphEntryKind, GlyphKey,
+            PreparedSceneAtlas,
+        };
+
+        let invalid_entries = [
+            {
+                let mut entry = GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell { origin: [0, 0], extent: [1, 1] },
+                );
+                entry.advance = f32::NAN;
+                entry
+            },
+            {
+                let mut entry = GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell { origin: [0, 0], extent: [1, 1] },
+                );
+                entry.line_height = f32::INFINITY;
+                entry
+            },
+            {
+                let mut entry = GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell { origin: [0, 0], extent: [1, 1] },
+                );
+                entry.ink_origin[0] = f32::NAN;
+                entry
+            },
+            {
+                let mut entry = GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell { origin: [0, 0], extent: [1, 1] },
+                );
+                entry.visible_uv = Some([0.8, 0.0, 0.2, 1.0]);
+                entry
+            },
+            {
+                let mut entry = GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell { origin: [0, 0], extent: [1, 1] },
+                );
+                entry.visible_uv = Some([0.0, 0.0, 1.01, 1.0]);
+                entry
+            },
+            {
+                let mut entry = GlyphAtlasEntry::synthetic_visible(
+                    GlyphEntryKind::Mask,
+                    AtlasCell { origin: [0, 0], extent: [1, 1] },
+                );
+                entry.ink_size = [100.0, 100.0];
+                entry
+            },
+        ];
+
+        for entry in invalid_entries {
+            let key = GlyphKey::new("^", false);
+            let atlas = PreparedSceneAtlas::from_compiled(&CompiledGlyphAtlas {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+                entries: [(key.clone(), entry)].into_iter().collect(),
+            })
+            .unwrap();
+            assert_eq!(
+                prepare_glyph_entries(&atlas).unwrap_err(),
+                SceneUploadError::InvalidGlyphEntry { key },
+            );
+        }
+
+        let wrong_key = GlyphKey::new("!", false);
+        let mut wrong_cell = GlyphAtlasEntry::synthetic_visible(
+            GlyphEntryKind::Mask,
+            AtlasCell { origin: [0, 0], extent: [1, 1] },
+        );
+        wrong_cell.visible_uv = Some([0.5, 0.0, 1.0, 1.0]);
+        let mut valid_other_cell = GlyphAtlasEntry::synthetic_visible(
+            GlyphEntryKind::Mask,
+            AtlasCell { origin: [1, 0], extent: [1, 1] },
+        );
+        valid_other_cell.visible_uv = Some([0.5, 0.0, 1.0, 1.0]);
+        let atlas = PreparedSceneAtlas::from_compiled(&CompiledGlyphAtlas {
+            width: 2,
+            height: 1,
+            rgba: vec![0; 8],
+            entries: [
+                (wrong_key.clone(), wrong_cell),
+                (GlyphKey::new("^", false), valid_other_cell),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap();
+        assert_eq!(
+            prepare_glyph_entries(&atlas).unwrap_err(),
+            SceneUploadError::InvalidGlyphEntry { key: wrong_key },
+            "an in-range UV rectangle may not escape its allocated atlas cell",
+        );
+    }
+
+    #[test]
+    fn glyph_placement_contract_locks_pet_grid_metric_ink_and_family_origins() {
+        let cell = [8.0, 12.0];
+        assert_eq!(
+            SceneGlyphPlacementContract::pet_cell_base(0, cell),
+            Some([0.0, 108.0])
+        );
+        assert_eq!(
+            SceneGlyphPlacementContract::pet_cell_base(12, cell),
+            Some([96.0, 108.0])
+        );
+        assert_eq!(
+            SceneGlyphPlacementContract::pet_cell_base(13, cell),
+            Some([0.0, 96.0])
+        );
+        assert_eq!(
+            SceneGlyphPlacementContract::pet_cell_base(129, cell),
+            Some([96.0, 0.0])
+        );
+        assert_eq!(SceneGlyphPlacementContract::pet_cell_base(130, cell), None);
+
+        let entry = GlyphAtlasGpuEntry {
+            visible_uv: [0.0, 0.0, 1.0, 1.0],
+            ink_origin_size: [2.0, 4.0, 10.0, 20.0],
+            metrics: [20.0, 40.0, 18.0],
+            flags: GLYPH_FLAG_VISIBLE,
+            allocated_cell: [0, 0, 16, 24],
+        };
+        for (actual, expected) in [
+            (
+                SceneGlyphPlacementContract::metric_ink_offset([0.0, 0.0], entry, cell),
+                [0.6, 1.2],
+            ),
+            (
+                SceneGlyphPlacementContract::metric_ink_offset([1.0, 1.0], entry, cell),
+                [3.6, 7.2],
+            ),
+        ] {
+            let actual = actual.expect("valid metrics produce an ink offset");
+            assert!((actual[0] - expected[0]).abs() < 1e-5);
+            assert!((actual[1] - expected[1]).abs() < 1e-5);
+        }
+        let mut wide = entry;
+        wide.ink_origin_size = [0.0, 0.0, 80.0, 20.0];
+        wide.metrics = [80.0, 40.0, 18.0];
+        let regular_scale = SceneGlyphPlacementContract::one_cell_scale(entry, cell).unwrap();
+        let wide_scale = SceneGlyphPlacementContract::one_cell_scale(wide, cell).unwrap();
+        assert!((regular_scale - 0.3).abs() < 1e-5);
+        assert!((wide_scale - 0.1).abs() < 1e-5);
+        for (candidate, scale) in [(entry, regular_scale), (wide, wide_scale)] {
+            let fitted = [
+                candidate.ink_origin_size[2] * scale,
+                candidate.ink_origin_size[3] * scale,
+            ];
+            assert!(fitted[0] <= cell[0] && fitted[1] <= cell[1]);
+            assert!(
+                (fitted[0] / fitted[1]
+                    - candidate.ink_origin_size[2] / candidate.ink_origin_size[3])
+                    .abs()
+                    < 1e-5,
+                "one-cell fitting remains uniform and preserves glyph aspect",
+            );
+        }
+        assert_eq!(
+            SceneGlyphPlacementContract::prop_cell_base([100.0, 200.0], [3.0, -4.0], [2, 1], cell,),
+            [119.0, 184.0],
+        );
+        assert_eq!(
+            SceneGlyphPlacementContract::tank_cell_base([90.0, 70.0], cell),
+            [86.0, 64.0],
+        );
+        assert_eq!(
+            SceneGlyphPlacementContract::direct_cell_base([23.0, 41.0]),
+            [23.0, 41.0],
+        );
+    }
+
+    #[test]
+    fn glyph_placement_contract_locks_visibility_opacity_and_wall_projection() {
+        assert_eq!(
+            SceneGlyphPlacementContract::frame_opacity(1, 0.625),
+            Some(0.625)
+        );
+        assert_eq!(SceneGlyphPlacementContract::frame_opacity(0, 0.625), None);
+        assert!(SceneGlyphPlacementContract::tank_cell_visible(3, 1, 5));
+        assert!(!SceneGlyphPlacementContract::tank_cell_visible(3, 2, 5));
+        assert!(SceneGlyphPlacementContract::tank_cell_visible(3, 2, 6));
+        assert!(!SceneGlyphPlacementContract::tank_cell_visible(1, 1, 5));
+        assert!(!SceneGlyphPlacementContract::tank_cell_visible(3, 1, 3));
+
+        // A negative X scale around a translated pivot mirrors the pet cell.
+        // The wall offset is applied after that auxiliary pet transform; the
+        // primary wall node supplies only Z/opacity in the GPU contract.
+        assert_eq!(
+            SceneGlyphPlacementContract::wall_xy(
+                [12.0, 7.0],
+                [-1.0, 0.0, 0.0, 1.0, 80.0, 30.0],
+                [5.0, -3.0],
+            ),
+            [73.0, 34.0],
+        );
     }
 
     #[test]
@@ -3249,6 +3673,7 @@ mod tests {
             "if (primitive.content_base == NONE_U32)",
             "return primitive.content_base + instance_index;",
             "fn vs_world(",
+            "fn vs_world_glyph(",
             "fn vs_screen(",
             "fn fs_analytic(",
             "fn fs_glyph(",
@@ -3260,6 +3685,31 @@ mod tests {
             "let packed = u32(content.signed_data.x);",
             "if (content.kind == 3u)",
             "return tank_paint_linear(content);",
+            "fn glyph_instance_placement(",
+            "primitive.aux_content_base,\n            input.instance_index",
+            "input.instance_index % 13u",
+            "input.instance_index / 13u",
+            "9u - pet_row",
+            "primitive.frame_base + input.instance_index",
+            "let frame = frame_buffer.values[primitive.frame_base];",
+            "content.signed_data.x",
+            "- f32(content.signed_data.y) * cell_extent.y",
+            "frame.values[2] - 0.5 * cell_extent.x",
+            "frame.values[3] - 0.5 * cell_extent.y",
+            "frame.values[0]",
+            "frame.values[1]",
+            "analytic.payload[0].y",
+            "analytic.payload[0].z",
+            "let aux_node = node_buffer.values[primitive.aux_node_index];",
+            "if (placement.valid == 0u)",
+            "output.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);",
+            "if (content_index >= 462u)",
+            "if (frame_index >= 124u)",
+            "content.glyph_entry_index >= arrayLength(&glyph_entry_buffer.values)",
+            "fn explicit_packed_paint_linear(content: SceneContentGpuValue)",
+            "(content.flags & 64u) != 0u",
+            "(content.flags & 1u) != 0u",
+            "(content.flags & 256u) != 0u",
             "srgb_to_linear(straight_srgb)",
             "discard;",
             "fn vs_final(",
@@ -3283,6 +3733,9 @@ mod tests {
             "var<uniform> frame_globals",
             "clip.z =",
             "return 300u;",
+            "frame_buffer.values[primitive.frame_base + input.instance_index] // prop",
+            "analytic.rect_points.xy",
+            "analytic.payload[0].w", // wall softness is intentionally deferred
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -4244,6 +4697,52 @@ mod tests {
             let mut malformed = upload;
             malformed.primitives[0].instance_group = 1;
             malformed.primitives[0].instance_base = 0;
+            assert_invalid(&malformed, &atlas);
+        }
+
+        let mut wall = SceneFixture::valid();
+        let mut body = wall.template.primitives[0].clone();
+        body.kind = PrimitiveKind::InstanceQuad;
+        body.binding =
+            PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body));
+        wall.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
+        wall.template.primitives[0].binding =
+            PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id());
+        wall.template.primitives[0].blend = WorldBlend::Multiply;
+        wall.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
+        wall.template.materials[0].kind = MaterialKind::MultiplyShadow;
+        wall.template.resources[0].kind = ResourceKind::AnalyticGeometry;
+        wall.template.primitives.push(body);
+        let (mut upload, atlas) = prepare(&wall);
+        // This compact fixture has one material/resource id. Normalize the body
+        // record to the independent glyph material/resource that the production
+        // template supplies; every other field remains compiler-authored.
+        upload.primitives[1].material_kind = 1;
+        upload.primitives[1].resource_kind = 1;
+        validate_gpu_candidate_preflight(&shared, &upload, &atlas).unwrap();
+        assert_eq!(upload.draws[0].instance_range, 0..130);
+        assert_eq!(
+            upload.draws[0].source,
+            PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
+        );
+
+        let mut malformed = upload.clone();
+        malformed.primitives[0].aux_node_index = NONE_U32;
+        assert_invalid(&malformed, &atlas);
+
+        let mut malformed = upload.clone();
+        malformed.primitives[0].aux_content_base = NONE_U32;
+        assert_invalid(&malformed, &atlas);
+
+        let mutations: [fn(&mut PrimitiveGpuValue); 4] = [
+            |primitive| primitive.blend = 3,
+            |primitive| primitive.material_kind = 2,
+            |primitive| primitive.depth = 1,
+            |primitive| primitive.space = 2,
+        ];
+        for mutate in mutations {
+            let mut malformed = upload.clone();
+            mutate(&mut malformed.primitives[0]);
             assert_invalid(&malformed, &atlas);
         }
 
