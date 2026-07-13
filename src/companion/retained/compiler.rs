@@ -89,7 +89,7 @@ pub(super) struct StaticVertex {
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 /// GPU-facing per-node upload ABI shared with the Task 9 shader layout.
 pub(super) struct NodeGpuValue {
-    world: [[f32; 4]; 4],
+    pub(super) world: [[f32; 4]; 4],
     opacity: f32,
     visible: u32,
     material_parameter_offset: u32,
@@ -216,8 +216,8 @@ struct ContentGlobalsGpuValue {
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 /// GPU-facing frame-global upload ABI.
-struct FrameGlobalsGpuValue {
-    view: [[f32; 4]; 4],
+pub(super) struct FrameGlobalsGpuValue {
+    pub(super) view: [[f32; 4]; 4],
     projection: [[f32; 4]; 4],
     viewport_points: [f32; 2],
     viewport_pixels: [f32; 2],
@@ -443,6 +443,62 @@ pub(super) struct PhaseLists {
     chrome_authored: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BlendedDrawTemplate {
+    pub(super) draw_index: u16,
+    pub(super) node_index: u16,
+    pub(super) semantic_order: u32,
+    pub(super) primitive_index: u16,
+}
+
+impl BlendedDrawTemplate {
+    const EMPTY: Self = Self {
+        draw_index: 0,
+        node_index: 0,
+        semantic_order: 0,
+        primitive_index: 0,
+    };
+
+    pub(super) const fn new(
+        draw_index: u16,
+        node_index: u16,
+        semantic_order: u32,
+        primitive_index: u16,
+    ) -> Self {
+        Self {
+            draw_index,
+            node_index,
+            semantic_order,
+            primitive_index,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BlendedDrawTemplates {
+    records: [BlendedDrawTemplate; MAX_BLENDED_DRAWS],
+    len: u16,
+}
+
+impl BlendedDrawTemplates {
+    #[cfg(test)]
+    pub(super) fn from_slice(records: &[BlendedDrawTemplate]) -> Result<Self, CompileError> {
+        if records.len() > MAX_BLENDED_DRAWS {
+            return Err(CompileError::CapacityExceeded);
+        }
+        let mut fixed = [BlendedDrawTemplate::EMPTY; MAX_BLENDED_DRAWS];
+        fixed[..records.len()].copy_from_slice(records);
+        Ok(Self {
+            records: fixed,
+            len: u16::try_from(records.len()).map_err(|_| CompileError::CapacityExceeded)?,
+        })
+    }
+
+    pub(super) fn as_slice(&self) -> &[BlendedDrawTemplate] {
+        &self.records[..usize::from(self.len)]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FixedNodeTopology {
     count: usize,
@@ -534,6 +590,7 @@ pub(super) struct CpuSceneCandidate {
     pub(super) primitives: Vec<CpuPrimitiveDescriptor>,
     pub(super) attachments: Vec<CpuAttachmentDescriptor>,
     pub(super) phases: PhaseLists,
+    pub(super) blended_draw_templates: BlendedDrawTemplates,
     pub(super) content: ContentMirrors,
     pub(super) frame: FrameMirrors,
     logical_content: SceneContent,
@@ -711,6 +768,7 @@ pub(super) struct PreparedSceneDelta {
     accepted_frame: crate::presentation::companion_scene::validate::PreparedAcceptedFrameDelta,
     mirrors: PreparedMirrorDelta,
     prospective_logical_viewport_points: [f32; 2],
+    blended_depth_dirty: bool,
 }
 
 impl PreparedSceneDelta {
@@ -722,6 +780,10 @@ impl PreparedSceneDelta {
     #[allow(dead_code)] // Task 10G-C maps these spans into four physical buffers.
     pub(super) const fn dirty_spans(&self) -> SceneDirtySpans {
         self.mirrors.dirty
+    }
+
+    pub(super) const fn blended_depth_dirty(&self) -> bool {
+        self.blended_depth_dirty
     }
 
     #[allow(dead_code)] // Task 10G-C stages these sealed records after translation.
@@ -1136,6 +1198,7 @@ impl CpuSceneCandidate {
             .prepare_frame_delta(frame_delta)
             .map_err(MirrorDeltaError::Validation)?;
         let mirrors = self.prepare_mirror_delta(content_delta, frame_delta)?;
+        let blended_depth_dirty = self.blended_depth_dirty(frame_delta, &mirrors);
         let logical_content = PreparedLogicalContentDelta::prepare(content_delta)?;
         let prospective_logical_viewport_points = frame_delta
             .camera
@@ -1147,6 +1210,7 @@ impl CpuSceneCandidate {
             accepted_frame,
             mirrors,
             prospective_logical_viewport_points,
+            blended_depth_dirty,
         })
     }
 
@@ -1197,6 +1261,37 @@ impl CpuSceneCandidate {
             state_epoch: self.accepted.frame().epoch(),
         }
     }
+
+    fn blended_depth_dirty(
+        &self,
+        frame_delta: &FrameDelta,
+        prepared: &PreparedMirrorDelta,
+    ) -> bool {
+        if frame_delta.camera.is_some() {
+            return true;
+        }
+        let view = self.frame.globals.as_slice()[0].view;
+        self.blended_draw_templates
+            .as_slice()
+            .iter()
+            .any(|template| {
+                let node_index = usize::from(template.node_index);
+                let Some(updated) = prepared.nodes[node_index] else {
+                    return false;
+                };
+                let current = self.frame.nodes.as_slice()[node_index];
+                camera_space_origin_depth(view, current.world).to_bits()
+                    != camera_space_origin_depth(view, updated.world).to_bits()
+            })
+    }
+}
+
+fn camera_space_origin_depth(view: [[f32; 4]; 4], world: [[f32; 4]; 4]) -> f32 {
+    let origin = world[3];
+    view[0][2] * origin[0]
+        + view[1][2] * origin[1]
+        + view[2][2] * origin[2]
+        + view[3][2] * origin[3]
 }
 
 fn content_delta_has_values(delta: &ContentDelta) -> bool {
@@ -2210,6 +2305,8 @@ fn compile_cpu_parts(
     if world_blended_unsorted.len() > MAX_BLENDED_DRAWS {
         return Err(CompileError::CapacityExceeded);
     }
+    let blended_draw_templates =
+        compile_blended_draw_templates(&world_blended_unsorted, &primitives)?;
 
     let attachments = compile_attachment_descriptors(template, &index)?;
 
@@ -2244,6 +2341,7 @@ fn compile_cpu_parts(
         primitives,
         attachments,
         phases,
+        blended_draw_templates,
         content,
         frame,
         logical_content,
@@ -2251,6 +2349,32 @@ fn compile_cpu_parts(
         topology,
         #[cfg(test)]
         last_node_resolves: 0,
+    })
+}
+
+fn compile_blended_draw_templates(
+    primitive_indices: &[u32],
+    primitives: &[CpuPrimitiveDescriptor],
+) -> Result<BlendedDrawTemplates, CompileError> {
+    if primitive_indices.len() > MAX_BLENDED_DRAWS {
+        return Err(CompileError::CapacityExceeded);
+    }
+    let mut records = [BlendedDrawTemplate::EMPTY; MAX_BLENDED_DRAWS];
+    for (draw_index, primitive_index) in primitive_indices.iter().copied().enumerate() {
+        let primitive = primitives
+            .get(usize::try_from(primitive_index).map_err(|_| CompileError::CapacityExceeded)?)
+            .ok_or(CompileError::CapacityExceeded)?;
+        records[draw_index] = BlendedDrawTemplate::new(
+            u16::try_from(draw_index).map_err(|_| CompileError::CapacityExceeded)?,
+            u16::try_from(primitive.node_dense_index)
+                .map_err(|_| CompileError::CapacityExceeded)?,
+            primitive.authored_order,
+            u16::try_from(primitive_index).map_err(|_| CompileError::CapacityExceeded)?,
+        );
+    }
+    Ok(BlendedDrawTemplates {
+        records,
+        len: u16::try_from(primitive_indices.len()).map_err(|_| CompileError::CapacityExceeded)?,
     })
 }
 
@@ -5406,7 +5530,9 @@ mod tests {
             crate::presentation::companion_scene::AppliedRevisions::new(4, 6),
         );
         frame.camera = Some(camera);
-        let dirty = candidate.apply_deltas(&content, &frame).unwrap();
+        let prepared = candidate.prepare_deltas(&content, &frame).unwrap();
+        assert!(prepared.blended_depth_dirty());
+        let dirty = candidate.commit_prepared(prepared).dirty;
         assert_eq!(
             dirty.frame_globals.as_slice(),
             &[ByteSpan::slots::<FrameGlobalsGpuValue>(0, 1)]
@@ -5441,6 +5567,36 @@ mod tests {
         assert_eq!(after.viewport_pixels, before.viewport_pixels);
         assert_eq!(after.aperture, before.aperture);
         assert_eq!(after._padding, before._padding);
+    }
+
+    #[test]
+    fn prepared_blend_order_ignores_non_depth_motion_and_detects_blended_node_crossing() {
+        let mut fixture = SceneFixture::valid();
+        fixture.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+        fixture.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
+        let prepare_motion = |translation: [f32; 3]| {
+            let candidate = compile_static_fixture(&fixture);
+            let blended_node = candidate.blended_draw_templates.as_slice()[0].node_index;
+            let node_id = fixture.template.nodes[usize::from(blended_node)].id;
+            let mut state = *candidate
+                .accepted
+                .frame()
+                .frame()
+                .nodes
+                .iter()
+                .find(|state| state.node == node_id)
+                .expect("blended template node has frame state");
+            state.local_transform.translation = translation;
+            let (content, mut frame) = paired_deltas(
+                &candidate,
+                crate::presentation::companion_scene::AppliedRevisions::new(4, 6),
+            );
+            frame.nodes.push(state);
+            candidate.prepare_deltas(&content, &frame).unwrap()
+        };
+
+        assert!(!prepare_motion([8.0, 0.0, 0.0]).blended_depth_dirty());
+        assert!(prepare_motion([0.0, 0.0, -0.75]).blended_depth_dirty());
     }
 
     #[test]

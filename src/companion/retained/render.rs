@@ -3,8 +3,9 @@
 
 use super::buffers::{ByteSpan, DirtySpanSet};
 use super::compiler::{
-    ContentGpuValue, ContentUploadValue, CpuSceneCandidate, FrameUploadSources, MirrorDeltaError,
-    PreparedMirrorFamily, PreparedSceneDelta, PrimitiveUploadSource, SceneDirtySpans,
+    BlendedDrawTemplates, ContentGpuValue, ContentUploadValue, CpuSceneCandidate,
+    FrameGlobalsGpuValue, FrameUploadSources, MirrorDeltaError, NodeGpuValue, PreparedMirrorFamily,
+    PreparedSceneDelta, PrimitiveUploadSource, SceneDirtySpans,
 };
 use super::resources::{GlyphEntryKind, GlyphKey, PreparedSceneAtlas};
 use bytemuck::{Pod, Zeroable};
@@ -418,9 +419,324 @@ pub(super) struct SceneChromePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SceneDrawPlan {
     pub(super) opaque: Vec<ScenePlannedDraw>,
-    /// Task 11 replaces this compiler order with one camera-depth stream.
+    /// Immutable lookup table. [`PersistentBlendOrder`] supplies the current
+    /// camera-depth order without rebuilding this generation-owned storage.
     pub(super) world_blended_unsorted: Vec<ScenePlannedDraw>,
     pub(super) chrome: SceneChromePlan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct BlendedDrawKey {
+    camera_depth: f32,
+    semantic_order: u32,
+    primitive_index: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BlendedDrawRecord {
+    template: super::compiler::BlendedDrawTemplate,
+    key: BlendedDrawKey,
+}
+
+impl BlendedDrawRecord {
+    const EMPTY: Self = Self {
+        template: super::compiler::BlendedDrawTemplate::new(0, 0, 0, 0),
+        key: BlendedDrawKey {
+            camera_depth: 0.0,
+            semantic_order: 0,
+            primitive_index: 0,
+        },
+    };
+
+    const fn from_template(template: super::compiler::BlendedDrawTemplate) -> Self {
+        Self {
+            template,
+            key: BlendedDrawKey {
+                camera_depth: 0.0,
+                semantic_order: template.semantic_order,
+                primitive_index: template.primitive_index,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlendedOrderError {
+    InvalidPackedState,
+    MissingNode,
+    NonFiniteDepth,
+}
+
+struct PersistentBlendOrder {
+    records: [BlendedDrawRecord; crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS],
+    committed: [u16; crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS],
+    scratch: [u16; crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS],
+    len: u16,
+    pending: bool,
+    #[cfg(test)]
+    sort_events: u64,
+}
+
+impl PersistentBlendOrder {
+    fn new(
+        templates: &BlendedDrawTemplates,
+        view: [[f32; 4]; 4],
+        node_worlds: &[[[f32; 4]; 4]],
+    ) -> Result<Self, BlendedOrderError> {
+        let mut records = [BlendedDrawRecord::EMPTY;
+            crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS];
+        for (record, template) in records.iter_mut().zip(templates.as_slice()) {
+            *record = BlendedDrawRecord::from_template(*template);
+        }
+        let len = u16::try_from(templates.as_slice().len())
+            .map_err(|_| BlendedOrderError::InvalidPackedState)?;
+        let mut order = Self {
+            records,
+            committed: [0; crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS],
+            scratch: [0; crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS],
+            len,
+            pending: false,
+            #[cfg(test)]
+            sort_events: 0,
+        };
+        update_blended_order(
+            &mut order.records,
+            &mut order.scratch,
+            usize::from(order.len),
+            view,
+            node_worlds,
+        )?;
+        order.committed[..usize::from(order.len)]
+            .copy_from_slice(&order.scratch[..usize::from(order.len)]);
+        #[cfg(test)]
+        {
+            order.sort_events = 1;
+        }
+        Ok(order)
+    }
+
+    fn from_packed(
+        templates: &BlendedDrawTemplates,
+        node_bytes: &[u8],
+        frame_bytes: &[u8],
+    ) -> Result<Self, BlendedOrderError> {
+        let (view, node_worlds) = blended_matrices_from_packed(node_bytes, frame_bytes)?;
+        Self::new(templates, view, &node_worlds)
+    }
+
+    fn prepare(
+        &mut self,
+        view: [[f32; 4]; 4],
+        node_worlds: &[[[f32; 4]; 4]],
+        depth_dirty: bool,
+    ) -> Result<bool, BlendedOrderError> {
+        self.pending = false;
+        if !depth_dirty {
+            return Ok(false);
+        }
+        update_blended_order(
+            &mut self.records,
+            &mut self.scratch,
+            usize::from(self.len),
+            view,
+            node_worlds,
+        )?;
+        self.pending = true;
+        #[cfg(test)]
+        {
+            self.sort_events = self.sort_events.saturating_add(1);
+        }
+        Ok(true)
+    }
+
+    fn prepare_from_packed(
+        &mut self,
+        node_bytes: &[u8],
+        frame_bytes: &[u8],
+        depth_dirty: bool,
+    ) -> Result<bool, BlendedOrderError> {
+        if !depth_dirty {
+            self.pending = false;
+            return Ok(false);
+        }
+        let (view, node_worlds) = blended_matrices_from_packed(node_bytes, frame_bytes)?;
+        self.prepare(view, &node_worlds, true)
+    }
+
+    fn active_draw_indices(&self) -> &[u16] {
+        if self.pending {
+            self.pending_draw_indices()
+        } else {
+            self.committed_draw_indices()
+        }
+    }
+
+    fn committed_draw_indices(&self) -> &[u16] {
+        &self.committed[..usize::from(self.len)]
+    }
+
+    fn pending_draw_indices(&self) -> &[u16] {
+        debug_assert!(self.pending);
+        &self.scratch[..usize::from(self.len)]
+    }
+
+    fn commit_pending(&mut self) {
+        if self.pending {
+            self.committed[..usize::from(self.len)]
+                .copy_from_slice(&self.scratch[..usize::from(self.len)]);
+            self.pending = false;
+        }
+    }
+
+    fn discard_pending(&mut self) {
+        self.pending = false;
+    }
+
+    #[cfg(test)]
+    const fn fixed_capacity(&self) -> usize {
+        self.records.len()
+    }
+
+    #[cfg(test)]
+    const fn sort_events_for_test(&self) -> u64 {
+        self.sort_events
+    }
+
+    #[cfg(test)]
+    fn storage_addresses_for_test(&self) -> (usize, usize, usize) {
+        (
+            self.records.as_ptr() as usize,
+            self.committed.as_ptr() as usize,
+            self.scratch.as_ptr() as usize,
+        )
+    }
+}
+
+type SceneMatrix = [[f32; 4]; 4];
+type BlendedNodeWorlds = [SceneMatrix; super::compiler::CpuMirrorShape::NODE_COUNT];
+
+fn blended_matrices_from_packed(
+    node_bytes: &[u8],
+    frame_bytes: &[u8],
+) -> Result<(SceneMatrix, BlendedNodeWorlds), BlendedOrderError> {
+    let node_size = std::mem::size_of::<NodeGpuValue>();
+    if node_bytes.len() != node_size * super::compiler::CpuMirrorShape::NODE_COUNT
+        || frame_bytes.len() < std::mem::size_of::<FrameGlobalsGpuValue>()
+    {
+        return Err(BlendedOrderError::InvalidPackedState);
+    }
+    let globals = bytemuck::pod_read_unaligned::<FrameGlobalsGpuValue>(
+        &frame_bytes[..std::mem::size_of::<FrameGlobalsGpuValue>()],
+    );
+    let mut worlds = [[[0.0; 4]; 4]; super::compiler::CpuMirrorShape::NODE_COUNT];
+    for (world, bytes) in worlds.iter_mut().zip(node_bytes.chunks_exact(node_size)) {
+        *world = bytemuck::pod_read_unaligned::<NodeGpuValue>(bytes).world;
+    }
+    Ok((globals.view, worlds))
+}
+
+fn update_blended_order(
+    records: &mut [BlendedDrawRecord;
+             crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS],
+    sort_indices: &mut [u16; crate::presentation::companion_scene::scene::MAX_BLENDED_DRAWS],
+    len: usize,
+    view: [[f32; 4]; 4],
+    node_worlds: &[[[f32; 4]; 4]],
+) -> Result<(), BlendedOrderError> {
+    for (record_index, record) in records[..len].iter_mut().enumerate() {
+        let world = node_worlds
+            .get(usize::from(record.template.node_index))
+            .ok_or(BlendedOrderError::MissingNode)?;
+        let camera_depth = camera_space_origin_depth(view, *world);
+        if !camera_depth.is_finite() {
+            return Err(BlendedOrderError::NonFiniteDepth);
+        }
+        record.key.camera_depth = camera_depth;
+        sort_indices[record_index] =
+            u16::try_from(record_index).map_err(|_| BlendedOrderError::InvalidPackedState)?;
+    }
+    for current in 1..len {
+        let record_index = sort_indices[current];
+        let mut insert = current;
+        while insert > 0
+            && blended_key_cmp(
+                records[usize::from(record_index)].key,
+                records[usize::from(sort_indices[insert - 1])].key,
+            )
+            .is_lt()
+        {
+            sort_indices[insert] = sort_indices[insert - 1];
+            insert -= 1;
+        }
+        sort_indices[insert] = record_index;
+    }
+    for index in &mut sort_indices[..len] {
+        *index = records[usize::from(*index)].template.draw_index;
+    }
+    Ok(())
+}
+
+fn blended_key_cmp(left: BlendedDrawKey, right: BlendedDrawKey) -> std::cmp::Ordering {
+    left.camera_depth
+        .total_cmp(&right.camera_depth)
+        .then_with(|| left.semantic_order.cmp(&right.semantic_order))
+        .then_with(|| left.primitive_index.cmp(&right.primitive_index))
+}
+
+fn camera_space_origin_depth(view: [[f32; 4]; 4], world: [[f32; 4]; 4]) -> f32 {
+    let origin = world[3];
+    view[0][2] * origin[0]
+        + view[1][2] * origin[1]
+        + view[2][2] * origin[2]
+        + view[3][2] * origin[3]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlendedDrawRun {
+    pipeline: ScenePipelineClass,
+    index_range: Range<u32>,
+    instance_range: Range<u32>,
+}
+
+struct BlendedDrawRuns<'draws> {
+    draws: &'draws [ScenePlannedDraw],
+    order: &'draws [u16],
+    cursor: usize,
+}
+
+impl<'draws> BlendedDrawRuns<'draws> {
+    const fn new(draws: &'draws [ScenePlannedDraw], order: &'draws [u16]) -> Self {
+        Self { draws, order, cursor: 0 }
+    }
+}
+
+impl Iterator for BlendedDrawRuns<'_> {
+    type Item = BlendedDrawRun;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let first = self.draws.get(usize::from(*self.order.get(self.cursor)?))?;
+        self.cursor += 1;
+        let mut run = BlendedDrawRun {
+            pipeline: first.pipeline,
+            index_range: first.index_range.clone(),
+            instance_range: first.instance_range.clone(),
+        };
+        while let Some(next) = self
+            .order
+            .get(self.cursor)
+            .and_then(|index| self.draws.get(usize::from(*index)))
+        {
+            if next.pipeline != run.pipeline
+                || next.instance_range != run.instance_range
+                || next.index_range.start != run.index_range.end
+            {
+                break;
+            }
+            run.index_range.end = next.index_range.end;
+            self.cursor += 1;
+        }
+        Some(run)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -599,6 +915,7 @@ pub(super) struct PreparedSceneUpload {
     pub(super) primitives: Vec<PrimitiveGpuValue>,
     pub(super) draws: Vec<SceneDrawRecord>,
     pub(super) phases: ScenePhaseTable,
+    pub(super) blended_draw_templates: BlendedDrawTemplates,
     pub(super) node_bytes: Vec<u8>,
     pub(super) content_globals_bytes: Vec<u8>,
     pub(super) frame_bytes: Vec<u8>,
@@ -843,6 +1160,7 @@ pub(super) fn prepare_scene_upload(
             world_blended_unsorted: phase_sources.world_blended_unsorted.to_vec(),
             chrome_authored: phase_sources.chrome_authored.to_vec(),
         },
+        blended_draw_templates: candidate.blended_draw_templates,
         node_bytes,
         content_globals_bytes,
         frame_bytes,
@@ -2579,6 +2897,7 @@ pub(super) struct GpuSceneCandidate {
     /// Frozen once during materialization. Ordinary frames read this closed
     /// schedule directly and perform no full validation or heap allocation.
     pub(super) draw_plan: SceneDrawPlan,
+    blended_order: PersistentBlendOrder,
 }
 
 impl GpuSceneCandidate {
@@ -2733,6 +3052,12 @@ pub(super) fn materialize_gpu_candidate(
     let prepared_hud_atlas = super::hud::PreparedHudAtlas::from_scene_atlas(atlas)
         .map_err(|_| SceneGpuError::InvalidHudAtlas)?;
     let generation_state = GpuSceneGenerationState::from_upload(upload);
+    let blended_order = PersistentBlendOrder::from_packed(
+        &upload.blended_draw_templates,
+        &upload.node_bytes,
+        &upload.frame_bytes,
+    )
+    .map_err(|_| SceneGpuError::InvalidUpload)?;
 
     create_in_gpu_error_scopes(device, || {
         let vertex_buffer = create_initial_buffer(
@@ -2891,6 +3216,7 @@ pub(super) fn materialize_gpu_candidate(
             static_checksum: upload.static_checksum,
             generation_state,
             draw_plan,
+            blended_order,
         }
     })
 }
@@ -3112,6 +3438,25 @@ fn validate_gpu_candidate_preflight(
         }
     }
     if classified.contains(&false) {
+        return Err(SceneGpuError::InvalidUpload);
+    }
+    if upload.blended_draw_templates.as_slice().len() != upload.phases.world_blended_unsorted.len()
+        || upload
+            .blended_draw_templates
+            .as_slice()
+            .iter()
+            .zip(&upload.phases.world_blended_unsorted)
+            .enumerate()
+            .any(|(draw_index, (template, primitive_index))| {
+                let Some(primitive) = upload.primitives.get(*primitive_index as usize) else {
+                    return true;
+                };
+                usize::from(template.draw_index) != draw_index
+                    || u32::from(template.primitive_index) != *primitive_index
+                    || u32::from(template.node_index) != primitive.node_index
+                    || template.semantic_order != primitive.authored_order
+            })
+    {
         return Err(SceneGpuError::InvalidUpload);
     }
     Ok(())
@@ -3592,6 +3937,7 @@ pub(super) enum SceneDeltaRenderError {
     RevisionMismatch,
     LogicalViewportMismatch,
     PreparedRevisionMismatch,
+    BlendedOrder(BlendedOrderError),
     Layout(PackedMirrorLayoutError),
     Upload(SceneUploadError),
 }
@@ -3813,16 +4159,41 @@ impl SceneRenderer {
             })
             .transpose()
             .map_err(SceneRenderError::Delta)?;
+        let blended_order_prepared = if physical_delta.is_some()
+            && delta
+                .as_ref()
+                .is_some_and(|transaction| transaction.prepared.blended_depth_dirty())
+        {
+            match candidate.blended_order.prepare_from_packed(
+                candidate.generation_state.nodes.pending.as_ref(),
+                candidate.generation_state.frame.pending.as_ref(),
+                true,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    candidate.generation_state.reset_pending();
+                    candidate.blended_order.discard_pending();
+                    return Err(SceneRenderError::Delta(
+                        SceneDeltaRenderError::BlendedOrder(error),
+                    ));
+                }
+            }
+        } else {
+            candidate.blended_order.discard_pending();
+            false
+        };
 
         if let Err(error) = self.targets.ensure(device, shared, binding.target_key) {
             if physical_delta.is_some() {
                 candidate.generation_state.reset_pending();
+                candidate.blended_order.discard_pending();
             }
             return Err(SceneRenderError::Target(error));
         }
         if let Err(error) = self.readback.ensure(device, shared, readback_key) {
             if physical_delta.is_some() {
                 candidate.generation_state.reset_pending();
+                candidate.blended_order.discard_pending();
             }
             return Err(SceneRenderError::Readback(error));
         }
@@ -3937,6 +4308,7 @@ impl SceneRenderer {
             self.reset_staging_belt(device);
             if physical_delta.is_some() {
                 candidate.generation_state.reset_pending();
+                candidate.blended_order.discard_pending();
             }
             return Err(SceneRenderError::Gpu(category));
         }
@@ -3946,6 +4318,7 @@ impl SceneRenderer {
                 self.reset_staging_belt(device);
                 if physical_delta.is_some() {
                     candidate.generation_state.reset_pending();
+                    candidate.blended_order.discard_pending();
                 }
                 return Err(SceneRenderError::Hud(error));
             }
@@ -3958,6 +4331,9 @@ impl SceneRenderer {
             debug_assert_eq!(applied.generation_key, candidate.generation_key);
             debug_assert_eq!(applied.static_checksum, candidate.static_checksum);
             candidate.generation_state.commit_pending();
+            if blended_order_prepared {
+                candidate.blended_order.commit_pending();
+            }
             candidate.source_revisions = applied.to;
             candidate.logical_viewport_points = applied.prospective_logical_viewport_points;
         }
@@ -4167,13 +4543,14 @@ fn encode_scene_world(
         ..Default::default()
     });
     bind_scene_geometry(&mut pass, candidate);
-    for draw in candidate
-        .draw_plan
-        .opaque
-        .iter()
-        .chain(candidate.draw_plan.world_blended_unsorted.iter())
-    {
+    for draw in &candidate.draw_plan.opaque {
         encode_planned_draw(&mut pass, shared, draw);
+    }
+    for run in BlendedDrawRuns::new(
+        &candidate.draw_plan.world_blended_unsorted,
+        candidate.blended_order.active_draw_indices(),
+    ) {
+        encode_blended_run(&mut pass, shared, &run);
     }
 }
 
@@ -4221,6 +4598,15 @@ fn encode_planned_draw<'pass>(
 ) {
     pass.set_pipeline(shared.pipelines.for_class(draw.pipeline));
     pass.draw_indexed(draw.index_range.clone(), 0, draw.instance_range.clone());
+}
+
+fn encode_blended_run<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    shared: &'pass SceneGpuShared,
+    run: &BlendedDrawRun,
+) {
+    pass.set_pipeline(shared.pipelines.for_class(run.pipeline));
+    pass.draw_indexed(run.index_range.clone(), 0, run.instance_range.clone());
 }
 
 fn encode_aperture_composite(
@@ -4285,6 +4671,237 @@ mod tests {
         PrimitiveBinding, PrimitiveKind, PrimitiveSpace, PrimitiveTemplate, ResourceId,
         ResourceKind, ResourceTemplate, SceneFixture, WorldBlend,
     };
+
+    const fn translated_z(z: f32) -> [[f32; 4]; 4] {
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, z, 1.0],
+        ]
+    }
+
+    const IDENTITY_MATRIX: [[f32; 4]; 4] = translated_z(0.0);
+
+    #[test]
+    fn blend_modes_share_camera_depth_order_with_a_stable_semantic_tie_breaker() {
+        use super::super::compiler::{BlendedDrawTemplate, BlendedDrawTemplates};
+
+        let templates = BlendedDrawTemplates::from_slice(&[
+            BlendedDrawTemplate::new(0, 0, 30, 0),
+            BlendedDrawTemplate::new(1, 1, 20, 1),
+            BlendedDrawTemplate::new(2, 2, 10, 2),
+            BlendedDrawTemplate::new(3, 3, 5, 3),
+        ])
+        .unwrap();
+        let worlds = [
+            translated_z(0.8),
+            translated_z(0.0),
+            translated_z(-0.7),
+            translated_z(0.0),
+        ];
+
+        let order = PersistentBlendOrder::new(&templates, IDENTITY_MATRIX, &worlds).unwrap();
+
+        assert_eq!(order.committed_draw_indices(), &[2, 3, 1, 0]);
+    }
+
+    #[test]
+    fn blended_order_recomputes_only_for_camera_or_relevant_depth_and_reuses_fixed_storage() {
+        use super::super::compiler::{BlendedDrawTemplate, BlendedDrawTemplates};
+
+        let templates = BlendedDrawTemplates::from_slice(&[
+            BlendedDrawTemplate::new(0, 0, 0, 0),
+            BlendedDrawTemplate::new(1, 1, 1, 1),
+        ])
+        .unwrap();
+        let initial = [translated_z(-0.5), translated_z(0.5)];
+        let mut order = PersistentBlendOrder::new(&templates, IDENTITY_MATRIX, &initial).unwrap();
+        let storage = order.storage_addresses_for_test();
+        let updates = order.sort_events_for_test();
+
+        assert!(!order.prepare(IDENTITY_MATRIX, &initial, false).unwrap());
+        assert_eq!(order.sort_events_for_test(), updates);
+
+        let crossed = [translated_z(0.75), translated_z(-0.75)];
+        assert!(order.prepare(IDENTITY_MATRIX, &crossed, true).unwrap());
+        assert_eq!(order.pending_draw_indices(), &[1, 0]);
+        order.discard_pending();
+        assert_eq!(order.committed_draw_indices(), &[0, 1]);
+        assert!(order.prepare(IDENTITY_MATRIX, &crossed, true).unwrap());
+        order.commit_pending();
+        assert_eq!(order.committed_draw_indices(), &[1, 0]);
+
+        let camera_reverses_z = [
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert!(order.prepare(camera_reverses_z, &crossed, true).unwrap());
+        assert_eq!(order.pending_draw_indices(), &[0, 1]);
+        assert_eq!(order.storage_addresses_for_test(), storage);
+        assert_eq!(order.fixed_capacity(), 256);
+    }
+
+    #[test]
+    fn blended_runs_merge_only_adjacent_compatible_records() {
+        let draw = |primitive_index, pipeline, index_range| ScenePlannedDraw {
+            primitive_index,
+            pipeline,
+            index_range,
+            instance_range: 0..1,
+            authored_order: primitive_index,
+        };
+        let draws = vec![
+            draw(0, ScenePipelineClass::WorldSourceOverAnalytic, 0..6),
+            draw(1, ScenePipelineClass::WorldMultiplyAnalytic, 6..12),
+            draw(2, ScenePipelineClass::WorldSourceOverAnalytic, 12..18),
+            draw(3, ScenePipelineClass::WorldSourceOverAnalytic, 18..24),
+        ];
+        let runs = BlendedDrawRuns::new(&draws, &[0, 1, 2, 3]).collect::<Vec<_>>();
+
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].index_range, 0..6);
+        assert_eq!(runs[1].index_range, 6..12);
+        assert_eq!(runs[2].index_range, 12..24);
+    }
+
+    #[test]
+    fn packed_blended_order_crossing_is_transactional_across_discard_and_retry() {
+        let mut fixture = canonical_materialization_fixture();
+        let source_alias = CanonicalAlias::new("node.blend-source").unwrap();
+        let additive_alias = CanonicalAlias::new("node.blend-additive").unwrap();
+        let source_node =
+            crate::presentation::companion_scene::scene::NodeId::from_alias(&source_alias);
+        let additive_node =
+            crate::presentation::companion_scene::scene::NodeId::from_alias(&additive_alias);
+        let mut source_template = fixture.template.nodes[0].clone();
+        source_template.id = source_node;
+        source_template.alias = source_alias;
+        source_template.parent = None;
+        source_template.base_transform =
+            crate::presentation::companion_scene::scene::Transform3::translated([0.0, 0.0, 0.8]);
+        let mut additive_template = source_template.clone();
+        additive_template.id = additive_node;
+        additive_template.alias = additive_alias;
+        additive_template.base_transform =
+            crate::presentation::companion_scene::scene::Transform3::translated([0.0, 0.0, -0.7]);
+        fixture.template.nodes.push(source_template);
+        fixture.template.nodes.push(additive_template);
+        fixture.frame.nodes.extend([
+            crate::presentation::companion_scene::scene::NodeFrameState {
+                node: source_node,
+                local_transform: crate::presentation::companion_scene::scene::Transform3::IDENTITY,
+                visible: true,
+                opacity: 1.0,
+            },
+            crate::presentation::companion_scene::scene::NodeFrameState {
+                node: additive_node,
+                local_transform: crate::presentation::companion_scene::scene::Transform3::IDENTITY,
+                visible: true,
+                opacity: 1.0,
+            },
+        ]);
+
+        let additive_alias = CanonicalAlias::new("material.blend-additive").unwrap();
+        let additive_material = MaterialId::from_alias(&additive_alias);
+        fixture.template.materials.push(MaterialTemplate {
+            id: additive_material,
+            alias: additive_alias,
+            kind: MaterialKind::AdditiveGlow,
+        });
+        let unlit = fixture.template.materials[0].id;
+        let analytic_resource = fixture.template.resources[0].id;
+        let glyph_resource = fixture.template.resources[1].id;
+        let bounds = fixture.template.primitives[0].local_geometry;
+        fixture.template.primitives.extend([
+            PrimitiveTemplate {
+                node: source_node,
+                kind: PrimitiveKind::AnalyticShape,
+                material: unlit,
+                resource: Some(analytic_resource),
+                blend: WorldBlend::PremultipliedAlpha,
+                depth: DepthBehavior::WorldReadOnly,
+                binding: PrimitiveBinding::Analytic(AnalyticParamId(4)),
+                authored_order: 7,
+                local_geometry: bounds,
+                space: PrimitiveSpace::World,
+            },
+            PrimitiveTemplate {
+                node: additive_node,
+                kind: PrimitiveKind::InstanceQuad,
+                material: additive_material,
+                resource: Some(glyph_resource),
+                blend: WorldBlend::Additive,
+                depth: DepthBehavior::WorldReadOnly,
+                binding: PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(
+                    PetArtFilter::Particles,
+                )),
+                authored_order: 8,
+                local_geometry: bounds,
+                space: PrimitiveSpace::World,
+            },
+        ]);
+
+        let mut cpu = compile_fixture(&fixture);
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let mut state = GpuSceneGenerationState::from_upload(&upload);
+        let mut order = PersistentBlendOrder::from_packed(
+            &upload.blended_draw_templates,
+            &upload.node_bytes,
+            &upload.frame_bytes,
+        )
+        .unwrap();
+        assert_eq!(order.committed_draw_indices(), &[2, 0, 1]);
+
+        let to = crate::presentation::companion_scene::AppliedRevisions::new(4, 6);
+        let mut content = ContentDelta::empty();
+        content.generation_key = cpu.generation_key;
+        content.from = cpu.source_revisions;
+        content.to = to;
+        let mut frame = FrameDelta::empty();
+        frame.generation_key = cpu.generation_key;
+        frame.from = cpu.source_revisions;
+        frame.to = to;
+        let mut moved = *fixture
+            .frame
+            .nodes
+            .iter()
+            .find(|state| state.node == source_node)
+            .unwrap();
+        moved.local_transform.translation[2] = -2.0;
+        frame.nodes.push(moved);
+        let prepared = cpu.prepare_deltas(&content, &frame).unwrap();
+        assert!(prepared.blended_depth_dirty());
+
+        stage_prepared_scene_delta(&mut state, &prepared).unwrap();
+        order
+            .prepare_from_packed(
+                state.nodes.pending.as_ref(),
+                state.frame.pending.as_ref(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(order.pending_draw_indices(), &[1, 2, 0]);
+        state.reset_pending();
+        order.discard_pending();
+        assert_eq!(order.committed_draw_indices(), &[2, 0, 1]);
+
+        stage_prepared_scene_delta(&mut state, &prepared).unwrap();
+        order
+            .prepare_from_packed(
+                state.nodes.pending.as_ref(),
+                state.frame.pending.as_ref(),
+                true,
+            )
+            .unwrap();
+        cpu.commit_prepared(prepared);
+        state.commit_pending();
+        order.commit_pending();
+        assert_eq!(order.committed_draw_indices(), &[1, 2, 0]);
+    }
 
     /// CPU-side reference vectors for the family-aware WGSL glyph placement
     /// contract. The live renderer performs these operations in
