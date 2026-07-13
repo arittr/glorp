@@ -7,7 +7,7 @@
 //! capture boundary forbids, so glyph rasterization lives beside the retained
 //! renderer here rather than in `capture.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use objc2::msg_send_id;
 use objc2::rc::{autoreleasepool, Retained};
@@ -111,6 +111,15 @@ pub(super) enum FragmentGlyphMode {
     NativeColor,
 }
 
+/// Exact integer bounds of the atlas cell allocated to one glyph. These bounds
+/// describe the packing allocation, including whitespace and transparent
+/// gutters; they are deliberately independent of the visible-ink UV rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AtlasCell {
+    pub(super) origin: [u32; 2],
+    pub(super) extent: [u32; 2],
+}
+
 /// A complete glyph atlas entry: where the ink lives, its metrics relative to
 /// the pen and baseline, the raster geometry it was measured in, the font policy
 /// that produced it, and whether it is a coverage mask or native color.
@@ -130,6 +139,9 @@ pub(super) struct GlyphAtlasEntry {
     pub(super) advance: f32,
     /// Whether the stored pixels are a coverage mask or premultiplied color.
     pub(super) kind: GlyphEntryKind,
+    /// Exact packed cell owned by this entry, including transparent padding.
+    #[allow(dead_code)] // Scene-atlas validation reads this independently of visible UV.
+    pub(super) allocated_cell: AtlasCell,
     // The remaining metrics complete the atlas entry the way glyph-parity work
     // (Tasks 9/12) will consume it; the native metric-coverage tests validate
     // them against attributed measurement, but the renderer does not read them
@@ -165,7 +177,7 @@ impl GlyphAtlasEntry {
     }
 
     /// A whitespace / inkless glyph: it advances the pen but has no visible quad.
-    pub(super) fn whitespace(advance: f32, line_height: f32) -> Self {
+    pub(super) fn whitespace(advance: f32, line_height: f32, allocated_cell: AtlasCell) -> Self {
         Self {
             visible_uv: None,
             ink_origin: [0.0, 0.0],
@@ -179,13 +191,14 @@ impl GlyphAtlasEntry {
             safe_padding: 0.0,
             font_policy_id: 0,
             kind: GlyphEntryKind::Mask,
+            allocated_cell,
         }
     }
 
     /// A deterministic visible entry for capacity inventory and contract tests.
     /// Primitive-count inventory needs key occupancy, not native font geometry;
     /// using this avoids hidden AppKit raster work in the evidence callback.
-    pub(super) fn synthetic_visible(kind: GlyphEntryKind) -> Self {
+    pub(super) fn synthetic_visible(kind: GlyphEntryKind, allocated_cell: AtlasCell) -> Self {
         Self {
             visible_uv: Some([0.0, 0.0, 1.0, 1.0]),
             ink_origin: [1.0, 2.0],
@@ -199,6 +212,7 @@ impl GlyphAtlasEntry {
             safe_padding: 6.0,
             font_policy_id: 1,
             kind,
+            allocated_cell,
         }
     }
 }
@@ -560,6 +574,7 @@ fn rasterize_glyph_entry_impl(
             return Ok(GlyphAtlasEntry::whitespace(
                 size.width as f32,
                 size.height as f32,
+                AtlasCell { origin: [x, y], extent: [cell, cell] },
             ));
         }
 
@@ -609,6 +624,7 @@ fn rasterize_glyph_entry_impl(
             safe_padding: padding as f32,
             font_policy_id,
             kind,
+            allocated_cell: AtlasCell { origin: [x, y], extent: [cell, cell] },
         };
         Ok(entry)
     }
@@ -660,6 +676,287 @@ pub(super) struct CompiledGlyphAtlas {
     pub(super) height: u32,
     pub(super) rgba: Vec<u8>,
     pub(super) entries: BTreeMap<GlyphKey, GlyphAtlasEntry>,
+}
+
+/// A dense, deterministic scene-atlas entry. The id is its index in
+/// [`PreparedSceneAtlas::entries`], assigned in complete [`GlyphKey`] order.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // CPU-only handoff remains independent of GPU ownership.
+pub(super) struct PreparedSceneAtlasEntry {
+    pub(super) id: u32,
+    pub(super) key: GlyphKey,
+    pub(super) entry: GlyphAtlasEntry,
+}
+
+/// Pure worker-owned atlas data prepared for the scene renderer. Coverage and
+/// native color are split so later GPU materialization can choose appropriate
+/// texture formats without retaining AppKit or wgpu objects here.
+#[derive(Debug)]
+#[allow(dead_code)] // CPU-only handoff remains independent of GPU ownership.
+pub(super) struct PreparedSceneAtlas {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) coverage_r8: Vec<u8>,
+    pub(super) straight_color_rgba_srgb: Vec<u8>,
+    pub(super) entries: Vec<PreparedSceneAtlasEntry>,
+    entry_ids: BTreeMap<GlyphKey, u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Preparation stays fallible before any GPU objects exist.
+pub(super) enum PreparedSceneAtlasError {
+    PixelDataLength { expected: usize, actual: usize },
+    TooManyEntries,
+    CellOutOfBounds { key: GlyphKey },
+    OverlappingCells { first: GlyphKey, second: GlyphKey },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Resolution stays typed at the CPU scene boundary.
+pub(super) enum GlyphAtlasResolveError {
+    MissingKey(GlyphKey),
+    MissingSingleScalar(char),
+    AmbiguousSingleScalar {
+        scalar: char,
+        matches: Vec<GlyphKey>,
+    },
+}
+
+#[allow(dead_code)] // Pure conversion is exercised before GPU materialization.
+impl PreparedSceneAtlas {
+    pub(super) fn from_compiled(
+        compiled: &CompiledGlyphAtlas,
+    ) -> std::result::Result<Self, PreparedSceneAtlasError> {
+        let pixel_count = usize::try_from(compiled.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(compiled.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or(PreparedSceneAtlasError::PixelDataLength {
+                expected: usize::MAX,
+                actual: compiled.rgba.len(),
+            })?;
+        let expected_rgba =
+            pixel_count
+                .checked_mul(4)
+                .ok_or(PreparedSceneAtlasError::PixelDataLength {
+                    expected: usize::MAX,
+                    actual: compiled.rgba.len(),
+                })?;
+        if compiled.rgba.len() != expected_rgba {
+            return Err(PreparedSceneAtlasError::PixelDataLength {
+                expected: expected_rgba,
+                actual: compiled.rgba.len(),
+            });
+        }
+        if compiled.entries.len() > u32::MAX as usize {
+            return Err(PreparedSceneAtlasError::TooManyEntries);
+        }
+
+        let mut allocated: Vec<(GlyphKey, AtlasCell)> = Vec::with_capacity(compiled.entries.len());
+        for (key, entry) in &compiled.entries {
+            let cell = entry.allocated_cell;
+            let end_x = cell.origin[0].checked_add(cell.extent[0]);
+            let end_y = cell.origin[1].checked_add(cell.extent[1]);
+            if cell.extent.contains(&0)
+                || end_x.is_none_or(|end| end > compiled.width)
+                || end_y.is_none_or(|end| end > compiled.height)
+            {
+                return Err(PreparedSceneAtlasError::CellOutOfBounds { key: key.clone() });
+            }
+            for (other_key, other_cell) in &allocated {
+                if cells_overlap(cell, *other_cell) {
+                    return Err(PreparedSceneAtlasError::OverlappingCells {
+                        first: other_key.clone(),
+                        second: key.clone(),
+                    });
+                }
+            }
+            allocated.push((key.clone(), cell));
+        }
+
+        let mut coverage_r8 = vec![0; pixel_count];
+        let mut straight_color_rgba_srgb = vec![0; expected_rgba];
+        let mut entries = Vec::with_capacity(compiled.entries.len());
+        let mut entry_ids = BTreeMap::new();
+        for (key, source_entry) in &compiled.entries {
+            let id = entries.len() as u32;
+            entry_ids.insert(key.clone(), id);
+            entries.push(PreparedSceneAtlasEntry {
+                id,
+                key: key.clone(),
+                entry: *source_entry,
+            });
+            copy_scene_atlas_cell(
+                compiled,
+                *source_entry,
+                &mut coverage_r8,
+                &mut straight_color_rgba_srgb,
+            );
+        }
+
+        Ok(Self {
+            width: compiled.width,
+            height: compiled.height,
+            coverage_r8,
+            straight_color_rgba_srgb,
+            entries,
+            entry_ids,
+        })
+    }
+
+    pub(super) fn resolve_key(
+        &self,
+        key: &GlyphKey,
+    ) -> std::result::Result<&PreparedSceneAtlasEntry, GlyphAtlasResolveError> {
+        self.entry_ids
+            .get(key)
+            .map(|&id| &self.entries[id as usize])
+            .ok_or_else(|| GlyphAtlasResolveError::MissingKey(key.clone()))
+    }
+
+    /// Resolves only an authored sequence containing exactly one scalar. Weight
+    /// is intentionally absent: if both regular and bold exist, callers must use
+    /// the full-key resolver instead of silently choosing one.
+    pub(super) fn resolve_single_scalar(
+        &self,
+        scalar: char,
+    ) -> std::result::Result<&PreparedSceneAtlasEntry, GlyphAtlasResolveError> {
+        let matches = self
+            .entries
+            .iter()
+            .filter(|candidate| {
+                let mut scalars = candidate.key.sequence.as_str().chars();
+                scalars.next() == Some(scalar) && scalars.next().is_none()
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => Err(GlyphAtlasResolveError::MissingSingleScalar(scalar)),
+            [entry] => Ok(*entry),
+            _ => Err(GlyphAtlasResolveError::AmbiguousSingleScalar {
+                scalar,
+                matches: matches.iter().map(|entry| entry.key.clone()).collect(),
+            }),
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn cells_overlap(left: AtlasCell, right: AtlasCell) -> bool {
+    left.origin[0] < right.origin[0] + right.extent[0]
+        && right.origin[0] < left.origin[0] + left.extent[0]
+        && left.origin[1] < right.origin[1] + right.extent[1]
+        && right.origin[1] < left.origin[1] + left.extent[1]
+}
+
+#[allow(dead_code)]
+fn copy_scene_atlas_cell(
+    compiled: &CompiledGlyphAtlas,
+    entry: GlyphAtlasEntry,
+    coverage_r8: &mut [u8],
+    straight_color_rgba_srgb: &mut [u8],
+) {
+    let cell = entry.allocated_cell;
+    for row in 0..cell.extent[1] {
+        for column in 0..cell.extent[0] {
+            let x = cell.origin[0] + column;
+            let y = cell.origin[1] + row;
+            let pixel = y as usize * compiled.width as usize + x as usize;
+            let rgba = pixel * 4;
+            let alpha = compiled.rgba[rgba + 3];
+            match entry.kind {
+                GlyphEntryKind::Mask => coverage_r8[pixel] = alpha,
+                GlyphEntryKind::PremultipliedColorRgba => {
+                    straight_color_rgba_srgb[rgba + 3] = alpha;
+                    if alpha != 0 {
+                        for channel in 0..3 {
+                            straight_color_rgba_srgb[rgba + channel] =
+                                unpremultiply(compiled.rgba[rgba + channel], alpha);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if entry.kind == GlyphEntryKind::PremultipliedColorRgba {
+        dilate_native_color_cell(compiled.width, entry, straight_color_rgba_srgb);
+    }
+}
+
+#[allow(dead_code)]
+fn unpremultiply(channel: u8, alpha: u8) -> u8 {
+    debug_assert_ne!(alpha, 0);
+    ((u32::from(channel) * 255 + u32::from(alpha) / 2) / u32::from(alpha)).min(255) as u8
+}
+
+#[allow(dead_code)]
+fn dilate_native_color_cell(atlas_width: u32, entry: GlyphAtlasEntry, color: &mut [u8]) {
+    let cell = entry.allocated_cell;
+    let radius = if entry.safe_padding.is_finite() && entry.safe_padding > 0.0 {
+        entry.safe_padding.floor() as u32
+    } else {
+        0
+    }
+    .min(cell.extent[0].max(cell.extent[1]));
+    if radius == 0 {
+        return;
+    }
+
+    let local_len = cell.extent[0] as usize * cell.extent[1] as usize;
+    let mut distance = vec![u32::MAX; local_len];
+    let mut queue = VecDeque::with_capacity(local_len);
+    for row in 0..cell.extent[1] {
+        for column in 0..cell.extent[0] {
+            let local = row as usize * cell.extent[0] as usize + column as usize;
+            let pixel = (cell.origin[1] + row) as usize * atlas_width as usize
+                + (cell.origin[0] + column) as usize;
+            if color[pixel * 4 + 3] != 0 {
+                distance[local] = 0;
+                queue.push_back((column, row));
+            }
+        }
+    }
+
+    while let Some((column, row)) = queue.pop_front() {
+        let local = row as usize * cell.extent[0] as usize + column as usize;
+        let next_distance = distance[local] + 1;
+        if next_distance > radius {
+            continue;
+        }
+        let pixel = (cell.origin[1] + row) as usize * atlas_width as usize
+            + (cell.origin[0] + column) as usize;
+        let rgb = [color[pixel * 4], color[pixel * 4 + 1], color[pixel * 4 + 2]];
+        for dy in -1_i32..=1 {
+            for dx in -1_i32..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let Some(next_column) = column.checked_add_signed(dx) else {
+                    continue;
+                };
+                let Some(next_row) = row.checked_add_signed(dy) else {
+                    continue;
+                };
+                if next_column >= cell.extent[0] || next_row >= cell.extent[1] {
+                    continue;
+                }
+                let next_local = next_row as usize * cell.extent[0] as usize + next_column as usize;
+                if distance[next_local] != u32::MAX {
+                    continue;
+                }
+                let next_pixel = (cell.origin[1] + next_row) as usize * atlas_width as usize
+                    + (cell.origin[0] + next_column) as usize;
+                if color[next_pixel * 4 + 3] != 0 {
+                    continue;
+                }
+                distance[next_local] = next_distance;
+                color[next_pixel * 4..next_pixel * 4 + 3].copy_from_slice(&rgb);
+                queue.push_back((next_column, next_row));
+            }
+        }
+    }
 }
 
 struct GlyphAtlasPreparation {
@@ -980,15 +1277,23 @@ impl CompiledRetainedResources {
     }
 
     pub(super) fn for_capacity_inventory(manifest: &GlyphRepertoireManifest) -> Self {
+        let width = u32::try_from(manifest.glyphs().len())
+            .expect("capacity inventory fits the declared atlas limit")
+            .max(1);
         let entries = manifest
             .glyphs()
             .iter()
             .cloned()
-            .map(|key| {
+            .enumerate()
+            .map(|(index, key)| {
+                let allocated_cell = AtlasCell {
+                    origin: [index as u32, 0],
+                    extent: [1, 1],
+                };
                 let entry = if key.sequence.as_str().chars().all(char::is_whitespace) {
-                    GlyphAtlasEntry::whitespace(29.0, 52.0)
+                    GlyphAtlasEntry::whitespace(29.0, 52.0, allocated_cell)
                 } else {
-                    GlyphAtlasEntry::synthetic_visible(GlyphEntryKind::Mask)
+                    GlyphAtlasEntry::synthetic_visible(GlyphEntryKind::Mask, allocated_cell)
                 };
                 (key, entry)
             })
@@ -996,9 +1301,9 @@ impl CompiledRetainedResources {
         Self {
             generation: ResourceGenerationKey(0),
             atlas: CompiledGlyphAtlas {
-                width: 1,
+                width,
                 height: 1,
-                rgba: vec![0; 4],
+                rgba: vec![0; width as usize * 4],
                 entries,
             },
         }
@@ -1181,6 +1486,11 @@ mod metric_tests {
                     entry.line_height,
                 );
                 assert!(entry.advance > 0.0, "{label}@{cell}: advances the pen");
+                assert_eq!(
+                    entry.allocated_cell,
+                    AtlasCell { origin: [0, 0], extent: [cell, cell] },
+                    "{label}@{cell}: exact allocated raster cell",
+                );
 
                 match coverage {
                     Coverage::Whitespace => {
@@ -1393,15 +1703,350 @@ mod glyph_tests {
 
     #[test]
     fn color_entry_bypasses_foreground_tint() {
-        let entry = GlyphAtlasEntry::synthetic_visible(GlyphEntryKind::PremultipliedColorRgba);
+        let entry = GlyphAtlasEntry::synthetic_visible(
+            GlyphEntryKind::PremultipliedColorRgba,
+            AtlasCell { origin: [0, 0], extent: [1, 1] },
+        );
         assert_eq!(entry.fragment_mode(), FragmentGlyphMode::NativeColor);
     }
 
     #[test]
     fn whitespace_keeps_advance_without_visible_uv() {
-        let entry = GlyphAtlasEntry::whitespace(24.0, 52.0);
+        let entry =
+            GlyphAtlasEntry::whitespace(24.0, 52.0, AtlasCell { origin: [0, 0], extent: [1, 1] });
         assert_eq!(entry.advance, 24.0);
         assert_eq!(entry.visible_uv, None);
+    }
+}
+
+#[cfg(test)]
+mod prepared_scene_atlas_tests {
+    use super::*;
+
+    fn entry(
+        kind: GlyphEntryKind,
+        origin: [u32; 2],
+        extent: [u32; 2],
+        safe_padding: f32,
+    ) -> GlyphAtlasEntry {
+        GlyphAtlasEntry {
+            visible_uv: Some([0.0, 0.0, 1.0, 1.0]),
+            ink_origin: [0.0, 0.0],
+            ink_size: [extent[0] as f32, extent[1] as f32],
+            line_height: extent[1] as f32,
+            advance: extent[0] as f32,
+            kind,
+            baseline: 0.0,
+            ascent: 0.0,
+            descent: 0.0,
+            raster_size: [extent[0] as f32, extent[1] as f32],
+            safe_padding,
+            font_policy_id: 1,
+            allocated_cell: AtlasCell { origin, extent },
+        }
+    }
+
+    fn atlas(
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        entries: impl IntoIterator<Item = (GlyphKey, GlyphAtlasEntry)>,
+    ) -> CompiledGlyphAtlas {
+        CompiledGlyphAtlas {
+            width,
+            height,
+            rgba,
+            entries: entries.into_iter().collect(),
+        }
+    }
+
+    fn pixel(bytes: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let offset = ((y * width + x) * 4) as usize;
+        bytes[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn mask_alpha_becomes_coverage_and_native_premultiplied_color_becomes_straight() {
+        let mask = GlyphKey::new("m", false);
+        let color = GlyphKey::new("c", false);
+        let source = atlas(
+            6,
+            1,
+            vec![
+                9, 8, 7, 0, 9, 8, 7, 128, 9, 8, 7, 255, 200, 100, 50, 0, 64, 32, 16, 128, 255, 127,
+                1, 255,
+            ],
+            [
+                (mask, entry(GlyphEntryKind::Mask, [0, 0], [3, 1], 0.0)),
+                (
+                    color,
+                    entry(GlyphEntryKind::PremultipliedColorRgba, [3, 0], [3, 1], 0.0),
+                ),
+            ],
+        );
+
+        let prepared = PreparedSceneAtlas::from_compiled(&source).unwrap();
+
+        assert_eq!([prepared.width, prepared.height], [6, 1]);
+        assert_eq!(prepared.coverage_r8, [0, 128, 255, 0, 0, 0]);
+        assert_eq!(&prepared.straight_color_rgba_srgb[..12], &[0; 12]);
+        assert_eq!(
+            pixel(&prepared.straight_color_rgba_srgb, 6, 3, 0),
+            [0, 0, 0, 0]
+        );
+        assert_eq!(
+            pixel(&prepared.straight_color_rgba_srgb, 6, 4, 0),
+            [128, 64, 32, 128]
+        );
+        assert_eq!(
+            pixel(&prepared.straight_color_rgba_srgb, 6, 5, 0),
+            [255, 127, 1, 255]
+        );
+    }
+
+    #[test]
+    fn preparation_rejects_bad_pixel_length_out_of_bounds_and_overlapping_cells() {
+        let key = GlyphKey::new("x", false);
+        let bad_length = atlas(
+            1,
+            1,
+            vec![],
+            [(
+                key.clone(),
+                entry(GlyphEntryKind::Mask, [0, 0], [1, 1], 0.0),
+            )],
+        );
+        assert!(matches!(
+            PreparedSceneAtlas::from_compiled(&bad_length),
+            Err(PreparedSceneAtlasError::PixelDataLength { expected: 4, actual: 0 })
+        ));
+
+        let out_of_bounds = atlas(
+            1,
+            1,
+            vec![0; 4],
+            [(
+                key.clone(),
+                entry(GlyphEntryKind::Mask, [1, 0], [1, 1], 0.0),
+            )],
+        );
+        assert!(matches!(
+            PreparedSceneAtlas::from_compiled(&out_of_bounds),
+            Err(PreparedSceneAtlasError::CellOutOfBounds { key: failed }) if failed == key
+        ));
+
+        let second = GlyphKey::new("y", false);
+        let overlap = atlas(
+            2,
+            1,
+            vec![0; 8],
+            [
+                (key, entry(GlyphEntryKind::Mask, [0, 0], [2, 1], 0.0)),
+                (second, entry(GlyphEntryKind::Mask, [1, 0], [1, 1], 0.0)),
+            ],
+        );
+        assert!(matches!(
+            PreparedSceneAtlas::from_compiled(&overlap),
+            Err(PreparedSceneAtlasError::OverlappingCells { .. })
+        ));
+    }
+
+    #[test]
+    fn native_color_dilation_fills_one_and_two_pixel_gutters_including_corners() {
+        for (size, padding) in [(3, 1.0), (5, 2.0)] {
+            let mut rgba = vec![0; (size * size * 4) as usize];
+            let center = size / 2;
+            let offset = ((center * size + center) * 4) as usize;
+            rgba[offset..offset + 4].copy_from_slice(&[200, 100, 50, 255]);
+            let source = atlas(
+                size,
+                size,
+                rgba,
+                [(
+                    GlyphKey::new("color", false),
+                    entry(
+                        GlyphEntryKind::PremultipliedColorRgba,
+                        [0, 0],
+                        [size, size],
+                        padding,
+                    ),
+                )],
+            );
+
+            let prepared = PreparedSceneAtlas::from_compiled(&source).unwrap();
+            assert_eq!(
+                pixel(&prepared.straight_color_rgba_srgb, size, 0, 0),
+                [200, 100, 50, 0]
+            );
+            assert_eq!(
+                pixel(&prepared.straight_color_rgba_srgb, size, size - 1, size - 1),
+                [200, 100, 50, 0]
+            );
+            assert_eq!(
+                pixel(&prepared.straight_color_rgba_srgb, size, center, center),
+                [200, 100, 50, 255]
+            );
+        }
+    }
+
+    #[test]
+    fn native_color_dilation_never_crosses_an_adjacent_allocated_cell() {
+        let mut rgba = vec![0; 6 * 3 * 4];
+        let red = ((6 + 1) * 4) as usize;
+        rgba[red..red + 4].copy_from_slice(&[255, 0, 0, 255]);
+        let blue = ((6 + 4) * 4) as usize;
+        rgba[blue..blue + 4].copy_from_slice(&[0, 0, 255, 255]);
+        let source = atlas(
+            6,
+            3,
+            rgba,
+            [
+                (
+                    GlyphKey::new("red", false),
+                    entry(GlyphEntryKind::PremultipliedColorRgba, [0, 0], [3, 3], 2.0),
+                ),
+                (
+                    GlyphKey::new("blue", false),
+                    entry(GlyphEntryKind::PremultipliedColorRgba, [3, 0], [3, 3], 2.0),
+                ),
+            ],
+        );
+
+        let prepared = PreparedSceneAtlas::from_compiled(&source).unwrap();
+        assert_eq!(
+            pixel(&prepared.straight_color_rgba_srgb, 6, 2, 1),
+            [255, 0, 0, 0]
+        );
+        assert_eq!(
+            pixel(&prepared.straight_color_rgba_srgb, 6, 3, 1),
+            [0, 0, 255, 0]
+        );
+    }
+
+    #[test]
+    fn whitespace_keeps_an_allocated_cell_and_resolves_without_pixels() {
+        let key = GlyphKey::new(" ", false);
+        let source = atlas(
+            2,
+            2,
+            vec![0; 16],
+            [(
+                key.clone(),
+                GlyphAtlasEntry::whitespace(
+                    12.0,
+                    20.0,
+                    AtlasCell { origin: [0, 0], extent: [2, 2] },
+                ),
+            )],
+        );
+
+        let prepared = PreparedSceneAtlas::from_compiled(&source).unwrap();
+        let resolved = prepared.resolve_key(&key).unwrap();
+        assert_eq!(resolved.entry.allocated_cell.extent, [2, 2]);
+        assert!(prepared.coverage_r8.iter().all(|&byte| byte == 0));
+        assert!(prepared
+            .straight_color_rgba_srgb
+            .iter()
+            .all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn dense_ids_are_sorted_and_scalar_resolution_reports_missing_or_ambiguous() {
+        let regular = GlyphKey::new("x", false);
+        let bold = GlyphKey::new("x", true);
+        let only = GlyphKey::new("y", false);
+        let make = |entries| atlas(3, 1, vec![0; 12], entries);
+        let first = make([
+            (
+                bold.clone(),
+                entry(GlyphEntryKind::Mask, [1, 0], [1, 1], 0.0),
+            ),
+            (
+                only.clone(),
+                entry(GlyphEntryKind::Mask, [2, 0], [1, 1], 0.0),
+            ),
+            (
+                regular.clone(),
+                entry(GlyphEntryKind::Mask, [0, 0], [1, 1], 0.0),
+            ),
+        ]);
+        let second = make([
+            (
+                regular.clone(),
+                entry(GlyphEntryKind::Mask, [0, 0], [1, 1], 0.0),
+            ),
+            (
+                bold.clone(),
+                entry(GlyphEntryKind::Mask, [1, 0], [1, 1], 0.0),
+            ),
+            (
+                only.clone(),
+                entry(GlyphEntryKind::Mask, [2, 0], [1, 1], 0.0),
+            ),
+        ]);
+
+        let first = PreparedSceneAtlas::from_compiled(&first).unwrap();
+        let second = PreparedSceneAtlas::from_compiled(&second).unwrap();
+        let ids = |atlas: &PreparedSceneAtlas| {
+            atlas
+                .entries
+                .iter()
+                .map(|entry| (entry.key.clone(), entry.id))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(first.resolve_key(&regular).unwrap().id, 0);
+        assert_eq!(first.resolve_key(&bold).unwrap().id, 1);
+        assert_eq!(first.resolve_single_scalar('y').unwrap().key, only);
+        assert!(matches!(
+            first.resolve_single_scalar('x'),
+            Err(GlyphAtlasResolveError::AmbiguousSingleScalar { scalar: 'x', .. })
+        ));
+        assert!(matches!(
+            first.resolve_single_scalar('z'),
+            Err(GlyphAtlasResolveError::MissingSingleScalar('z'))
+        ));
+        assert!(matches!(
+            first.resolve_key(&GlyphKey::new("z", false)),
+            Err(GlyphAtlasResolveError::MissingKey(_))
+        ));
+    }
+
+    #[test]
+    fn production_repertoire_converts_and_resolves_regular_and_bold_keys() {
+        let manifest = GlyphRepertoireManifest::for_fixture_pet();
+        let compiled = CompiledRetainedResources::compile(&manifest).unwrap();
+        let legacy_bytes = compiled.atlas().rgba.clone();
+
+        let prepared = PreparedSceneAtlas::from_compiled(compiled.atlas()).unwrap();
+
+        assert_eq!(prepared.entries.len(), manifest.glyphs().len());
+        for key in manifest.glyphs() {
+            assert_eq!(prepared.resolve_key(key).unwrap().key, *key);
+        }
+        assert!(prepared
+            .resolve_key(&GlyphKey::new("\u{fffd}", false))
+            .is_ok());
+        assert!(prepared
+            .resolve_key(&GlyphKey::new("\u{fffd}", true))
+            .is_ok());
+        assert_eq!(compiled.atlas().rgba, legacy_bytes);
+    }
+
+    #[test]
+    fn synthetic_capacity_inventory_has_valid_distinct_allocated_cells() {
+        let manifest = GlyphRepertoireManifest::for_fixture_pet();
+        let compiled = CompiledRetainedResources::for_capacity_inventory(&manifest);
+
+        let prepared = PreparedSceneAtlas::from_compiled(compiled.atlas()).unwrap();
+
+        assert_eq!(prepared.entries.len(), manifest.glyphs().len());
+    }
+
+    #[test]
+    fn prepared_scene_atlas_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PreparedSceneAtlas>();
     }
 }
 

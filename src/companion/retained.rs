@@ -2088,6 +2088,7 @@ mod tests {
             safe_padding: 6.0,
             font_policy_id: 0,
             kind: GlyphEntryKind::Mask,
+            allocated_cell: super::resources::AtlasCell { origin: [0, 0], extent: [80, 80] },
         }
     }
 
@@ -2145,7 +2146,11 @@ mod tests {
 
     #[test]
     fn blank_glyph_has_advance_without_a_visible_quad() {
-        let entry = GlyphAtlasEntry::whitespace(28.0, 52.0);
+        let entry = GlyphAtlasEntry::whitespace(
+            28.0,
+            52.0,
+            super::resources::AtlasCell { origin: [0, 0], extent: [80, 80] },
+        );
 
         assert_eq!(glyph_ink_rect([12.0, 34.0], 48.0, entry), None);
         assert_eq!(glyph_advance(entry, 48.0), 28.0);
