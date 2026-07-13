@@ -48,6 +48,8 @@ pub enum CompanionSceneProjectionError {
         count: usize,
     },
     InvalidRoomGlyphColor,
+    InvalidTankPaint,
+    InvalidTankRoute,
     InvalidProjectionGrid,
     InvalidProjectionLayout,
     InvalidDepthProjection,
@@ -80,6 +82,12 @@ impl std::fmt::Display for CompanionSceneProjectionError {
             }
             Self::InvalidRoomGlyphColor => {
                 write!(f, "room emitted a non-RGB color in truecolor projection")
+            }
+            Self::InvalidTankPaint => {
+                write!(f, "visible tank inhabitant has no canonical authored paint")
+            }
+            Self::InvalidTankRoute => {
+                write!(f, "visible tank inhabitant has no canonical route outcome")
             }
             Self::InvalidProjectionGrid => write!(f, "companion projection grid is empty"),
             Self::InvalidProjectionLayout => {
@@ -333,6 +341,8 @@ pub struct TankAnimationSnapshot {
     pub sprite_variant: u8,
     pub visible_rows: u8,
     pub anemone_morph: Option<u8>,
+    pub color_srgb8: [u8; 3],
+    pub bold: bool,
     pub cadence_ms: u16,
     pub calm: bool,
     pub cells: Vec<TankCellSnapshot>,

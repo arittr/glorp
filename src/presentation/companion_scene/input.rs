@@ -199,7 +199,7 @@ impl CompanionSceneSnapshot {
         let visible_tank_inhabitants = project_tank_inhabitants(vm);
         let prop_animation_states = project_prop_animation_states(vm, &visible_props, now, layout);
         let tank_animation_states =
-            project_tank_animation_states(vm, &visible_tank_inhabitants, input, motion);
+            project_tank_animation_states(vm, &visible_tank_inhabitants, input, motion)?;
         let hud = crate::round::hud::review_capture_hud_text();
         let (ambient_semantics, ambient_instances) = project_ambient_slots();
         let (room_glyphs, room_glyph_frames) =
@@ -500,7 +500,7 @@ fn project_tank_animation_states(
     visible_tank_inhabitants: &[TankTopologySnapshot],
     input: CompanionSceneProjectionInput,
     motion: crate::round::motion::RoundCompanionMotionProjection,
-) -> Vec<TankAnimationSnapshot> {
+) -> Result<Vec<TankAnimationSnapshot>, CompanionSceneProjectionError> {
     let calm = vm.life_profile.calm_mode || vm.day_context.asleep;
     let mut geometry = crate::presentation::tank_life::TankRouteGeometry::round(
         input.grid_columns,
@@ -519,7 +519,9 @@ fn project_tank_animation_states(
     );
     visible_tank_inhabitants
         .iter()
-        .filter_map(|inhabitant| {
+        .map(|inhabitant| {
+            let paint = crate::presentation::tank_life::tank_paint_for(inhabitant.catalog_id)
+                .ok_or(CompanionSceneProjectionError::InvalidTankPaint)?;
             let outcome = crate::presentation::tank_life::resolve_tank_route(
                 crate::presentation::tank_life::TankRouteInput {
                     catalog_id: inhabitant.catalog_id,
@@ -529,8 +531,9 @@ fn project_tank_animation_states(
                     calm,
                     geometry: &geometry,
                 },
-            )?;
-            Some(TankAnimationSnapshot {
+            )
+            .ok_or(CompanionSceneProjectionError::InvalidTankRoute)?;
+            Ok(TankAnimationSnapshot {
                 catalog_id: inhabitant.catalog_id,
                 stable_order: inhabitant.stable_order,
                 route: outcome.route.into(),
@@ -558,6 +561,8 @@ fn project_tank_animation_states(
                 sprite_variant: outcome.sprite_variant,
                 visible_rows: outcome.visible_rows,
                 anemone_morph: outcome.anemone_morph,
+                color_srgb8: paint.color_srgb8,
+                bold: paint.bold,
                 cadence_ms: outcome.cadence_ms,
                 calm: outcome.calm,
                 cells: outcome
@@ -1616,6 +1621,14 @@ mod tests {
         assert!(
             json.contains("sprite_variant"),
             "missing bounded sprite variant: {json}"
+        );
+        assert!(
+            json.contains("color_srgb8"),
+            "missing resolved authored tank color: {json}"
+        );
+        assert!(
+            json.contains("\"bold\":true"),
+            "missing resolved authored tank weight: {json}"
         );
         assert!(
             json.contains("cells"),

@@ -532,25 +532,39 @@ fn project_tank_delta(
         .iter()
         .zip(&snapshot.content.tank_animation_states)
     {
-        let mut glyphs = [None; MAX_TANK_GLYPHS_PER_SLOT];
-        for (index, cell) in semantic.cells.iter().enumerate() {
-            if index >= MAX_TANK_GLYPHS_PER_SLOT {
-                return Err(SceneGenerationError::FixedCapacity);
-            }
-            glyphs[index] = Some(
-                AuthoredGlyph::new(cell.glyph).map_err(|_| SceneGenerationError::InvalidGlyph)?,
-            );
-        }
         output.push(TankContentSlot {
             slot: topology.stable_order,
-            content: Some(TankSemanticContent {
-                sprite_variant: semantic.sprite_variant,
-                morph: semantic.anemone_morph,
-                glyphs,
-            }),
+            content: Some(tank_semantic_content(topology, semantic)?),
         });
     }
     Ok(())
+}
+
+fn tank_semantic_content(
+    topology: &crate::presentation::companion_scene::TankTopologySnapshot,
+    semantic: &crate::presentation::companion_scene::TankAnimationSnapshot,
+) -> Result<TankSemanticContent, SceneGenerationError> {
+    if topology.catalog_id != semantic.catalog_id
+        || topology.stable_order != semantic.stable_order
+        || topology.route != semantic.route
+    {
+        return Err(SceneGenerationError::UnknownAuthoredIdentity);
+    }
+    let mut glyphs = [None; MAX_TANK_GLYPHS_PER_SLOT];
+    if semantic.cells.len() > MAX_TANK_GLYPHS_PER_SLOT {
+        return Err(SceneGenerationError::FixedCapacity);
+    }
+    for (slot, cell) in semantic.cells.iter().enumerate() {
+        glyphs[slot] =
+            Some(AuthoredGlyph::new(cell.glyph).map_err(|_| SceneGenerationError::InvalidGlyph)?);
+    }
+    Ok(TankSemanticContent {
+        sprite_variant: semantic.sprite_variant,
+        morph: semantic.anemone_morph,
+        color_srgb8: semantic.color_srgb8,
+        bold: semantic.bold,
+        glyphs,
+    })
 }
 
 #[allow(dead_code)]
@@ -1506,26 +1520,8 @@ fn build_content(
         .iter()
         .zip(&snapshot.content.tank_animation_states)
     {
-        if topology.catalog_id != semantic.catalog_id
-            || topology.stable_order != semantic.stable_order
-        {
-            return Err(SceneGenerationError::UnknownAuthoredIdentity);
-        }
-        let mut glyphs = [None; MAX_TANK_GLYPHS_PER_SLOT];
-        if semantic.cells.len() > MAX_TANK_GLYPHS_PER_SLOT {
-            return Err(SceneGenerationError::FixedCapacity);
-        }
-        for (slot, cell) in semantic.cells.iter().enumerate() {
-            glyphs[slot] = Some(
-                AuthoredGlyph::new(cell.glyph).map_err(|_| SceneGenerationError::InvalidGlyph)?,
-            );
-        }
         content.tank_slots[usize::from(topology.stable_order)].content =
-            Some(TankSemanticContent {
-                sprite_variant: semantic.sprite_variant,
-                morph: semantic.anemone_morph,
-                glyphs,
-            });
+            Some(tank_semantic_content(topology, semantic)?);
     }
     for semantic in &snapshot.content.ambient_semantics {
         let slot = usize::from(semantic.slot);

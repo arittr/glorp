@@ -155,16 +155,14 @@ impl SceneGlyphWeightPolicy {
         palette_role_tag == PET_EYE_PALETTE_ROLE_TAG
     }
 
-    pub(super) const fn tank_layer_is_bold(
-        _layer: crate::presentation::companion_scene::scene::InstanceLayer,
+    pub(super) const fn content_is_bold(
+        family: ContentMirrorFamily,
+        flags: u32,
+        signed_data: [i32; 2],
     ) -> bool {
-        true
-    }
-
-    pub(super) const fn content_is_bold(family: ContentMirrorFamily, flags: u32) -> bool {
         match family {
             ContentMirrorFamily::Pet => Self::pet_is_bold(flags),
-            ContentMirrorFamily::TankGlyphs => true,
+            ContentMirrorFamily::TankGlyphs => signed_data[1] == 1,
             ContentMirrorFamily::Globals
             | ContentMirrorFamily::PropGlyphs
             | ContentMirrorFamily::Ambient
@@ -193,7 +191,7 @@ impl SceneContentGpuValue {
                 })?;
             let key = GlyphKey::new(
                 scalar.to_string(),
-                SceneGlyphWeightPolicy::content_is_bold(family, value.flags),
+                SceneGlyphWeightPolicy::content_is_bold(family, value.flags, value.signed_data),
             );
             match atlas.resolve_key(&key) {
                 Ok(entry) => entry.id,
@@ -2300,18 +2298,22 @@ mod tests {
                 "{role:?}",
             );
         }
-        assert!(SceneGlyphWeightPolicy::tank_layer_is_bold(
-            InstanceLayer::Behind
+        assert!(!SceneGlyphWeightPolicy::content_is_bold(
+            ContentMirrorFamily::TankGlyphs,
+            0,
+            [0, 0],
         ));
-        assert!(SceneGlyphWeightPolicy::tank_layer_is_bold(
-            InstanceLayer::Foreground
+        assert!(SceneGlyphWeightPolicy::content_is_bold(
+            ContentMirrorFamily::TankGlyphs,
+            0,
+            [0, 1],
         ));
         for family in [
             ContentMirrorFamily::PropGlyphs,
             ContentMirrorFamily::Ambient,
             ContentMirrorFamily::Hud,
         ] {
-            assert!(!SceneGlyphWeightPolicy::content_is_bold(family, 0));
+            assert!(!SceneGlyphWeightPolicy::content_is_bold(family, 0, [0; 2]));
         }
     }
 
@@ -2355,6 +2357,75 @@ mod tests {
             ),
             Err(SceneUploadError::MissingGlyphKey { .. })
         ));
+    }
+
+    #[test]
+    fn tank_atlas_weight_uses_authored_packed_bit() {
+        let atlas = two_weight_atlas('^');
+        let mut regular = super::super::compiler::ContentUploadValue::fixture(u32::from('^'), 0);
+        regular.kind = 3;
+        let packed_color = 126 | (238 << 8) | (255 << 16);
+        regular.signed_data = [packed_color, 0];
+        let mut bold = regular;
+        bold.signed_data[1] = 1;
+
+        let regular =
+            SceneContentGpuValue::translate(ContentMirrorFamily::TankGlyphs, regular, &atlas)
+                .unwrap();
+        let bold =
+            SceneContentGpuValue::translate(ContentMirrorFamily::TankGlyphs, bold, &atlas).unwrap();
+        assert_ne!(regular.glyph_entry_index, bold.glyph_entry_index);
+        assert_eq!(bold.signed_data, [packed_color, 1]);
+
+        let packed = bold.signed_data[0] as u32;
+        let authored_srgb8 = [
+            (packed & 0xff) as u8,
+            ((packed >> 8) & 0xff) as u8,
+            ((packed >> 16) & 0xff) as u8,
+        ];
+        assert_eq!(authored_srgb8, [126, 238, 255]);
+        let linear = authored_srgb8.map(|channel| scene_srgb_to_linear(f32::from(channel) / 255.0));
+        assert!((linear[0] - 0.208_636_87).abs() < 1.0e-7);
+        assert!((linear[1] - 0.854_992_6).abs() < 1.0e-7);
+        assert_eq!(linear[2], 1.0);
+    }
+
+    #[test]
+    fn tank_shader_decode_preserves_rgb_lanes_and_uses_255_normalization() {
+        let source = SCENE_SHADER_SOURCE;
+        let start = source
+            .find("fn tank_paint_linear")
+            .expect("tank paint function");
+        let end = source[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset + 3)
+            .expect("tank paint function end");
+        let tank_paint = &source[start..end];
+        for required in [
+            "f32(packed & 0xffu)",
+            "f32((packed >> 8u) & 0xffu)",
+            "f32((packed >> 16u) & 0xffu)",
+            ") / 255.0;",
+            "srgb_to_linear(straight_srgb)",
+        ] {
+            assert!(
+                tank_paint.contains(required),
+                "missing tank decode contract: {required}"
+            );
+        }
+        assert!(!tank_paint.contains("/ 256.0"));
+
+        let packed = 17 | (101 << 8) | (233 << 16);
+        let packed = packed as u32;
+        let shader_mirror = [
+            (packed & 0xff) as u8,
+            ((packed >> 8) & 0xff) as u8,
+            ((packed >> 16) & 0xff) as u8,
+        ]
+        .map(|channel| scene_srgb_to_linear(f32::from(channel) / 255.0));
+        assert!((shader_mirror[0] - 0.005_605_391_6).abs() < 1.0e-8);
+        assert!((shader_mirror[1] - 0.130_136_48).abs() < 1.0e-7);
+        assert!((shader_mirror[2] - 0.814_846_6).abs() < 2.0e-7);
     }
 
     #[test]
@@ -2641,6 +2712,11 @@ mod tests {
             "return mix(entry.visible_uv.xy, entry.visible_uv.zw, atlas_local);",
             "textureSampleLevel(coverage_texture",
             "textureSampleLevel(color_texture",
+            "fn tank_paint_linear(content: SceneContentGpuValue) -> vec4<f32>",
+            "let packed = u32(content.signed_data.x);",
+            "if (content.kind == 3u)",
+            "return tank_paint_linear(content);",
+            "srgb_to_linear(straight_srgb)",
             "discard;",
             "fn vs_final(",
             "fn fs_final(",

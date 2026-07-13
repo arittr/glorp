@@ -2579,6 +2579,8 @@ mod tests {
             content: Some(TankSemanticContent {
                 sprite_variant: 1,
                 morph: None,
+                color_srgb8: [126, 238, 255],
+                bold: true,
                 glyphs: [None; MAX_TANK_GLYPHS_PER_SLOT],
             }),
         });

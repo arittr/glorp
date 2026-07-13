@@ -884,6 +884,8 @@ pub struct PropSemanticContent {
 pub struct TankSemanticContent {
     pub sprite_variant: u8,
     pub morph: Option<u8>,
+    pub color_srgb8: [u8; 3],
+    pub bold: bool,
     pub glyphs: [Option<AuthoredGlyph>; MAX_TANK_GLYPHS_PER_SLOT],
 }
 
@@ -2919,6 +2921,12 @@ mod tests {
                 sprite_variant: 0,
                 visible_rows: 1,
                 anemone_morph: None,
+                color_srgb8: crate::presentation::tank_life::tank_paint_for(tank.catalog_id)
+                    .expect("catalog fixture paint")
+                    .color_srgb8,
+                bold: crate::presentation::tank_life::tank_paint_for(tank.catalog_id)
+                    .expect("catalog fixture paint")
+                    .bold,
                 cadence_ms: 4_000,
                 calm: false,
                 cells: vec![super::super::TankCellSnapshot {
@@ -2934,6 +2942,29 @@ mod tests {
             .collect();
 
         let normal = build_scene_generation(&base, generation_key(1)).unwrap();
+        let content_debug = format!("{:?}", normal.content());
+        assert!(content_debug.contains("color_srgb8"));
+        assert!(content_debug.contains("bold: true"));
+        let mut changed_paint = normal.content().clone();
+        changed_paint.tank_slots[0]
+            .content
+            .as_mut()
+            .expect("occupied tank content")
+            .color_srgb8[0] ^= 1;
+        assert_ne!(
+            super::checksum::checksum_content(&changed_paint).unwrap(),
+            normal.content_checksum()
+        );
+        let mut changed_weight = normal.content().clone();
+        changed_weight.tank_slots[0]
+            .content
+            .as_mut()
+            .expect("occupied tank content")
+            .bold = false;
+        assert_ne!(
+            super::checksum::checksum_content(&changed_weight).unwrap(),
+            normal.content_checksum()
+        );
         for (asleep, helper, dim) in [
             (false, false, 0.0),
             (false, true, 0.0),

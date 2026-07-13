@@ -253,6 +253,24 @@ fn palette_linear(input: SceneVertexOutput) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(straight_srgb.rgb), straight_srgb.a);
 }
 
+fn tank_paint_linear(content: SceneContentGpuValue) -> vec4<f32> {
+    let packed = u32(content.signed_data.x);
+    let straight_srgb = vec3<f32>(
+        f32(packed & 0xffu),
+        f32((packed >> 8u) & 0xffu),
+        f32((packed >> 16u) & 0xffu),
+    ) / 255.0;
+    return vec4<f32>(srgb_to_linear(straight_srgb), 1.0);
+}
+
+fn glyph_paint_linear(input: SceneVertexOutput) -> vec4<f32> {
+    let content = scene_content_buffer.values[input.content_index];
+    if (content.kind == 3u) {
+        return tank_paint_linear(content);
+    }
+    return palette_linear(input);
+}
+
 fn premultiply_scene_color(
     straight: vec4<f32>,
     coverage: f32,
@@ -324,7 +342,7 @@ fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
             discard;
         }
         output = premultiply_scene_color(
-            palette_linear(input),
+            glyph_paint_linear(input),
             coverage,
             input.opacity,
             input.saturation,

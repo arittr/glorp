@@ -275,6 +275,8 @@ fn classify_tank_changes(
 ) {
     if previous.sprite_variant != newest.sprite_variant
         || previous.anemone_morph != newest.anemone_morph
+        || previous.color_srgb8 != newest.color_srgb8
+        || previous.bold != newest.bold
         || previous.cells.len() != newest.cells.len()
         || previous
             .cells
@@ -855,9 +857,13 @@ pub(crate) fn validate_snapshot(
         .zip(&snapshot.content.tank_animation_states)
         .enumerate()
     {
+        let expected_paint = crate::presentation::tank_life::tank_paint_for(topology.catalog_id);
         if topology.catalog_id != content.catalog_id
             || topology.stable_order != content.stable_order
             || topology.route != content.route
+            || expected_paint.is_none_or(|paint| {
+                paint.color_srgb8 != content.color_srgb8 || paint.bold != content.bold
+            })
             || usize::from(topology.stable_order) != index
             || usize::from(topology.stable_order) >= super::MAX_VISIBLE_TANK_INHABITANTS
             || content.cells.len() > super::scene::MAX_TANK_GLYPHS_PER_SLOT
@@ -2573,6 +2579,8 @@ mod tests {
                     sprite_variant: 0,
                     visible_rows: 1,
                     anemone_morph: None,
+                    color_srgb8: [126, 238, 255],
+                    bold: true,
                     cadence_ms: 400,
                     calm: false,
                     cells: vec![TankCellSnapshot {
@@ -4334,6 +4342,50 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn tank_paint_is_canonical_snapshot_identity() {
+        let base = snapshot();
+        assert_eq!(validate_snapshot(&base), Ok(()));
+
+        for mutate in [
+            |snapshot: &mut CompanionSceneSnapshot| {
+                snapshot.content.tank_animation_states[0].color_srgb8[0] ^= 1;
+            },
+            |snapshot: &mut CompanionSceneSnapshot| {
+                snapshot.content.tank_animation_states[0].bold = false;
+            },
+        ] {
+            let mut invalid = (*base).clone();
+            mutate(&mut invalid);
+            assert_eq!(
+                validate_snapshot(&invalid),
+                Err(SnapshotRejection::InconsistentIdentity)
+            );
+        }
+
+        let mut unknown = (*base).clone();
+        unknown.topology.visible_tank_inhabitants[0].catalog_id = "future-tank-inhabitant";
+        unknown.content.tank_animation_states[0].catalog_id = "future-tank-inhabitant";
+        assert_eq!(
+            validate_snapshot(&unknown),
+            Err(SnapshotRejection::InconsistentIdentity)
+        );
+    }
+
+    #[test]
+    fn tank_paint_change_classifies_as_content_only() {
+        let base = snapshot();
+        let mut changed = (*base).clone();
+        changed.content.tank_animation_states[0].color_srgb8[0] ^= 1;
+        changed.content.tank_animation_states[0].bold = false;
+
+        let changes = classify_snapshot_changes(&base, &changed);
+        assert_eq!(changes.layout(), LayoutChangeMask::NONE);
+        assert_eq!(changes.resources(), ResourceChangeMask::NONE);
+        assert!(changes.semantic().contains(SemanticChangeMask::TANK));
+        assert_eq!(changes.frame(), FrameChangeMask::NONE);
     }
 
     #[test]

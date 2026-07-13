@@ -685,6 +685,10 @@ fn encode_prop_content(hash: &mut Fnv1a64, value: PropSemanticContent) {
 fn encode_tank_content(hash: &mut Fnv1a64, value: TankSemanticContent) {
     hash.u8(value.sprite_variant);
     encode_option_u8(hash, value.morph);
+    for channel in value.color_srgb8 {
+        hash.u8(channel);
+    }
+    hash.u8(u8::from(value.bold));
     for glyph in value.glyphs {
         match glyph {
             Some(value) => {

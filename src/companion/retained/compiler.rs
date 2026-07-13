@@ -1148,23 +1148,31 @@ fn pack_tank_content(
     outer: crate::presentation::companion_scene::scene::TankContentSlot,
     subslot: usize,
 ) -> ContentGpuValue {
-    let (glyph_scalar, flags, variant) = match outer.content {
+    let (glyph_scalar, signed_data, flags, variant) = match outer.content {
         Some(value) => (
             option_glyph(value.glyphs[subslot].map(|glyph| glyph.as_char())),
+            pack_tank_paint(value.color_srgb8, value.bold),
             value.morph.map_or(NONE_U32, u32::from),
             u32::from(value.sprite_variant),
         ),
-        None => (NONE_U32, NONE_U32, NONE_U32),
+        None => (NONE_U32, [0; 2], NONE_U32, NONE_U32),
     };
     ContentGpuValue {
         kind: 3,
         glyph_scalar,
         slot: u32::from(outer.slot),
         subslot: u32::try_from(subslot).expect("fixed tank subslot fits u32"),
-        signed_data: [0; 2],
+        signed_data,
         flags,
         variant,
     }
+}
+
+const fn pack_tank_paint(color_srgb8: [u8; 3], bold: bool) -> [i32; 2] {
+    [
+        color_srgb8[0] as i32 | ((color_srgb8[1] as i32) << 8) | ((color_srgb8[2] as i32) << 16),
+        bold as i32,
+    ]
 }
 
 fn pack_ambient_content(
@@ -1804,20 +1812,21 @@ fn compile_content_mirrors(content: &SceneContent) -> Result<ContentMirrors, Com
             let slot = flat / MAX_TANK_GLYPHS_PER_SLOT;
             let subslot = flat % MAX_TANK_GLYPHS_PER_SLOT;
             let outer = content.tank_slots[slot];
-            let (glyph_scalar, flags, variant) = match outer.content {
+            let (glyph_scalar, signed_data, flags, variant) = match outer.content {
                 Some(value) => (
                     option_glyph(value.glyphs[subslot].map(|glyph| glyph.as_char())),
+                    pack_tank_paint(value.color_srgb8, value.bold),
                     value.morph.map_or(NONE_U32, u32::from),
                     u32::from(value.sprite_variant),
                 ),
-                None => (NONE_U32, NONE_U32, NONE_U32),
+                None => (NONE_U32, [0; 2], NONE_U32, NONE_U32),
             };
             ContentGpuValue {
                 kind: 3,
                 glyph_scalar,
                 slot: u32::from(outer.slot),
                 subslot: u32::try_from(subslot).expect("fixed tank subslot fits u32"),
-                signed_data: [0; 2],
+                signed_data,
                 flags,
                 variant,
             }
@@ -2814,6 +2823,8 @@ mod tests {
             crate::presentation::companion_scene::scene::TankSemanticContent {
                 sprite_variant: 9,
                 morph: Some(6),
+                color_srgb8: [126, 238, 255],
+                bold: true,
                 glyphs: std::array::from_fn(|index| {
                     (index == 7).then(|| AuthoredGlyph::new('◈').unwrap())
                 }),
@@ -2827,6 +2838,7 @@ mod tests {
         assert_eq!(prop.variant, 7);
         let tank = compiled.content.tank_glyphs.as_slice()[8 + 7];
         assert_eq!(tank.glyph_scalar, u32::from('◈'));
+        assert_eq!(tank.signed_data, [126 | (238 << 8) | (255 << 16), 1]);
         assert_eq!(tank.flags, 6);
         assert_eq!(tank.variant, 9);
         assert_eq!(
@@ -2834,6 +2846,126 @@ mod tests {
             NONE_U32
         );
         assert_eq!(compiled.content.tank_glyphs.as_slice()[0].variant, NONE_U32);
+        assert_eq!(
+            compiled.content.tank_glyphs.as_slice()[0].signed_data,
+            [0; 2]
+        );
+    }
+
+    #[test]
+    fn every_catalog_tank_paint_survives_all_authored_sprite_records_and_layers() {
+        const NO_MORPH: [Option<u8>; 1] = [None];
+        const ANEMONE_MORPHS: [Option<u8>; 4] = [Some(0), Some(1), Some(2), Some(3)];
+
+        for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
+            let paint = crate::presentation::tank_life::tank_paint_for(spec.id)
+                .expect("canonical tank paint");
+            let morphs = if spec.id == crate::game::habitat::ANEMONE_HOST {
+                ANEMONE_MORPHS.as_slice()
+            } else {
+                NO_MORPH.as_slice()
+            };
+            for variant in [0, 1] {
+                for &morph in morphs {
+                    let sprite =
+                        crate::presentation::tank_life::tank_sprite_cells(spec.id, variant, morph);
+                    assert!(
+                        !sprite.is_empty(),
+                        "{} variant {variant} morph {morph:?}",
+                        spec.id
+                    );
+                    assert!(sprite.len() <= MAX_TANK_GLYPHS_PER_SLOT);
+
+                    for layer in [InstanceLayer::Behind, InstanceLayer::Foreground] {
+                        let mut fixture = SceneFixture::valid();
+                        fixture.content.tank_slots[0].content = Some(
+                            crate::presentation::companion_scene::scene::TankSemanticContent {
+                                sprite_variant: variant,
+                                morph,
+                                color_srgb8: paint.color_srgb8,
+                                bold: paint.bold,
+                                glyphs: std::array::from_fn(|subslot| {
+                                    sprite.get(subslot).map(|cell| {
+                                        AuthoredGlyph::new(cell.glyph).expect("authored tank glyph")
+                                    })
+                                }),
+                            },
+                        );
+                        fixture.frame.tank_slots[0] =
+                            crate::presentation::companion_scene::scene::TankFrameSlot {
+                                slot: 0,
+                                visible: true,
+                                origin_points: [0.0; 2],
+                                cells: std::array::from_fn(|subslot| {
+                                    if subslot < sprite.len() {
+                                        crate::presentation::companion_scene::scene::TankCellFrame {
+                                            visible: true,
+                                            position_points: [subslot as f32, 0.0],
+                                            layer,
+                                            bounds_points: [subslot as f32, 0.0, 1.0, 1.0],
+                                        }
+                                    } else {
+                                        crate::presentation::companion_scene::scene::TankCellFrame {
+                                            visible: false,
+                                            position_points: [0.0; 2],
+                                            layer: InstanceLayer::Behind,
+                                            bounds_points: [0.0; 4],
+                                        }
+                                    }
+                                }),
+                            };
+
+                        let compiled = compile_fixture(&fixture);
+                        let [red, green, blue] = paint.color_srgb8.map(i32::from);
+                        let expected_paint =
+                            [red | (green << 8) | (blue << 16), i32::from(paint.bold)];
+                        for (subslot, source) in sprite.iter().enumerate() {
+                            let content = compiled.content.tank_glyphs.as_slice()[subslot];
+                            assert_eq!(content.glyph_scalar, u32::from(source.glyph));
+                            assert_eq!(content.signed_data, expected_paint);
+                            assert_eq!(content.flags, morph.map_or(NONE_U32, u32::from));
+                            assert_eq!(content.variant, u32::from(variant));
+
+                            let frame = compiled.frame.tank_cells.as_slice()[subslot];
+                            assert_eq!(frame.flags, 3);
+                            assert_eq!(
+                                frame.variant,
+                                instance_layer_tag(layer) | ((subslot as u32) << 16)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tank_paint_delta_matches_fresh_compilation() {
+        let mut changed = SceneFixture::valid();
+        changed.content.tank_slots[1].content = Some(
+            crate::presentation::companion_scene::scene::TankSemanticContent {
+                sprite_variant: 1,
+                morph: Some(2),
+                color_srgb8: [232, 176, 208],
+                bold: true,
+                glyphs: [Some(AuthoredGlyph::new('◈').unwrap()); MAX_TANK_GLYPHS_PER_SLOT],
+            },
+        );
+        let fresh = compile_fixture(&changed);
+
+        let mut incremental = compile_fixture(&SceneFixture::valid());
+        let (mut content, frame) = paired_deltas(
+            &incremental,
+            crate::presentation::companion_scene::AppliedRevisions::new(5, 6),
+        );
+        content.tank_slots.push(changed.content.tank_slots[1]);
+        incremental.apply_deltas(&content, &frame).unwrap();
+
+        assert_eq!(
+            incremental.logical_content.tank_slots,
+            fresh.logical_content.tank_slots
+        );
+        assert_eq!(incremental.content.tank_glyphs, fresh.content.tank_glyphs);
     }
 
     #[test]
@@ -3263,6 +3395,8 @@ mod tests {
                     crate::presentation::companion_scene::scene::TankSemanticContent {
                         sprite_variant: 3,
                         morph: Some(1),
+                        color_srgb8: [126, 238, 255],
+                        bold: true,
                         glyphs: [Some(AuthoredGlyph::new('◈').unwrap()); MAX_TANK_GLYPHS_PER_SLOT],
                     },
                 ),
