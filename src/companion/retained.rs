@@ -20,6 +20,7 @@ use super::app::{CompanionGridMetrics, PreparedGaugeFrame};
 
 mod buffers;
 mod capture;
+mod compiler;
 mod host;
 mod metrics;
 mod parity;

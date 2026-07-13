@@ -2,6 +2,181 @@
 
 use super::{GpuPrimitive, RetainedResourceCounters};
 
+/// A byte range within one logical persistent mirror buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ByteSpan {
+    pub(super) offset: usize,
+    pub(super) len: usize,
+}
+
+#[allow(dead_code)] // The retained delta uploader consumes byte spans in the next checkpoint.
+impl ByteSpan {
+    pub(super) const fn slots<T>(first: usize, count: usize) -> Self {
+        Self {
+            offset: first * std::mem::size_of::<T>(),
+            len: count * std::mem::size_of::<T>(),
+        }
+    }
+
+    const fn end(self) -> usize {
+        self.offset + self.len
+    }
+}
+
+/// Fixed dirty-range scratch for one logical GPU buffer.
+///
+/// More than 64 fragmented writes remain valid: the set conservatively bridges
+/// an unchanged gap instead of growing or rejecting a same-generation delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DirtySpanSet {
+    spans: [ByteSpan; Self::CAPACITY],
+    len: usize,
+}
+
+impl Default for DirtySpanSet {
+    fn default() -> Self {
+        Self {
+            spans: [ByteSpan::default(); Self::CAPACITY],
+            len: 0,
+        }
+    }
+}
+
+#[allow(dead_code)] // The retained delta uploader consumes dirty spans in the next checkpoint.
+impl DirtySpanSet {
+    pub(super) const CAPACITY: usize = 64;
+
+    #[allow(dead_code)] // Read by the retained delta uploader in the next checkpoint.
+    pub(super) fn as_slice(&self) -> &[ByteSpan] {
+        &self.spans[..self.len]
+    }
+
+    pub(super) fn insert(&mut self, span: ByteSpan) {
+        if span.len == 0 {
+            return;
+        }
+
+        let mut start = span.offset;
+        let mut end = span.end();
+        let mut first = 0;
+        while first < self.len && self.spans[first].end() < start {
+            first += 1;
+        }
+        let mut after = first;
+        while after < self.len && self.spans[after].offset <= end {
+            start = start.min(self.spans[after].offset);
+            end = end.max(self.spans[after].end());
+            after += 1;
+        }
+
+        if first < after {
+            self.spans[first] = ByteSpan { offset: start, len: end - start };
+            self.spans.copy_within(after..self.len, first + 1);
+            self.len -= after - first - 1;
+            return;
+        }
+
+        if self.len < Self::CAPACITY {
+            self.spans.copy_within(first..self.len, first + 1);
+            self.spans[first] = span;
+            self.len += 1;
+            return;
+        }
+
+        // The valid write would create a 65th fragment. Bridge it to the
+        // nearest existing range, then absorb any ranges the bridge touches.
+        let previous_gap = first
+            .checked_sub(1)
+            .map(|index| start.saturating_sub(self.spans[index].end()));
+        let next_gap = (first < self.len).then(|| self.spans[first].offset.saturating_sub(end));
+        let bridge = match (previous_gap, next_gap) {
+            (Some(previous), Some(next)) if previous <= next => first - 1,
+            (Some(_), Some(_)) => first,
+            (Some(_), None) => first - 1,
+            (None, Some(_)) => first,
+            (None, None) => unreachable!("full span set has a neighbor"),
+        };
+        let bridged = ByteSpan {
+            offset: start.min(self.spans[bridge].offset),
+            len: end.max(self.spans[bridge].end()) - start.min(self.spans[bridge].offset),
+        };
+        self.spans[bridge] = bridged;
+        self.coalesce_around(bridge);
+    }
+
+    fn coalesce_around(&mut self, mut index: usize) {
+        if index > 0 && self.spans[index - 1].end() >= self.spans[index].offset {
+            let start = self.spans[index - 1].offset;
+            let end = self.spans[index - 1].end().max(self.spans[index].end());
+            self.spans[index - 1] = ByteSpan { offset: start, len: end - start };
+            self.spans.copy_within(index + 1..self.len, index);
+            self.len -= 1;
+            index -= 1;
+        }
+        while index + 1 < self.len && self.spans[index].end() >= self.spans[index + 1].offset {
+            let end = self.spans[index].end().max(self.spans[index + 1].end());
+            self.spans[index].len = end - self.spans[index].offset;
+            self.spans.copy_within(index + 2..self.len, index + 1);
+            self.len -= 1;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // The retained delta uploader reports mirror overflow in the next checkpoint.
+pub(super) enum MirrorError {
+    CapacityExceeded,
+}
+
+/// Fixed-capacity POD storage for one logical persistent GPU buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FixedPodMirror<T, const N: usize> {
+    values: [T; N],
+}
+
+impl<T: bytemuck::Pod + bytemuck::Zeroable + Copy, const N: usize> FixedPodMirror<T, N> {
+    pub(super) fn zeroed() -> Self {
+        Self { values: [T::zeroed(); N] }
+    }
+
+    pub(super) const fn from_array(values: [T; N]) -> Self {
+        Self { values }
+    }
+
+    #[allow(dead_code)] // Capacity assertions precede retained-host integration.
+    pub(super) const fn capacity(&self) -> usize {
+        N
+    }
+
+    #[allow(dead_code)] // Read by the retained delta uploader in the next checkpoint.
+    pub(super) fn as_slice(&self) -> &[T] {
+        &self.values
+    }
+
+    pub(super) fn set_fixed(&mut self, slot: usize, value: T) {
+        debug_assert!(slot < N);
+        self.values[slot] = value;
+    }
+
+    #[allow(dead_code)] // The retained delta uploader applies slot changes in the next checkpoint.
+    pub(super) fn apply_updates(
+        &mut self,
+        updates: &[(usize, T)],
+    ) -> Result<DirtySpanSet, MirrorError> {
+        if updates.iter().any(|(slot, _)| *slot >= N) {
+            return Err(MirrorError::CapacityExceeded);
+        }
+        let mut spans = DirtySpanSet::default();
+        for (slot, _) in updates {
+            spans.insert(ByteSpan::slots::<T>(*slot, 1));
+        }
+        for (slot, value) in updates {
+            self.values[*slot] = *value;
+        }
+        Ok(spans)
+    }
+}
+
 /// Instance buffers held in a small ring so a frame writes into a slot the GPU is
 /// unlikely to still be reading from the previous present, avoiding a
 /// write-vs-read stall without CPU-side fences.
@@ -135,4 +310,61 @@ pub(super) struct PersistentCaptureResources {
     pub(super) intermediate: wgpu::Texture,
     pub(super) intermediate_view: wgpu::TextureView,
     pub(super) staging: wgpu::Buffer,
+}
+
+#[cfg(test)]
+mod fixed_mirror_tests {
+    use super::*;
+    use bytemuck::{Pod, Zeroable};
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
+    struct Word(u32);
+
+    #[test]
+    fn adjacent_overlap_and_zero_dirty_spans_coalesce() {
+        let mut mirror = FixedPodMirror::<Word, 8>::zeroed();
+        assert!(mirror.apply_updates(&[]).unwrap().as_slice().is_empty());
+        let spans = mirror
+            .apply_updates(&[(2, Word(10)), (3, Word(11)), (3, Word(12)), (6, Word(13))])
+            .unwrap();
+        assert_eq!(
+            spans.as_slice(),
+            &[ByteSpan::slots::<Word>(2, 2), ByteSpan::slots::<Word>(6, 1)]
+        );
+    }
+
+    #[test]
+    fn out_of_range_update_leaves_fixed_mirror_unchanged() {
+        let mut mirror = FixedPodMirror::<Word, 2>::zeroed();
+        let before = mirror.clone();
+        assert_eq!(
+            mirror.apply_updates(&[(2, Word(1))]),
+            Err(MirrorError::CapacityExceeded)
+        );
+        assert_eq!(mirror, before);
+        assert_eq!(mirror.capacity(), 2);
+    }
+
+    #[test]
+    fn fragmented_writes_bridge_gaps_without_growing_span_storage() {
+        let mut mirror = FixedPodMirror::<Word, 130>::zeroed();
+        let updates = (0..65)
+            .map(|index| (index * 2, Word(index as u32)))
+            .collect::<Vec<_>>();
+        let spans = mirror.apply_updates(&updates).unwrap();
+        assert_eq!(spans.as_slice().len(), DirtySpanSet::CAPACITY);
+        assert!(spans
+            .as_slice()
+            .windows(2)
+            .all(|pair| pair[0].end() < pair[1].offset));
+        for (slot, value) in &updates {
+            assert_eq!(mirror.as_slice()[*slot], *value);
+            let changed = ByteSpan::slots::<Word>(*slot, 1);
+            assert!(spans
+                .as_slice()
+                .iter()
+                .any(|span| { span.offset <= changed.offset && span.end() >= changed.end() }));
+        }
+    }
 }

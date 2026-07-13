@@ -748,6 +748,11 @@ fn build_scene_generation_sealed(
 }
 
 impl SceneGenerationData {
+    #[allow(dead_code)] // Retained CPU candidates keep this bounded validation proof.
+    pub(crate) fn accepted_state(&self) -> &super::super::validate::AcceptedSceneState {
+        &self.accepted
+    }
+
     pub const fn generation_key(&self) -> crate::presentation::companion_scene::SceneGenerationKey {
         self.generation_key
     }
