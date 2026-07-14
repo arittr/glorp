@@ -7944,6 +7944,30 @@ mod tests {
     }
 
     #[test]
+    fn room_shader_exposes_a_visible_biome_tinted_tank_bed() {
+        let room = SCENE_SHADER_SOURCE
+            .split("fn fs_room_aperture(")
+            .nth(1)
+            .expect("room analytic role exists")
+            .split("fn fs_floor_projection(")
+            .next()
+            .expect("room role has a bounded body");
+
+        for required in [
+            "let horizon_y = center.y - radius * 0.52;",
+            "let bed_fade = smoothstep(",
+            "let bed_mix = 1.0 - bed_fade;",
+            "let bed = mix(rim, vec3<f32>(1.0), 0.12);",
+            "mix(room, bed, bed_mix * 0.65)",
+        ] {
+            assert!(
+                room.contains(required),
+                "missing tank-bed contract: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn analytic_fragment_discards_zero_alpha_output_before_returning() {
         let analytic = SCENE_SHADER_SOURCE
             .split("fn fs_analytic(")

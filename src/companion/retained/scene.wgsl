@@ -749,7 +749,17 @@ fn fs_room_aperture(
     let radial = smoothstep(0.0, radius, distance);
     let core = packed_rgb8_linear(content.payload[0].x);
     let rim = packed_rgb8_linear(content.payload[0].y);
-    let straight = vec4<f32>(mix(core, rim, radial), 1.0);
+    let room = mix(core, rim, radial);
+    let horizon_y = center.y - radius * 0.52;
+    let bed_feather = max(radius * 0.16, 1.0);
+    let bed_fade = smoothstep(
+        horizon_y,
+        horizon_y + bed_feather,
+        input.point_position.y,
+    );
+    let bed_mix = 1.0 - bed_fade;
+    let bed = mix(rim, vec3<f32>(1.0), 0.12);
+    let straight = vec4<f32>(mix(room, bed, bed_mix * 0.65), 1.0);
     return analytic_premultiply(straight, 1.0, input.opacity, input.saturation);
 }
 

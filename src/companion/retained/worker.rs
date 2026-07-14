@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::autoreleasepool;
+use objc2::ClassType;
 use objc2_foundation::NSThread;
 
 use super::compiler::{compile_cpu_generation, CpuSceneCandidate};
@@ -19,6 +20,8 @@ use crate::presentation::companion_scene::runtime::{
     AcceptedGenerationCandidate, GenerationRequest, RequestIdentity,
 };
 use crate::round::smooth::CompanionContentIdentity;
+
+const SCENE_BUILD_WORKER_STACK_SIZE: usize = 4 * 1024 * 1024;
 
 pub(super) struct RasterJob {
     pub(super) job_id: u64,
@@ -178,6 +181,7 @@ impl fmt::Debug for RasterSubmitError {
 pub(super) struct RasterWorkerThreadIdentity {
     pub(super) is_main_thread: bool,
     pub(super) cocoa_multithreaded: bool,
+    pub(super) stack_size: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,10 +288,18 @@ impl SceneBuildWorker {
             let _ = done.try_send(exit);
             exited.store(true, Ordering::Release);
         });
-        // SAFETY: Foundation copies the heap block for the lifetime of the
-        // detached NSThread. Its captures are Send plain-Rust channel/atomic
-        // values, and the block catches Rust panics before returning through FFI.
-        unsafe { NSThread::detachNewThreadWithBlock(&block) };
+        // SAFETY: The initialized NSThread copies the heap block for its
+        // lifetime. Its captures are Send plain-Rust channel/atomic values, and
+        // the block catches Rust panics before returning through FFI. Configure
+        // the stack before start so fixed-capacity scene compiler scratch cannot
+        // exhaust Foundation's much smaller detached-thread default.
+        let thread = unsafe {
+            let thread = NSThread::initWithBlock(NSThread::alloc(), &block);
+            thread.setStackSize(SCENE_BUILD_WORKER_STACK_SIZE);
+            thread.start();
+            thread
+        };
+        drop(thread);
 
         let identity = match started_rx.recv_timeout(Duration::from_secs(2)) {
             Ok(identity) => identity,
@@ -489,6 +501,7 @@ fn run_worker(state: WorkerThreadState) -> WorkerExit {
     let identity = RasterWorkerThreadIdentity {
         is_main_thread: NSThread::currentThread().isMainThread(),
         cocoa_multithreaded: NSThread::isMultiThreaded(),
+        stack_size: unsafe { NSThread::currentThread().stackSize() },
     };
     if state.started.try_send(identity).is_err() {
         return WorkerExit::Shutdown;
@@ -995,6 +1008,7 @@ mod tests {
         let identity = worker.thread_identity();
         assert!(!identity.is_main_thread);
         assert!(identity.cocoa_multithreaded);
+        assert_eq!(identity.stack_size, 4 * 1024 * 1024);
         assert!(objc2_foundation::NSThread::isMultiThreaded());
     }
 

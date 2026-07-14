@@ -226,9 +226,10 @@ pub(super) const ATLAS_PACKING_VERSION: u32 = 1;
 /// arc/round-cap edge discards with analytic `fwidth`/smoothstep coverage. Version
 /// 3 switches the fragment output to gamma-space (sRGB) premultiplied color for a
 /// linear-format render target and native-color atlas, so translucency composites
-/// in gamma to match Smooth. A shader change bumps this so entries from an older
-/// shader can be invalidated.
-pub(super) const SHADER_RESOURCE_VERSION: u32 = 3;
+/// in gamma to match Smooth. Version 4 adds the biome-tinted tank bed to the room
+/// analytic. A shader change bumps this so entries from an older shader can be
+/// invalidated.
+pub(super) const SHADER_RESOURCE_VERSION: u32 = 4;
 
 /// Antialiasing the atlas rasterizes under. The retained atlas draws through the
 /// default AppKit grayscale smoothing path, matching Smooth's on-screen text.
@@ -1602,6 +1603,11 @@ mod metric_tests {
 #[cfg(test)]
 mod glyph_tests {
     use super::*;
+
+    #[test]
+    fn shader_resource_version_tracks_tank_bed_shader_change() {
+        assert_eq!(SHADER_RESOURCE_VERSION, 4);
+    }
 
     #[test]
     fn font_resolver_retries_nil_once_then_succeeds_in_exact_order() {

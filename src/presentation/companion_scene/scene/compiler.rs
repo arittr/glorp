@@ -718,16 +718,32 @@ fn project_prop_frame_delta(
                 source.origin_points[0],
                 snapshot.topology.layout.height_points - source.origin_points[1],
             ],
-            motion_offset_points: if source
-                .motion_phase
-                .is_some_and(|phase| !phase.is_multiple_of(2))
-            {
-                [0.0, 1.0]
-            } else {
-                [0.0; 2]
-            },
+            motion_offset_points: prop_motion_offset_points(snapshot, source),
             opacity: if snapshot.frame.asleep { 0.72 } else { 1.0 },
         });
+    }
+}
+
+fn prop_motion_offset_points(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    source: &crate::presentation::companion_scene::PropAnimationSnapshot,
+) -> [f32; 2] {
+    let cell = snapshot.topology.glyph_grid.cell_extent_points;
+    let shifted = source
+        .motion_phase
+        .is_some_and(|phase| !phase.is_multiple_of(2));
+    let initial_phase = source
+        .motion_phase
+        .is_some_and(|phase| phase.is_multiple_of(2));
+    match source.catalog_id {
+        crate::game::habitat::TOKEN_PEBBLE_25K | crate::game::habitat::TOKEN_SHELL_100K
+            if shifted =>
+        {
+            [0.0, cell[1]]
+        }
+        crate::game::habitat::TOKEN_ORBIT_5M if shifted => [cell[0], 0.0],
+        crate::game::habitat::TOKEN_LANTERN_10M if initial_phase => [0.0, cell[1]],
+        _ => [0.0; 2],
     }
 }
 
@@ -2534,16 +2550,11 @@ fn build_frame(
             semantic.origin_points[0],
             layout.height_points - semantic.origin_points[1],
         ];
-        let motion = match semantic.motion_phase {
-            Some(phase) if !phase.is_multiple_of(2) => [0.0, 1.0],
-            Some(_) => [0.0, 0.0],
-            None => [0.0, 0.0],
-        };
         frame.prop_slots[slot] = PropFrameSlot {
             slot: semantic.stable_order,
             visible: true,
             origin_points: origin,
-            motion_offset_points: motion,
+            motion_offset_points: prop_motion_offset_points(snapshot, semantic),
             opacity: if snapshot.frame.asleep { 0.72 } else { 1.0 },
         };
     }

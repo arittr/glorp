@@ -75,6 +75,35 @@ use objc2_foundation::{
 // helper over the whole current day's transcripts.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const UI_TICK_INTERVAL_SECS: f64 = 0.25;
+const ANIMATED_SCENE_TICK_INTERVAL_SECS: f64 = 1.0 / 15.0;
+const FAST_ANIMATION_TICK_INTERVAL_SECS: f64 = 1.0 / 30.0;
+
+#[cfg(feature = "retained-renderer")]
+fn companion_tick_interval(
+    renderer: EffectiveCompanionRenderer,
+    scene_runtime_rollout: SceneRuntimeRollout,
+) -> f64 {
+    if renderer.is_pixel()
+        || (renderer.is_retained() && scene_runtime_rollout == SceneRuntimeRollout::Live)
+    {
+        FAST_ANIMATION_TICK_INTERVAL_SECS
+    } else if renderer.uses_smooth_scene() {
+        ANIMATED_SCENE_TICK_INTERVAL_SECS
+    } else {
+        UI_TICK_INTERVAL_SECS
+    }
+}
+
+#[cfg(not(feature = "retained-renderer"))]
+fn companion_tick_interval(renderer: EffectiveCompanionRenderer) -> f64 {
+    if renderer.is_pixel() {
+        FAST_ANIMATION_TICK_INTERVAL_SECS
+    } else if renderer.uses_smooth_scene() {
+        ANIMATED_SCENE_TICK_INTERVAL_SECS
+    } else {
+        UI_TICK_INTERVAL_SECS
+    }
+}
 const DEFAULT_WINDOW_SIZE: f64 = 360.0;
 const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
@@ -1081,18 +1110,16 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
         )
     };
 
-    // The smooth scene is CPU-drawn: every tick invalidates the whole porthole
-    // for a full CG redraw and CoreAnimation recomposite. Its motion is slow
-    // multi-second drift and bob, which reads identically at fifteen frames, so
-    // thirty just doubles the energy bill. Computed before the runtime state moves
-    // into AppState below.
-    let tick_interval = if renderer_runtime.effective().is_pixel() {
-        1.0 / 30.0
-    } else if renderer_runtime.effective().uses_smooth_scene() {
-        1.0 / 15.0
-    } else {
-        UI_TICK_INTERVAL_SECS
-    };
+    // Smooth is CPU-drawn and stays at fifteen frames. Direct retained Live
+    // updates only bounded scene deltas on the GPU, so it can present the same
+    // fractional drift and bob at thirty frames without speeding up the separate
+    // four-hertz semantic-art clock. Computed before the runtime state moves into
+    // AppState below.
+    #[cfg(feature = "retained-renderer")]
+    let tick_interval =
+        companion_tick_interval(renderer_runtime.effective(), scene_runtime_rollout);
+    #[cfg(not(feature = "retained-renderer"))]
+    let tick_interval = companion_tick_interval(renderer_runtime.effective());
 
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
@@ -3747,6 +3774,32 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn retained_live_scene_presents_at_thirty_hertz() {
+        assert_eq!(
+            companion_tick_interval(
+                EffectiveCompanionRenderer::Retained,
+                SceneRuntimeRollout::Live,
+            ),
+            1.0 / 30.0,
+        );
+        assert_eq!(
+            companion_tick_interval(
+                EffectiveCompanionRenderer::Retained,
+                SceneRuntimeRollout::Shadow,
+            ),
+            1.0 / 15.0,
+        );
+        assert_eq!(
+            companion_tick_interval(
+                EffectiveCompanionRenderer::Smooth,
+                SceneRuntimeRollout::Live,
+            ),
+            1.0 / 15.0,
+        );
+    }
 
     #[cfg(feature = "retained-renderer")]
     #[test]

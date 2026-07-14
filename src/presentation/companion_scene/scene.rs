@@ -2638,7 +2638,6 @@ mod tests {
         .unwrap();
         let mut moved = (*initial).clone();
         moved.content.prop_animation_states[0].origin_points[0] += 5.0;
-        moved.content.prop_animation_states[0].motion_phase = Some(1);
         let moved = std::sync::Arc::new(moved);
         let changes = super::super::runtime::classify_snapshot_changes(&initial, &moved);
         built
@@ -2653,8 +2652,49 @@ mod tests {
         let resolved = resolve_attachment_world(&built.template, &built.frame, attachment).unwrap();
         assert_point_close(
             resolved.transform_point3([0.0; 3]),
-            [185.0, 82.25, -1.6, 1.0],
+            [185.0, 81.25, -1.6, 1.0],
         );
+    }
+
+    #[test]
+    fn retained_prop_motion_uses_authored_cell_scale_and_direction() {
+        let offset_for = |catalog_id, motion_phase| {
+            let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+            snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
+                catalog_id,
+                stable_order: 0,
+                zone: super::super::PropZoneSnapshot::FloorMid,
+                authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            }];
+            snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+                catalog_id,
+                stable_order: 0,
+                kind: super::super::PropAnimationKindSnapshot::Animated,
+                sprite_phase: None,
+                twinkle_active: None,
+                motion_phase: Some(motion_phase),
+                chest_lid_open: None,
+                bloom_active: None,
+                origin_points: [180.0, 280.0],
+            }];
+            let cell_extent = snapshot.topology.glyph_grid.cell_extent_points;
+            let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
+            (built.frame.prop_slots[0].motion_offset_points, cell_extent)
+        };
+
+        let (pebble_rest, cell) = offset_for(crate::game::habitat::TOKEN_PEBBLE_25K, 0);
+        let (pebble_lift, _) = offset_for(crate::game::habitat::TOKEN_PEBBLE_25K, 1);
+        let (orbit_rest, _) = offset_for(crate::game::habitat::TOKEN_ORBIT_5M, 0);
+        let (orbit_shift, _) = offset_for(crate::game::habitat::TOKEN_ORBIT_5M, 1);
+        let (lantern_lift, _) = offset_for(crate::game::habitat::TOKEN_LANTERN_10M, 0);
+        let (lantern_rest, _) = offset_for(crate::game::habitat::TOKEN_LANTERN_10M, 1);
+
+        assert_eq!(pebble_rest, [0.0, 0.0]);
+        assert_eq!(pebble_lift, [0.0, cell[1]]);
+        assert_eq!(orbit_rest, [0.0, 0.0]);
+        assert_eq!(orbit_shift, [cell[0], 0.0]);
+        assert_eq!(lantern_lift, [0.0, cell[1]]);
+        assert_eq!(lantern_rest, [0.0, 0.0]);
     }
 
     #[test]
