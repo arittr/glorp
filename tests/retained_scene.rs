@@ -127,6 +127,28 @@ fn live_surface_delta_route_uses_transactional_retained_delta_machinery() {
 }
 
 #[test]
+fn active_present_skips_a_stale_generation_during_surface_resize() {
+    let present = source_between(
+        HOST_SOURCE,
+        "\n    fn present_active_scene(",
+        "\n    #[allow(dead_code)] // Reached through the dormant Task 12 entrypoint above.",
+    );
+    let resize = present
+        .find("self.resize_if_needed(view)?;")
+        .expect("active present resizes the surface first");
+    let extent_guard = present
+        .find("generations.active_surface_extent_matches(")
+        .expect("active present guards a resized surface from the stale generation");
+    let acquire = present
+        .find("self.surface.get_current_texture()")
+        .expect("active present acquires a surface texture");
+
+    assert!(resize < extent_guard);
+    assert!(extent_guard < acquire);
+    assert!(present[extent_guard..acquire].contains("return Ok(ScenePresentOutcome::Skipped);"));
+}
+
+#[test]
 fn shadow_metrics_bind_the_pending_cpu_scene_version() {
     let metrics = source_between(
         HOST_SOURCE,

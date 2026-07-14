@@ -265,6 +265,19 @@ fn should_defer_scene_reveal(
     matches!((external, logical), (Some(external), Some(logical)) if external != logical)
 }
 
+fn logical_viewport_matches_surface(
+    logical_viewport_points: [f32; 2],
+    physical_extent: [u32; 2],
+    backing_scale: f64,
+) -> bool {
+    logical_viewport_points
+        .into_iter()
+        .enumerate()
+        .all(|(axis, logical)| {
+            host::physical_dimension(f64::from(logical), backing_scale) == physical_extent[axis]
+        })
+}
+
 #[derive(Debug)]
 #[allow(dead_code)] // Surfaced by the dormant Task 12 host scene service until Task 14 routing.
 enum SceneCandidatePreparationError {
@@ -577,6 +590,16 @@ impl RetainedSceneGenerationState {
 
     fn active_delta_pending(&self) -> bool {
         should_defer_scene_reveal(self.active_version(), self.runtime.active_version())
+    }
+
+    fn active_surface_extent_matches(&self, physical_extent: [u32; 2], backing_scale: f64) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            logical_viewport_matches_surface(
+                active.gpu.logical_viewport_points,
+                physical_extent,
+                backing_scale,
+            )
+        })
     }
 
     fn metrics_version(&self) -> Option<crate::presentation::companion_scene::SceneVersion> {
@@ -2198,12 +2221,12 @@ mod tests {
     use super::{
         cached_current_failure, create_atlas_bind_group_layout, create_pipelines,
         current_process_rss_bytes, glyph_advance, glyph_ink_rect, glyph_run_height,
-        glyph_run_width, persistent_instance_capacity, physical_dimension, push_analytic_arc,
-        resource_failure_tick, run_lifetime_schedule, should_defer_scene_reveal,
-        terminal_worker_decision, upload_glyph_atlas, CompiledGlyphAtlas,
-        CompiledRetainedResources, FailedGlyphPreparation, GlyphAtlasEntry, GlyphKey,
-        GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard, LayerActivationState,
-        LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
+        glyph_run_width, logical_viewport_matches_surface, persistent_instance_capacity,
+        physical_dimension, push_analytic_arc, resource_failure_tick, run_lifetime_schedule,
+        should_defer_scene_reveal, terminal_worker_decision, upload_glyph_atlas,
+        CompiledGlyphAtlas, CompiledRetainedResources, FailedGlyphPreparation, GlyphAtlasEntry,
+        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
+        LayerActivationState, LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
         PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationController,
         ResourcePreparationKey, ResourcePreparationTick, RetainedFailureCategory,
         RetainedResourceCounters, RetainedSceneGenerationState, SmoothBlendMode,
@@ -2222,6 +2245,20 @@ mod tests {
 
     fn preparation_key(species: Species, scale: f64) -> ResourcePreparationKey {
         ResourcePreparationKey::new(CompanionContentIdentity::for_pet(species), scale)
+    }
+
+    #[test]
+    fn active_logical_viewport_matches_only_its_physical_surface_extent() {
+        assert!(logical_viewport_matches_surface(
+            [360.0, 360.0],
+            [720, 720],
+            2.0,
+        ));
+        assert!(!logical_viewport_matches_surface(
+            [360.0, 360.0],
+            [6_016, 3_800],
+            2.0,
+        ));
     }
 
     #[test]

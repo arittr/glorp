@@ -835,6 +835,12 @@ impl RetainedHost {
         if let Some(category) = self.gpu_errors.drain() {
             return Err(category);
         }
+        if !generations.active_surface_extent_matches(
+            [self.physical_width, self.physical_height],
+            self.backing_scale,
+        ) {
+            return Ok(ScenePresentOutcome::Skipped);
+        }
         let scene_config = self
             .scene_config
             .clone()
