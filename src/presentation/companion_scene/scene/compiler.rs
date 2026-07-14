@@ -589,9 +589,9 @@ fn tank_semantic_content(
 fn pet_transform(
     snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
 ) -> Transform3 {
-    let y = snapshot.frame.pet_anchor_points[1]
-        + snapshot.frame.breath_offset_y_points
-        + snapshot.frame.bob_offset_y_points;
+    // The classic breath offset is a whole-cell 0/1 toggle. Retained motion
+    // follows the continuous bob so breath phase changes cannot snap the pet.
+    let y = snapshot.frame.pet_anchor_points[1] + snapshot.frame.bob_offset_y_points;
     let cell = snapshot.topology.glyph_grid.cell_extent_points;
     let pet_extent = [
         f32::from(crate::presentation::companion_scene::PET_LATTICE_WIDTH) * cell[0],

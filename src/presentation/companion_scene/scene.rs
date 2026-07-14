@@ -3424,6 +3424,33 @@ mod tests {
     }
 
     #[test]
+    fn retained_pet_transform_ignores_stepped_breath_offset() {
+        let baseline = snapshot_for(Species::Fuzz, Stage::S3);
+        let mut breathing = baseline.clone();
+        breathing.frame.breath_offset_y_points = baseline.topology.glyph_grid.cell_extent_points[1];
+
+        let pet_transform = |snapshot: &CompanionSceneSnapshot| {
+            let generation = build_scene_generation(snapshot, generation_key(1)).unwrap();
+            let pet_id = generation
+                .template
+                .nodes
+                .iter()
+                .find(|node| node.alias.as_str() == "pet")
+                .unwrap()
+                .id;
+            generation
+                .frame
+                .nodes
+                .iter()
+                .find(|node| node.node == pet_id)
+                .unwrap()
+                .local_transform
+        };
+
+        assert_eq!(pet_transform(&baseline), pet_transform(&breathing));
+    }
+
+    #[test]
     fn aura_uses_tight_asymmetric_body_bounds_not_particle_lattice_bounds() {
         let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
         snapshot.content.pet_lines =

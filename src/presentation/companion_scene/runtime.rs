@@ -523,12 +523,8 @@ pub(crate) fn classify_snapshot_changes(
     }
 
     if previous.frame.pet_anchor_points[0] != newest.frame.pet_anchor_points[0]
-        || previous.frame.pet_anchor_points[1]
-            + previous.frame.breath_offset_y_points
-            + previous.frame.bob_offset_y_points
-            != newest.frame.pet_anchor_points[1]
-                + newest.frame.breath_offset_y_points
-                + newest.frame.bob_offset_y_points
+        || previous.frame.pet_anchor_points[1] + previous.frame.bob_offset_y_points
+            != newest.frame.pet_anchor_points[1] + newest.frame.bob_offset_y_points
         || previous.frame.pet_depth != newest.frame.pet_depth
         || previous.frame.pet_depth_cue != newest.frame.pet_depth_cue
         || previous.frame.calm != newest.frame.calm
@@ -2942,7 +2938,10 @@ mod tests {
         ));
         assert_class!(pet_depth, frame, |s| offset_pet_depth(s, 0.1));
         assert_class!(facing, frame, |s| s.frame.facing = -1);
-        assert_class!(breath, frame, |s| s.frame.breath_offset_y_points = 20.0);
+        assert_class!(breath, ChangeFamilies::NONE, |s| s
+            .frame
+            .breath_offset_y_points =
+            20.0);
         assert_class!(bob, frame, |s| s.frame.bob_offset_y_points += 0.1);
         assert_class!(asleep, frame, |s| s.frame.asleep = true);
         assert_class!(helper, frame, |s| s.frame.helper_trouble = true);
@@ -3033,11 +3032,8 @@ mod tests {
                 }),
             ),
             (
-                "cancelled pet offsets",
-                Box::new(|s| {
-                    s.frame.breath_offset_y_points += 1.0;
-                    s.frame.bob_offset_y_points -= 1.0;
-                }),
+                "retained breath offset",
+                Box::new(|s| s.frame.breath_offset_y_points += 1.0),
             ),
         ];
         let base = snapshot();
