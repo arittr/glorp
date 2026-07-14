@@ -1141,12 +1141,12 @@ fn frame_with_particles(
     for particle in particles_for_species(species, tick) {
         if particle.row < FRAME_HEIGHT && particle.col < FRAME_WIDTH {
             grid[particle.row][particle.col] = particle.glyph;
-            framed_spans.push(StyledSegment {
-                line: particle.row,
-                start: particle.col,
-                end: particle.col + 1,
-                role: PaletteRoleName::Particle,
-            });
+            retag_cell_as_role(
+                &mut framed_spans,
+                particle.row,
+                particle.col,
+                PaletteRoleName::Particle,
+            );
         }
     }
 
@@ -1741,6 +1741,39 @@ mod tests {
                 .map(|particle| particle.glyph)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn overlay_particle_splits_the_underlying_role_span() {
+        let art_lines = vec!["X".repeat(ART_WIDTH); ART_HEIGHT];
+        let art_spans = (0..ART_HEIGHT)
+            .map(|line| StyledSegment {
+                line,
+                start: 0,
+                end: ART_WIDTH,
+                role: PaletteRoleName::Body,
+            })
+            .collect();
+
+        let (_lines, spans) =
+            frame_with_particles(art_lines, art_spans, Species::Glitch, Stage::S3, 41);
+
+        assert!(spans.iter().any(|span| {
+            span.line == ART_ORIGIN_ROW
+                && span.start == ART_ORIGIN_COL
+                && span.end == ART_ORIGIN_COL + 1
+                && span.role == PaletteRoleName::Particle
+        }));
+        for pair in spans.windows(2) {
+            if pair[0].line == pair[1].line {
+                assert!(
+                    pair[0].end <= pair[1].start,
+                    "particle overlay left overlapping spans: {:?} then {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
     }
 
     #[test]

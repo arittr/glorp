@@ -1924,6 +1924,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn token_lantern_scene_glyphs_stay_in_the_active_species_repertoire() {
+        for species in Species::all() {
+            let repertoire = crate::round::smooth::collect_companion_glyph_repertoire(
+                &crate::round::smooth::CompanionContentIdentity::for_pet(species),
+            );
+            for twinkle in [false, true] {
+                let glyphs = compiler::prop_glyphs(
+                    crate::game::habitat::TOKEN_LANTERN_10M,
+                    species,
+                    Some(0),
+                    Some(twinkle),
+                    None,
+                    None,
+                )
+                .expect("the token lantern is valid authored scene content");
+                for glyph in glyphs.iter().filter_map(|cell| cell.glyph) {
+                    let sequence = glyph.as_char().to_string();
+                    assert!(
+                        repertoire
+                            .iter()
+                            .any(|declared| !declared.bold && declared.sequence == sequence),
+                        "{species:?} token lantern emitted undeclared glyph {sequence:?} with twinkle={twinkle}"
+                    );
+                }
+            }
+        }
+    }
+
     fn assert_point_close(actual: [f32; 4], expected: [f32; 4]) {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!(

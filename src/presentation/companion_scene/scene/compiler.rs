@@ -2279,7 +2279,15 @@ pub(super) fn prop_glyphs(
                 }
             )],
             crate::game::habitat::TOKEN_LANTERN_10M => {
-                cells![(0, 0, if twinkle == Some(true) { '☼' } else { '○' })]
+                let glyph = match (species, twinkle == Some(true)) {
+                    (crate::pet::generation::Species::Glitch, true) => '_',
+                    (crate::pet::generation::Species::Glitch, false) => ':',
+                    (crate::pet::generation::Species::Crystal, true) => '✦',
+                    (crate::pet::generation::Species::Crystal, false) => '○',
+                    (_, true) => '☼',
+                    (_, false) => '○',
+                };
+                cells![(0, 0, glyph)]
             }
             crate::game::habitat::TOKEN_MOSS_TUFT_250K => {
                 if bloom == Some(true) {
