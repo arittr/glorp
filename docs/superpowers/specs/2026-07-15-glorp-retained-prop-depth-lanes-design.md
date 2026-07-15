@@ -1,7 +1,7 @@
 # Glorp Retained Prop Depth Lanes Design
 
 **Date:** 2026-07-15
-**Status:** Direction approved; pending written review
+**Status:** Approved
 **Surface:** macOS round companion using the direct retained scene runtime
 
 ## Goal
