@@ -2229,195 +2229,29 @@ pub(super) fn prop_glyphs(
     lid_open: Option<bool>,
     bloom: Option<bool>,
 ) -> Result<[PropGlyphContent; MAX_PROP_GLYPHS_PER_SLOT], SceneGenerationError> {
-    let phase = sprite_phase.unwrap_or(0).is_multiple_of(2);
+    let sprite = crate::presentation::props::presentation_prop_sprite(
+        catalog_id,
+        crate::presentation::props::PresentationPropVisualState {
+            species,
+            sprite_phase,
+            twinkle_active: twinkle,
+            chest_lid_open: lid_open,
+            bloom_active: bloom,
+        },
+    )
+    .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
     let mut result =
         [PropGlyphContent { glyph: None, local_cell: [0; 2] }; MAX_PROP_GLYPHS_PER_SLOT];
-    let mut count = 0;
-    {
-        let mut add = |x: i8, y: i8, glyph: char| -> Result<(), SceneGenerationError> {
-            if count >= MAX_PROP_GLYPHS_PER_SLOT {
-                return Err(SceneGenerationError::FixedCapacity);
-            }
-            result[count] = PropGlyphContent {
-                glyph: Some(
-                    AuthoredGlyph::new(glyph).map_err(|_| SceneGenerationError::InvalidGlyph)?,
-                ),
-                local_cell: [x, y],
-            };
-            count += 1;
-            Ok(())
-        };
-        macro_rules! cells {
-        ($(($x:expr, $y:expr, $glyph:expr)),* $(,)?) => {{
-            $(add($x, $y, $glyph)?;)*
-        }};
-    }
-        match catalog_id {
-            crate::game::habitat::TOKEN_PEBBLE_25K => cells![(0, 0, '▲')],
-            crate::game::habitat::TOKEN_SHELL_100K => cells![(0, 0, '◌')],
-            crate::game::habitat::TOKEN_SPARK_500K => {
-                cells![(0, 0, if twinkle == Some(true) { '✦' } else { '·' })]
-            }
-            crate::game::habitat::TOKEN_SHARD_1M => cells![(
-                0,
-                0,
-                if species == crate::pet::generation::Species::Glitch {
-                    '#'
-                } else {
-                    '◆'
-                }
-            )],
-            crate::game::habitat::TOKEN_ORBIT_5M => cells![(
-                0,
-                0,
-                if species == crate::pet::generation::Species::Glitch {
-                    ']'
-                } else {
-                    '°'
-                }
-            )],
-            crate::game::habitat::TOKEN_LANTERN_10M => {
-                let glyph = match (species, twinkle == Some(true)) {
-                    (crate::pet::generation::Species::Glitch, true) => '_',
-                    (crate::pet::generation::Species::Glitch, false) => ':',
-                    (crate::pet::generation::Species::Crystal, true) => '✦',
-                    (crate::pet::generation::Species::Crystal, false) => '○',
-                    (_, true) => '☼',
-                    (_, false) => '○',
-                };
-                cells![(0, 0, glyph)]
-            }
-            crate::game::habitat::TOKEN_MOSS_TUFT_250K => {
-                if bloom == Some(true) {
-                    cells![
-                        (0, 0, '*'),
-                        (2, 0, '*'),
-                        (0, 1, '▂'),
-                        (1, 1, if phase { '▃' } else { '▂' }),
-                        (2, 1, '▂')
-                    ]
-                } else {
-                    cells![
-                        (0, 0, '▂'),
-                        (1, 0, if phase { '▃' } else { '▂' }),
-                        (2, 0, '▂')
-                    ]
-                }
-            }
-            crate::game::habitat::TOKEN_FRIENDLY_CLOUD_750K => cells![
-                (1, 0, '☁'),
-                (0, 1, if phase { '◦' } else { '˙' }),
-                (1, 1, '◡'),
-                (2, 1, if phase { '◦' } else { '˙' })
-            ],
-            crate::game::habitat::TOKEN_TREASURE_CHEST_2M => {
-                if lid_open == Some(true) {
-                    cells![
-                        (0, 0, '╲'),
-                        (1, 0, '✦'),
-                        (2, 0, '╱'),
-                        (0, 1, '▣'),
-                        (1, 1, '◆'),
-                        (2, 1, '▣')
-                    ]
-                } else {
-                    cells![
-                        (0, 0, '╭'),
-                        (1, 0, '─'),
-                        (2, 0, '╮'),
-                        (0, 1, '▣'),
-                        (1, 1, '◆'),
-                        (2, 1, '▣')
-                    ]
-                }
-            }
-            crate::game::habitat::TOKEN_HANGING_VINE_25M => cells![
-                (1, 0, if bloom == Some(true) { '*' } else { '╽' }),
-                (1, 1, '┃'),
-                (0, 2, if phase { '╱' } else { '╲' }),
-                (1, 2, '┃'),
-                (2, 2, if phase { '╲' } else { '╱' })
-            ],
-            crate::game::habitat::TOKEN_REEDS_5M => cells![
-                (0, 0, if bloom == Some(true) { '*' } else { '╷' }),
-                (1, 0, '│'),
-                (2, 0, if phase { '╵' } else { '╷' }),
-                (0, 1, '│'),
-                (1, 1, '┃'),
-                (2, 1, '│')
-            ],
-            crate::game::habitat::TOKEN_GEODE_50M => cells![
-                (0, 0, if phase { '◆' } else { '◇' }),
-                (1, 0, if phase { '◇' } else { '◆' }),
-                (2, 0, if phase { '◆' } else { '◇' }),
-                (0, 1, '◇'),
-                (1, 1, '◈'),
-                (2, 1, '◇'),
-                (0, 2, '◣'),
-                (1, 2, '▼'),
-                (2, 2, '◢')
-            ],
-            crate::game::habitat::TOKEN_BONSAI_100M => cells![
-                (0, 0, '*'),
-                (1, 0, '▓'),
-                (2, 0, '*'),
-                (0, 1, '╲'),
-                (1, 1, '┃'),
-                (2, 1, '╱'),
-                (0, 2, '▂'),
-                (1, 2, '▃'),
-                (2, 2, '▂')
-            ],
-            crate::game::habitat::TOKEN_CONSTELLATION_250M => cells![
-                (0, 0, if phase { '✦' } else { '·' }),
-                (1, 0, if phase { '·' } else { '✦' }),
-                (2, 0, if phase { '✦' } else { '·' }),
-                (0, 1, '·'),
-                (1, 1, '*'),
-                (2, 1, '·'),
-                (0, 2, '✦'),
-                (1, 2, '·'),
-                (2, 2, '✦')
-            ],
-            crate::game::habitat::TOKEN_AURORA_500M => cells![
-                (0, 0, if phase { '✦' } else { '·' }),
-                (2, 0, if phase { '·' } else { '✦' }),
-                (4, 0, if phase { '✦' } else { '·' }),
-                (0, 1, '╿'),
-                (2, 1, '╿'),
-                (4, 1, '╿'),
-                (0, 2, '┊'),
-                (2, 2, '┊'),
-                (4, 2, '┊')
-            ],
-            crate::game::habitat::TOKEN_MOON_1B => cells![
-                (1, 0, '·'),
-                (0, 1, '·'),
-                (1, 1, '◑'),
-                (2, 1, '·'),
-                (1, 2, '·'),
-                (3, 1, if phase { '✦' } else { '·' })
-            ],
-            crate::game::habitat::CODEX_SIGNAL_LAMP => cells![
-                (0, 0, '╷'),
-                (0, 1, if phase { '◉' } else { '○' }),
-                (0, 2, '╵')
-            ],
-            crate::game::habitat::HEAVY_SESSION_PLANTER => cells![
-                (1, 0, if bloom == Some(true) { '*' } else { 'ѱ' }),
-                (0, 1, '╲'),
-                (1, 1, '┃'),
-                (2, 1, '╱'),
-                (1, 2, '◌')
-            ],
-            crate::game::habitat::WILT_RECOVERY_SPROUT | crate::game::habitat::RETURN_SPROUT => {
-                cells![(1, 0, '╿'), (0, 1, '╲'), (1, 1, '┃'), (2, 1, '╱')]
-            }
-            crate::game::habitat::FIRST_ENSEMBLE_DAY => {
-                cells![(0, 0, '✦'), (1, 0, '◈'), (2, 0, '✦')]
-            }
-            _ => return Err(SceneGenerationError::UnknownAuthoredIdentity),
+    for (index, cell) in sprite.into_iter().enumerate() {
+        if index >= MAX_PROP_GLYPHS_PER_SLOT {
+            return Err(SceneGenerationError::FixedCapacity);
         }
+        result[index] = PropGlyphContent {
+            glyph: Some(
+                AuthoredGlyph::new(cell.glyph).map_err(|_| SceneGenerationError::InvalidGlyph)?,
+            ),
+            local_cell: [cell.dx, cell.dy],
+        };
     }
     Ok(result)
 }
@@ -2612,4 +2446,84 @@ fn build_frame(
     project_analytic_frame_slots(snapshot, &mut frame.analytic_slots)?;
     frame.lights.clear();
     Ok(frame)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pet::generation::Species;
+
+    #[test]
+    fn retained_sprite_adapter_preserves_canonical_local_cells() {
+        for spec in crate::game::habitat::HABITAT_PROP_CATALOG {
+            let supports_sprite_phase = crate::game::habitat::habitat_prop_animation_state(
+                spec.id,
+                time::OffsetDateTime::UNIX_EPOCH,
+            )
+            .sprite_phase
+            .is_some();
+            let phases = if supports_sprite_phase {
+                &[Some(0), Some(1)][..]
+            } else {
+                &[None][..]
+            };
+            for species in Species::all() {
+                for &sprite_phase in phases {
+                    for twinkle_active in [false, true] {
+                        for chest_lid_open in [false, true] {
+                            for bloom_active in [false, true] {
+                                let state =
+                                    crate::presentation::props::PresentationPropVisualState {
+                                        species,
+                                        sprite_phase,
+                                        twinkle_active: Some(twinkle_active),
+                                        chest_lid_open: Some(chest_lid_open),
+                                        bloom_active: Some(bloom_active),
+                                    };
+                                let canonical =
+                                    crate::presentation::props::presentation_prop_sprite(
+                                        spec.id, state,
+                                    )
+                                    .unwrap();
+                                let adapted = prop_glyphs(
+                                    spec.id,
+                                    species,
+                                    sprite_phase,
+                                    Some(twinkle_active),
+                                    Some(chest_lid_open),
+                                    Some(bloom_active),
+                                )
+                                .unwrap();
+                                let canonical = canonical
+                                    .iter()
+                                    .map(|cell| (cell.dx, cell.dy, cell.glyph))
+                                    .collect::<Vec<_>>();
+                                let adapted = adapted
+                                    .iter()
+                                    .filter_map(|cell| {
+                                        cell.glyph.map(|glyph| {
+                                            (
+                                                cell.local_cell[0],
+                                                cell.local_cell[1],
+                                                glyph.as_char(),
+                                            )
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                assert_eq!(adapted, canonical, "{} state {state:?}", spec.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_prop_identity_remains_fail_closed() {
+        assert_eq!(
+            prop_glyphs("unknown_stored_prop", Species::Fuzz, None, None, None, None),
+            Err(SceneGenerationError::UnknownAuthoredIdentity)
+        );
+    }
 }
