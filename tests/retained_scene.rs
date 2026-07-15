@@ -237,8 +237,8 @@ fn retained_snapshot_keeps_fixed_prop_slots_when_composition_hides_an_accent() {
     use glorp::pet::generation::{generate_pet, Species};
     use glorp::pet::render::{render_pet, AnimationFrame};
     use glorp::presentation::companion_scene::{
-        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
-        CompanionSceneSnapshot,
+        AuthoredDepthSnapshot, CompanionLogicalLayout, CompanionProjectionClock,
+        CompanionSceneProjectionInput, CompanionSceneSnapshot, PropZoneSnapshot,
     };
     use glorp::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
     use time::macros::datetime;
@@ -318,4 +318,31 @@ fn retained_snapshot_keeps_fixed_prop_slots_when_composition_hides_an_accent() {
         .all(|extent| *extent > 0.0));
     assert_eq!(first_frame.contact_shadow_strength, 0.0);
     assert_eq!(second_frame.contact_shadow_strength, 0.0);
+
+    for prop in &first.topology.visible_props {
+        let frame = first
+            .frame
+            .prop_instances
+            .iter()
+            .find(|frame| frame.slot == prop.stable_order)
+            .unwrap();
+        let grounded = matches!(
+            prop.zone,
+            PropZoneSnapshot::FloorLeft | PropZoneSnapshot::FloorMid | PropZoneSnapshot::FloorRight
+        );
+        let expected = if frame.visible && grounded {
+            match prop.authored_depth {
+                AuthoredDepthSnapshot::Background => 0.0,
+                AuthoredDepthSnapshot::BehindPet => 0.24,
+                AuthoredDepthSnapshot::Foreground => 0.34,
+            }
+        } else {
+            0.0
+        };
+        assert_eq!(
+            frame.contact_shadow_strength, expected,
+            "{}",
+            prop.catalog_id
+        );
+    }
 }

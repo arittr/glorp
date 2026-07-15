@@ -21,6 +21,19 @@ const NONE_U32: u32 = u32::MAX;
 const PROP_GLYPH_CAPACITY: usize = MAX_VISIBLE_PROPS * MAX_PROP_GLYPHS_PER_SLOT;
 const TANK_GLYPH_CAPACITY: usize = MAX_ROUND_TANK_INHABITANTS * MAX_TANK_GLYPHS_PER_SLOT;
 
+// `FrameBuffer.values` begins immediately after the separately typed globals
+// record. Props are the first fixed `FrameGpuValue` family and each slot owns
+// exactly one record; later packed families follow the order in
+// `CpuMirrorShape::FRAME_RECORD_BYTES` / `FRAME_COUNTS`.
+pub(super) const PROP_FRAME_GPU_BASE: u32 = 0;
+pub(super) const PROP_FRAME_GPU_STRIDE: u32 = 1;
+pub(super) const PROP_FRAME_GPU_COUNT: u32 = CpuMirrorShape::FRAME_COUNTS[1] as u32;
+pub(super) const FRAME_GPU_VALUE_COUNT: u32 = (CpuMirrorShape::FRAME_COUNTS[1]
+    + CpuMirrorShape::FRAME_COUNTS[2]
+    + CpuMirrorShape::FRAME_COUNTS[3]
+    + CpuMirrorShape::FRAME_COUNTS[4]
+    + CpuMirrorShape::FRAME_COUNTS[5]) as u32;
+
 /// Compiler-owned record sizes and fixed capacities consumed by GPU packing.
 /// The renderer derives packed offsets from this shape instead of duplicating
 /// the CPU mirror ABI as independent literals.
@@ -2129,6 +2142,9 @@ fn pack_analytic_content(value: AnalyticContentSlot) -> AnalyticContentGpuValue 
         AnalyticPaint::DimOverlay { color_srgb8 } => {
             payload[0] = pack_rgb8(color_srgb8);
         }
+        AnalyticPaint::PropShadowMultiply { color_srgb8 } => {
+            payload[0] = pack_rgb8(color_srgb8);
+        }
     }
     AnalyticContentGpuValue {
         id: u32::from(value.id.0),
@@ -2229,7 +2245,7 @@ fn pack_analytic_frame(value: AnalyticFrameSlot) -> AnalyticFrameGpuValue {
             radius_points,
             thickness_points,
         ]),
-        AnalyticGeometry::SurfaceOverlay => {}
+        AnalyticGeometry::SurfaceOverlay | AnalyticGeometry::PropShadowField => {}
     }
     AnalyticFrameGpuValue {
         id: u32::from(value.id.0),
@@ -3320,6 +3336,7 @@ fn analytic_shape_tag(value: AnalyticShape) -> u32 {
         AnalyticShape::PerimeterGaugeSet => 6,
         AnalyticShape::TroubleBeacon => 7,
         AnalyticShape::SurfaceOverlay => 8,
+        AnalyticShape::PropShadowField => 9,
     }
 }
 

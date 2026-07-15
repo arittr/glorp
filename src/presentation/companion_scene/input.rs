@@ -1002,6 +1002,16 @@ fn project_prop_frame_states(
             } else {
                 1.0
             };
+            let contact_shadow_strength = placement.map_or(0.0, |placement| {
+                if !placement.visible || !placement.grounded {
+                    return 0.0;
+                }
+                match topology.authored_depth {
+                    AuthoredDepthSnapshot::Background => 0.0,
+                    AuthoredDepthSnapshot::BehindPet => 0.24,
+                    AuthoredDepthSnapshot::Foreground => 0.34,
+                }
+            });
             PropFrameSnapshot {
                 slot: topology.stable_order,
                 visible,
@@ -1009,7 +1019,7 @@ fn project_prop_frame_states(
                 motion_offset_points,
                 opacity,
                 footprint_points,
-                contact_shadow_strength: 0.0,
+                contact_shadow_strength,
                 transition: if options.reduce_motion {
                     None
                 } else {
@@ -2606,6 +2616,112 @@ mod tests {
             frames[0].motion_offset_points,
             [current_parallax[0], 1.5 + current_parallax[1]]
         );
+    }
+
+    #[test]
+    fn grounded_prop_shadow_strength_follows_authored_depth_and_visibility() {
+        use crate::presentation::companion_scene::{
+            AuthoredDepthSnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
+            PropPresentationMotion, PropTopologySnapshot, PropZoneSnapshot, SemanticRevision,
+        };
+
+        let cases = [
+            (
+                PropZoneSnapshot::FloorLeft,
+                AuthoredDepthSnapshot::BehindPet,
+                true,
+                0.24,
+            ),
+            (
+                PropZoneSnapshot::FloorLeft,
+                AuthoredDepthSnapshot::Foreground,
+                true,
+                0.34,
+            ),
+            (
+                PropZoneSnapshot::FloorLeft,
+                AuthoredDepthSnapshot::Background,
+                true,
+                0.0,
+            ),
+            (
+                PropZoneSnapshot::AirLeft,
+                AuthoredDepthSnapshot::BehindPet,
+                true,
+                0.0,
+            ),
+            (
+                PropZoneSnapshot::WallRight,
+                AuthoredDepthSnapshot::Foreground,
+                true,
+                0.0,
+            ),
+            (
+                PropZoneSnapshot::FloorLeft,
+                AuthoredDepthSnapshot::BehindPet,
+                false,
+                0.0,
+            ),
+        ];
+        let semantics = [PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            kind: PropAnimationKindSnapshot::Static,
+            sprite_phase: None,
+            twinkle_active: None,
+            motion_phase: None,
+            chest_lid_open: None,
+            bloom_active: None,
+        }];
+
+        for (zone, authored_depth, visible, expected) in cases {
+            let topology = [PropTopologySnapshot {
+                catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+                stable_order: 0,
+                zone,
+                authored_depth,
+                presentation_motion: PropPresentationMotion::Static,
+            }];
+            let grounded = matches!(
+                zone,
+                PropZoneSnapshot::FloorLeft
+                    | PropZoneSnapshot::FloorMid
+                    | PropZoneSnapshot::FloorRight
+            );
+            let composition = super::CompanionComposition {
+                prop_placements: vec![super::super::composition::CompanionPropPlacement {
+                    slot: 0,
+                    visible,
+                    anchor_cell: [3, 4],
+                    bounds_cells: [3, 4, 4, 5],
+                    footprint_cells: [1, 1],
+                    grounded,
+                }],
+                hud_reserve_cells: [0; 4],
+                gauge_inner_radius_cells: [0.0; 2],
+                tank_reserved_regions: Vec::new(),
+                tank_foreground_reserved_regions: Vec::new(),
+            };
+
+            let frames = super::project_prop_frame_states(
+                &topology,
+                &semantics,
+                super::PropFrameProjectionContext {
+                    clock: CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 0),
+                    asleep: false,
+                    options: super::CompanionPresentationOptions::STANDARD,
+                    semantic_revision: SemanticRevision(1),
+                    previous: None,
+                    composition: &composition,
+                    parallax: test_depth_parallax_context(false),
+                },
+            );
+
+            assert_eq!(
+                frames[0].contact_shadow_strength, expected,
+                "zone={zone:?}, depth={authored_depth:?}, visible={visible}",
+            );
+        }
     }
 
     #[test]

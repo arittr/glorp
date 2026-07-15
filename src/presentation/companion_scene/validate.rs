@@ -1015,15 +1015,16 @@ fn validate_analytic_templates(slots: &[AnalyticTemplateSlot]) -> Result<(), Sce
             return Err(SceneValidationError::DuplicateSlot);
         }
         match (index, slot.value) {
-            (0..=7, Some(value))
-                if value.semantic == AnalyticSemantic::ALL[index]
+            (index, Some(value))
+                if index < AnalyticSemantic::ALL.len()
+                    && value.semantic == AnalyticSemantic::ALL[index]
                     && value.semantic.id() == slot.id
                     && value.shape == value.semantic.shape()
                     && value.normalized_local_bounds == unit_bounds =>
             {
                 validate_bounds(value.normalized_local_bounds)?;
             }
-            (8.., None) => {}
+            (index, None) if index >= AnalyticSemantic::ALL.len() => {}
             _ => return Err(SceneValidationError::NonCanonicalEmptySlot),
         }
     }
@@ -1262,7 +1263,9 @@ fn analytic_binding_semantics_match(
             DepthBehavior::WorldWrite,
             PrimitiveSpace::World,
         ),
-        AnalyticSemantic::WallShadow | AnalyticSemantic::FloorProjection => (
+        AnalyticSemantic::WallShadow
+        | AnalyticSemantic::FloorProjection
+        | AnalyticSemantic::PropShadows => (
             MaterialKind::MultiplyShadow,
             WorldBlend::Multiply,
             DepthBehavior::WorldReadOnly,
@@ -1347,6 +1350,7 @@ fn validate_companion_instance_sources(
         ("world.room.background", AnalyticSemantic::RoomBackground),
         ("pet.shadow.wall", AnalyticSemantic::WallShadow),
         ("pet.projection.floor", AnalyticSemantic::FloorProjection),
+        ("world.prop.shadows", AnalyticSemantic::PropShadows),
         ("chrome.status", AnalyticSemantic::StatusHalo),
         ("pet.aura.mood", AnalyticSemantic::MoodAura),
         ("chrome.gauges", AnalyticSemantic::Gauges),
@@ -1665,13 +1669,14 @@ fn validate_analytic_content_slots(
     for slot in slots {
         let index = usize::from(slot.id.0);
         match (index, slot.value) {
-            (0..=7, Some(value))
-                if value.semantic == AnalyticSemantic::ALL[index]
+            (index, Some(value))
+                if index < AnalyticSemantic::ALL.len()
+                    && value.semantic == AnalyticSemantic::ALL[index]
                     && value.shape == value.semantic.shape() =>
             {
                 validate_analytic_paint(value.semantic, value.paint)?;
             }
-            (8.., None) => {}
+            (index, None) if index >= AnalyticSemantic::ALL.len() => {}
             _ => return Err(SceneValidationError::InvalidContentValue),
         }
     }
@@ -1743,6 +1748,10 @@ fn validate_analytic_paint(
             rgba(color_srgba8)
         }
         (AnalyticSemantic::Dim, AnalyticPaint::DimOverlay { color_srgb8 }) => {
+            let _ = color_srgb8;
+            true
+        }
+        (AnalyticSemantic::PropShadows, AnalyticPaint::PropShadowMultiply { color_srgb8 }) => {
             let _ = color_srgb8;
             true
         }
@@ -1865,13 +1874,14 @@ fn validate_analytic_frame_slots(
     for slot in slots {
         let index = usize::from(slot.id.0);
         match (index, slot.value) {
-            (0..=7, Some(value))
-                if value.semantic == AnalyticSemantic::ALL[index]
+            (index, Some(value))
+                if index < AnalyticSemantic::ALL.len()
+                    && value.semantic == AnalyticSemantic::ALL[index]
                     && value.shape == value.semantic.shape() =>
             {
                 validate_analytic_frame(value, camera)?;
             }
-            (8.., None) => {}
+            (index, None) if index >= AnalyticSemantic::ALL.len() => {}
             _ => return Err(SceneValidationError::InvalidFrameValue),
         }
     }
@@ -1947,7 +1957,7 @@ fn validate_analytic_frame(
                         && lane.track_sweep_degrees.is_finite()
                 })
         }
-        AnalyticGeometry::SurfaceOverlay => true,
+        AnalyticGeometry::SurfaceOverlay | AnalyticGeometry::PropShadowField => true,
     };
     if !geometry_finite {
         return Err(SceneValidationError::NonFiniteFrameValue);
@@ -2009,7 +2019,7 @@ fn validate_analytic_frame(
                         && lane.track_sweep_degrees.abs() <= 360.0
                 })
         }
-        AnalyticGeometry::SurfaceOverlay => true,
+        AnalyticGeometry::SurfaceOverlay | AnalyticGeometry::PropShadowField => true,
     };
     if !geometry_bounded {
         return Err(SceneValidationError::InvalidFrameValue);
@@ -2147,6 +2157,9 @@ fn validate_analytic_frame(
                 && lane_matches(pace, expected.pace)
         }
         (AnalyticSemantic::Dim, AnalyticGeometry::SurfaceOverlay) => {
+            value.rect_points == full_camera_rect
+        }
+        (AnalyticSemantic::PropShadows, AnalyticGeometry::PropShadowField) => {
             value.rect_points == full_camera_rect
         }
         _ => false,
@@ -2860,6 +2873,34 @@ mod tests {
     }
 
     #[test]
+    fn prop_shadow_analytic_rejects_non_full_room_geometry_and_non_multiply_paint() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+
+        let mut frame = fixture.frame.clone();
+        let shadow = frame.analytic_slots[usize::from(AnalyticSemantic::PropShadows.id().0)]
+            .value
+            .as_mut()
+            .unwrap();
+        shadow.rect_points[2] -= 1.0;
+        assert_eq!(
+            validate_frame(&frame, &accepted).map(|_| ()),
+            Err(SceneValidationError::InvalidFrameValue)
+        );
+
+        let mut content = fixture.content.clone();
+        content.analytic_slots[usize::from(AnalyticSemantic::PropShadows.id().0)]
+            .value
+            .as_mut()
+            .unwrap()
+            .paint = AnalyticPaint::DimOverlay { color_srgb8: [0; 3] };
+        assert_eq!(
+            validate_content(&content),
+            Err(SceneValidationError::InvalidContentValue)
+        );
+    }
+
+    #[test]
     fn duplicate_authored_order_and_noncanonical_empty_mirrors_are_rejected() {
         let mut fixture = SceneFixture::valid();
         let mut duplicate = fixture.template.primitives[0].clone();
@@ -3087,7 +3128,9 @@ mod tests {
                 primitive.depth = DepthBehavior::WorldWrite;
                 primitive.space = PrimitiveSpace::World;
             }
-            AnalyticSemantic::WallShadow | AnalyticSemantic::FloorProjection => {
+            AnalyticSemantic::WallShadow
+            | AnalyticSemantic::FloorProjection
+            | AnalyticSemantic::PropShadows => {
                 template.materials[0].kind = MaterialKind::MultiplyShadow;
                 primitive.blend = WorldBlend::Multiply;
                 primitive.depth = DepthBehavior::WorldReadOnly;
@@ -3195,9 +3238,9 @@ mod tests {
 
             let alternate = match semantic {
                 AnalyticSemantic::RoomBackground => AnalyticSemantic::WallShadow,
-                AnalyticSemantic::WallShadow | AnalyticSemantic::FloorProjection => {
-                    AnalyticSemantic::MoodAura
-                }
+                AnalyticSemantic::WallShadow
+                | AnalyticSemantic::FloorProjection
+                | AnalyticSemantic::PropShadows => AnalyticSemantic::MoodAura,
                 AnalyticSemantic::MoodAura
                 | AnalyticSemantic::StatusHalo
                 | AnalyticSemantic::Gauges

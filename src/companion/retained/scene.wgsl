@@ -4,6 +4,10 @@
 const NONE_U32: u32 = 0xffffffffu;
 const GLYPH_FLAG_VISIBLE: u32 = 1u;
 const GLYPH_FLAG_COLOR: u32 = 2u;
+const PROP_FRAME_GPU_BASE: u32 = 0u;
+const PROP_FRAME_GPU_STRIDE: u32 = 1u;
+const PROP_FRAME_GPU_COUNT: u32 = 10u;
+const FRAME_GPU_VALUE_COUNT: u32 = 124u;
 
 struct PrimitiveGpuValue {
     node_index: u32,
@@ -108,7 +112,7 @@ struct ContentGlobalsBuffer {
 
 struct FrameBuffer {
     globals: FrameGlobalsGpuValue,
-    values: array<FrameGpuValue, 124>,
+    values: array<FrameGpuValue, FRAME_GPU_VALUE_COUNT>,
     analytics: array<AnalyticFrameGpuValue, 16>,
 }
 
@@ -308,7 +312,7 @@ fn glyph_instance_placement(
             f32(9u - pet_row) * cell_extent.y,
         );
     } else if (primitive.instance_group == 3u) {
-        if (input.instance_index >= 9u || primitive.frame_base >= 124u || content.kind != 2u) {
+        if (input.instance_index >= 9u || primitive.frame_base >= FRAME_GPU_VALUE_COUNT || content.kind != 2u) {
             return invalid_glyph_placement();
         }
         let frame = frame_buffer.values[primitive.frame_base];
@@ -322,13 +326,13 @@ fn glyph_instance_placement(
         instance_opacity = frame.values[4];
     } else if (primitive.instance_group == 4u) {
         if (input.instance_index >= 32u
-            || primitive.frame_base >= 124u
-            || input.instance_index > 123u - primitive.frame_base
+            || primitive.frame_base >= FRAME_GPU_VALUE_COUNT
+            || input.instance_index > FRAME_GPU_VALUE_COUNT - 1u - primitive.frame_base
             || content.kind != 5u) {
             return invalid_glyph_placement();
         }
         let frame_index = primitive.frame_base + input.instance_index;
-        if (frame_index >= 124u) {
+        if (frame_index >= FRAME_GPU_VALUE_COUNT) {
             return invalid_glyph_placement();
         }
         let frame = frame_buffer.values[frame_index];
@@ -339,13 +343,13 @@ fn glyph_instance_placement(
         instance_opacity = frame.values[4];
     } else if (primitive.instance_group == 5u || primitive.instance_group == 6u) {
         if (input.instance_index >= 8u
-            || primitive.frame_base >= 124u
-            || input.instance_index > 123u - primitive.frame_base
+            || primitive.frame_base >= FRAME_GPU_VALUE_COUNT
+            || input.instance_index > FRAME_GPU_VALUE_COUNT - 1u - primitive.frame_base
             || content.kind != 3u) {
             return invalid_glyph_placement();
         }
         let frame_index = primitive.frame_base + input.instance_index;
-        if (frame_index >= 124u) {
+        if (frame_index >= FRAME_GPU_VALUE_COUNT) {
             return invalid_glyph_placement();
         }
         let frame = frame_buffer.values[frame_index];
@@ -359,13 +363,13 @@ fn glyph_instance_placement(
         );
     } else if (primitive.instance_group == 7u) {
         if (input.instance_index >= 64u
-            || primitive.frame_base >= 124u
-            || input.instance_index > 123u - primitive.frame_base
+            || primitive.frame_base >= FRAME_GPU_VALUE_COUNT
+            || input.instance_index > FRAME_GPU_VALUE_COUNT - 1u - primitive.frame_base
             || content.kind != 4u) {
             return invalid_glyph_placement();
         }
         let frame_index = primitive.frame_base + input.instance_index;
-        if (frame_index >= 124u) {
+        if (frame_index >= FRAME_GPU_VALUE_COUNT) {
             return invalid_glyph_placement();
         }
         let frame = frame_buffer.values[frame_index];
@@ -517,6 +521,7 @@ fn expected_analytic_shape(analytic_id: u32) -> u32 {
         case 5u: { return 6u; }
         case 6u: { return 7u; }
         case 7u: { return 8u; }
+        case 8u: { return 9u; }
         default: { return NONE_U32; }
     }
 }
@@ -527,7 +532,7 @@ fn valid_analytic_role(
     content: AnalyticContentGpuValue,
 ) -> bool {
     let expected_shape = expected_analytic_shape(analytic_id);
-    return analytic_id < 8u
+    return analytic_id < 9u
         && expected_shape != NONE_U32
         && (analytic.flags & 1u) != 0u
         && (content.flags & 1u) != 0u
@@ -832,6 +837,55 @@ fn fs_floor_projection(
     );
 }
 
+fn fs_prop_shadows(
+    input: SceneVertexOutput,
+    content: AnalyticContentGpuValue,
+) -> vec4<f32> {
+    let cell_extent = content_globals_buffer.globals.glyph_cell_extent_points;
+    if (min(cell_extent.x, cell_extent.y) <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    var union_coverage = 0.0;
+    for (var slot = 0u; slot < PROP_FRAME_GPU_COUNT; slot = slot + 1u) {
+        let frame_index = PROP_FRAME_GPU_BASE + slot * PROP_FRAME_GPU_STRIDE;
+        if (frame_index < FRAME_GPU_VALUE_COUNT) {
+            let frame = frame_buffer.values[frame_index];
+            let visible = (frame.flags & 1u) != 0u;
+            let footprint = vec2<f32>(frame.values[5], frame.values[6]);
+            let strength = frame.values[7];
+            if (frame.kind == 1u
+                && visible
+                && min(footprint.x, footprint.y) > 0.0
+                && strength > 0.0) {
+                let origin = vec2<f32>(frame.values[0], frame.values[1])
+                    + vec2<f32>(frame.values[2], frame.values[3]);
+                let radii = vec2<f32>(
+                    max(footprint.x * 0.375, cell_extent.x),
+                    cell_extent.y * 0.15,
+                );
+                let center = vec2<f32>(
+                    origin.x + footprint.x * 0.5,
+                    origin.y - footprint.y + radii.y,
+                );
+                let distance = length((input.point_position - center) / radii);
+                let edge = max(fwidth(distance), 0.0001);
+                let ellipse = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distance);
+                let slot_coverage = ellipse
+                    * clamp(strength, 0.0, 1.0)
+                    * clamp(frame.values[4], 0.0, 1.0);
+                union_coverage = max(union_coverage, slot_coverage);
+            }
+        }
+    }
+    let straight = vec4<f32>(packed_rgb8_linear(content.payload[0].x), 1.0);
+    return analytic_premultiply(
+        straight,
+        clamp(union_coverage, 0.0, 1.0),
+        input.opacity,
+        input.saturation,
+    );
+}
+
 fn fs_status_tone(
     input: SceneVertexOutput,
     content: AnalyticContentGpuValue,
@@ -1096,6 +1150,7 @@ fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
         case 5u: { output = fs_gauges(input, content, analytic); }
         case 6u: { output = fs_trouble(input, content, analytic); }
         case 7u: { output = fs_dim(input, content, analytic); }
+        case 8u: { output = fs_prop_shadows(input, content); }
         default: { discard; }
     }
     if (output.a <= 0.0) {

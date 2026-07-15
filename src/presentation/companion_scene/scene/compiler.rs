@@ -1094,6 +1094,7 @@ fn build_template(
         ("world.room.background", Some("world.far"), -1.90),
         ("world.room.glyphs", Some("world.far"), -1.75),
         ("pet.projection.floor", Some("world.far"), -1.70),
+        ("world.prop.shadows", Some("world.far"), -1.69),
         ("world.ambient", Some("world.far"), -1.65),
         ("world.behind", Some("scene.root"), 0.0),
         ("world.props.behind", Some("world.behind"), 0.0),
@@ -1304,6 +1305,16 @@ fn build_template(
         WorldBlend::Multiply,
         DepthBehavior::WorldReadOnly,
         PrimitiveBinding::Analytic(AnalyticSemantic::FloorProjection.id()),
+        PrimitiveSpace::World,
+    )?;
+    push(
+        "world.prop.shadows",
+        PrimitiveKind::AnalyticShape,
+        "material.multiply-shadow",
+        "resource.analytic-geometry",
+        WorldBlend::Multiply,
+        DepthBehavior::WorldReadOnly,
+        PrimitiveBinding::Analytic(AnalyticSemantic::PropShadows.id()),
         PrimitiveSpace::World,
     )?;
     push(
@@ -1736,6 +1747,9 @@ fn analytic_paint(
             ),
         },
         AnalyticSemantic::Dim => AnalyticPaint::DimOverlay { color_srgb8: [13, 15, 26] },
+        AnalyticSemantic::PropShadows => AnalyticPaint::PropShadowMultiply {
+            color_srgb8: crate::presentation::companion_effects::bed_shadow_srgb8(biome),
+        },
         AnalyticSemantic::Gauges => unreachable!("gauges use the closed gauge paint set"),
     }
 }
@@ -2053,6 +2067,12 @@ fn project_analytic_frame_slots_for_geometry(
             shape: AnalyticShape::SurfaceOverlay,
             rect_points: room,
             geometry: AnalyticGeometry::SurfaceOverlay,
+        },
+        AnalyticFrame {
+            semantic: AnalyticSemantic::PropShadows,
+            shape: AnalyticShape::PropShadowField,
+            rect_points: room,
+            geometry: AnalyticGeometry::PropShadowField,
         },
     ];
     for value in values {

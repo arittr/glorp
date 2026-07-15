@@ -723,6 +723,10 @@ fn encode_analytic_paint(hash: &mut Fnv1a64, paint: AnalyticPaint) {
             hash.u8(8);
             encode_rgb(hash, color_srgb8);
         }
+        AnalyticPaint::PropShadowMultiply { color_srgb8 } => {
+            hash.u8(9);
+            encode_rgb(hash, color_srgb8);
+        }
     }
 }
 fn encode_analytic_geometry(
@@ -825,6 +829,7 @@ fn encode_analytic_geometry(
                 .map_err(|_| SceneGenerationError::NonFinite)?;
         }
         AnalyticGeometry::SurfaceOverlay => hash.u8(8),
+        AnalyticGeometry::PropShadowField => hash.u8(9),
     }
     Ok(())
 }
@@ -846,6 +851,7 @@ fn analytic_shape_tag(value: AnalyticShape) -> u8 {
         AnalyticShape::PerimeterGaugeSet => 6,
         AnalyticShape::TroubleBeacon => 7,
         AnalyticShape::SurfaceOverlay => 8,
+        AnalyticShape::PropShadowField => 9,
     }
 }
 fn encode_primitive_binding(hash: &mut Fnv1a64, binding: PrimitiveBinding) {

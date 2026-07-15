@@ -676,10 +676,11 @@ pub enum AnalyticSemantic {
     Gauges,
     Trouble,
     Dim,
+    PropShadows,
 }
 
 impl AnalyticSemantic {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::RoomBackground,
         Self::WallShadow,
         Self::FloorProjection,
@@ -688,6 +689,7 @@ impl AnalyticSemantic {
         Self::Gauges,
         Self::Trouble,
         Self::Dim,
+        Self::PropShadows,
     ];
 
     pub const fn id(self) -> AnalyticParamId {
@@ -700,6 +702,7 @@ impl AnalyticSemantic {
             Self::Gauges => 5,
             Self::Trouble => 6,
             Self::Dim => 7,
+            Self::PropShadows => 8,
         })
     }
 
@@ -713,6 +716,7 @@ impl AnalyticSemantic {
             Self::Gauges => AnalyticShape::PerimeterGaugeSet,
             Self::Trouble => AnalyticShape::TroubleBeacon,
             Self::Dim => AnalyticShape::SurfaceOverlay,
+            Self::PropShadows => AnalyticShape::PropShadowField,
         }
     }
 }
@@ -728,6 +732,7 @@ pub enum AnalyticShape {
     PerimeterGaugeSet,
     TroubleBeacon,
     SurfaceOverlay,
+    PropShadowField,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -994,6 +999,9 @@ pub enum AnalyticPaint {
     DimOverlay {
         color_srgb8: [u8; 3],
     },
+    PropShadowMultiply {
+        color_srgb8: [u8; 3],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1034,7 +1042,7 @@ pub struct GaugeLaneGeometry {
     pub cap: GaugeLineCap,
 }
 
-/// Closed geometry payloads for the eight companion analytic roles. Exact
+/// Closed geometry payloads for the companion analytic roles. Exact
 /// gauges, activity opacity, and dim amount remain in their existing private
 /// frame fields; these records only describe renderer-neutral geometry.
 #[derive(Clone, Copy, PartialEq)]
@@ -1078,6 +1086,7 @@ pub enum AnalyticGeometry {
         thickness_points: f32,
     },
     SurfaceOverlay,
+    PropShadowField,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -4250,6 +4259,7 @@ mod tests {
             AnalyticSemantic::Gauges,
             AnalyticSemantic::Trouble,
             AnalyticSemantic::Dim,
+            AnalyticSemantic::PropShadows,
         ];
         assert_eq!(built.template.analytic_templates.len(), MAX_ANALYTIC_PARAMS);
         for (slot, semantic) in expected.into_iter().enumerate() {
@@ -4263,9 +4273,11 @@ mod tests {
                 Some(semantic)
             );
         }
-        assert!(built.template.analytic_templates[8..]
-            .iter()
-            .all(|slot| slot.value.is_none()));
+        assert!(
+            built.template.analytic_templates[AnalyticSemantic::ALL.len()..]
+                .iter()
+                .all(|slot| slot.value.is_none())
+        );
 
         let primitive = |alias: &str| {
             let node = NodeId::from_alias(&CanonicalAlias::new(alias).unwrap());
@@ -4399,7 +4411,7 @@ mod tests {
     }
 
     #[test]
-    fn production_projection_closes_all_eight_analytic_roles_with_y_up_geometry() {
+    fn production_projection_closes_all_nine_analytic_roles_with_y_up_geometry() {
         let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
         let built = build_scene_generation(&snapshot, generation_key(41)).unwrap();
 
@@ -4415,10 +4427,12 @@ mod tests {
             assert!(frame.rect_points.into_iter().all(f32::is_finite));
             assert!(frame.rect_points[2] > 0.0 && frame.rect_points[3] > 0.0);
         }
-        assert!(built.content().analytic_slots[8..]
-            .iter()
-            .all(|slot| slot.value.is_none()));
-        assert!(built.frame().analytic_slots[8..]
+        assert!(
+            built.content().analytic_slots[AnalyticSemantic::ALL.len()..]
+                .iter()
+                .all(|slot| slot.value.is_none())
+        );
+        assert!(built.frame().analytic_slots[AnalyticSemantic::ALL.len()..]
             .iter()
             .all(|slot| slot.value.is_none()));
 
@@ -4512,6 +4526,115 @@ mod tests {
                     crate::presentation::companion_effects::GAUGE_DAILY_OVERAGE_SRGBA,
                 ),
             }
+        );
+    }
+
+    #[test]
+    fn prop_shadow_analytic_contract_owns_unique_fixed_slot_eight() {
+        assert_eq!(AnalyticSemantic::PropShadows.id(), AnalyticParamId(8));
+        assert_eq!(
+            AnalyticSemantic::PropShadows.shape(),
+            AnalyticShape::PropShadowField
+        );
+        let content = AnalyticContent {
+            semantic: AnalyticSemantic::PropShadows,
+            shape: AnalyticShape::PropShadowField,
+            paint: AnalyticPaint::PropShadowMultiply { color_srgb8: [17, 23, 31] },
+        };
+        let frame = AnalyticFrame {
+            semantic: AnalyticSemantic::PropShadows,
+            shape: AnalyticShape::PropShadowField,
+            rect_points: [0.0, 0.0, 360.0, 360.0],
+            geometry: AnalyticGeometry::PropShadowField,
+        };
+        assert_eq!(content.semantic.shape(), content.shape);
+        assert_eq!(frame.semantic.shape(), frame.shape);
+        assert!(matches!(
+            content.paint,
+            AnalyticPaint::PropShadowMultiply { .. }
+        ));
+        assert!(matches!(frame.geometry, AnalyticGeometry::PropShadowField));
+
+        let mut occupied = [false; MAX_ANALYTIC_PARAMS];
+        for semantic in AnalyticSemantic::ALL {
+            let index = usize::from(semantic.id().0);
+            assert!(index < MAX_ANALYTIC_PARAMS, "{semantic:?}");
+            assert!(!occupied[index], "duplicate analytic id {index}");
+            occupied[index] = true;
+        }
+    }
+
+    #[test]
+    fn prop_shadow_draw_is_one_multiply_analytic_before_behind_props() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            zone: super::super::PropZoneSnapshot::FloorLeft,
+            authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            presentation_motion: super::super::PropPresentationMotion::Static,
+        }];
+        snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            kind: super::super::PropAnimationKindSnapshot::Static,
+            sprite_phase: None,
+            twinkle_active: None,
+            motion_phase: None,
+            chest_lid_open: None,
+            bloom_active: None,
+        }];
+        snapshot.frame.prop_instances = vec![super::super::PropFrameSnapshot {
+            footprint_points: [6.0, 12.0],
+            contact_shadow_strength: 0.24,
+            ..prop_frame(0, [48.0, 300.0], [0.0; 2])
+        }];
+        let built = build_scene_generation(&snapshot, generation_key(49)).unwrap();
+        let primitive = |binding| {
+            built
+                .template
+                .primitives
+                .iter()
+                .find(|primitive| primitive.binding == binding)
+                .unwrap()
+        };
+        let room = primitive(PrimitiveBinding::Analytic(
+            AnalyticSemantic::RoomBackground.id(),
+        ));
+        let floor = primitive(PrimitiveBinding::Analytic(
+            AnalyticSemantic::FloorProjection.id(),
+        ));
+        let shadows = primitive(PrimitiveBinding::Analytic(
+            AnalyticSemantic::PropShadows.id(),
+        ));
+        let behind_prop = primitive(PrimitiveBinding::Instances(
+            InstanceGroupBinding::PropGlyphs(0),
+        ));
+        let material = built
+            .template
+            .materials
+            .iter()
+            .find(|material| material.id == shadows.material)
+            .unwrap();
+
+        assert!(room.authored_order < shadows.authored_order);
+        assert!(floor.authored_order < shadows.authored_order);
+        assert!(shadows.authored_order < behind_prop.authored_order);
+        assert_eq!(material.kind, MaterialKind::MultiplyShadow);
+        assert_eq!(shadows.blend, WorldBlend::Multiply);
+        assert_eq!(shadows.depth, DepthBehavior::WorldReadOnly);
+        assert_eq!(shadows.space, PrimitiveSpace::World);
+        assert_eq!(
+            built
+                .template
+                .primitives
+                .iter()
+                .filter(|primitive| {
+                    primitive.binding
+                        == PrimitiveBinding::Analytic(AnalyticSemantic::PropShadows.id())
+                })
+                .count(),
+            1
         );
     }
 
