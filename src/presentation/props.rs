@@ -450,6 +450,29 @@ pub(crate) fn presentation_prop_max_footprint(
     footprint
 }
 
+pub(crate) fn presentation_prop_footprint(
+    catalog_id: &str,
+    state: PresentationPropVisualState,
+) -> Option<PresentationPropFootprint> {
+    let sprite = presentation_prop_sprite(catalog_id, state)?;
+    let mut cells = sprite.into_iter();
+    let first = cells.next()?;
+    Some(cells.fold(
+        PresentationPropFootprint {
+            min_dx: first.dx,
+            max_dx: first.dx,
+            min_dy: first.dy,
+            max_dy: first.dy,
+        },
+        |footprint, cell| PresentationPropFootprint {
+            min_dx: footprint.min_dx.min(cell.dx),
+            max_dx: footprint.max_dx.max(cell.dx),
+            min_dy: footprint.min_dy.min(cell.dy),
+            max_dy: footprint.max_dy.max(cell.dy),
+        },
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresentationPropPlacement {
     pub prop_id: String,
@@ -622,6 +645,10 @@ mod tests {
                 assert!(states.iter().any(|state| state.species == species));
             }
             for state in states {
+                let active_footprint = presentation_prop_footprint(spec.id, state)
+                    .unwrap_or_else(|| panic!("{} must have an active footprint", spec.id));
+                assert_eq!(active_footprint.min_dx, 0, "{} state {state:?}", spec.id);
+                assert_eq!(active_footprint.min_dy, 0, "{} state {state:?}", spec.id);
                 let sprite = presentation_prop_sprite(spec.id, state)
                     .unwrap_or_else(|| panic!("{} must have a canonical sprite", spec.id));
                 assert!(

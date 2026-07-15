@@ -2715,7 +2715,7 @@ mod tests {
         let resolved = resolve_attachment_world(&built.template, &built.frame, attachment).unwrap();
         assert_point_close(
             resolved.transform_point3([0.0; 3]),
-            [180.0, 81.25, -1.6, 1.0],
+            [180.0, 69.25, -1.6, 1.0],
         );
 
         let initial = std::sync::Arc::new(snapshot);
@@ -2741,7 +2741,7 @@ mod tests {
         let resolved = resolve_attachment_world(&built.template, &built.frame, attachment).unwrap();
         assert_point_close(
             resolved.transform_point3([0.0; 3]),
-            [185.0, 81.25, -1.6, 1.0],
+            [185.0, 69.25, -1.6, 1.0],
         );
     }
 

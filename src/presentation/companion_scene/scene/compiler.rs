@@ -716,7 +716,11 @@ fn project_prop_frame_delta(
             visible: source.visible,
             origin_points: [
                 source.origin_points[0],
-                snapshot.topology.layout.height_points - source.origin_points[1],
+                prop_origin_y_up(
+                    snapshot.topology.layout.height_points,
+                    snapshot.topology.glyph_grid.cell_extent_points[1],
+                    source.origin_points[1],
+                ),
             ],
             motion_offset_points: source.motion_offset_points,
             opacity: source.opacity,
@@ -724,6 +728,10 @@ fn project_prop_frame_delta(
             contact_shadow_strength: source.contact_shadow_strength,
         });
     }
+}
+
+fn prop_origin_y_up(height_points: f32, cell_height_points: f32, top_y_points: f32) -> f32 {
+    height_points - top_y_points - cell_height_points
 }
 
 #[allow(dead_code)]
@@ -2402,7 +2410,11 @@ fn build_frame(
         let slot = usize::from(source.slot);
         let origin = [
             source.origin_points[0],
-            layout.height_points - source.origin_points[1],
+            prop_origin_y_up(
+                layout.height_points,
+                snapshot.topology.glyph_grid.cell_extent_points[1],
+                source.origin_points[1],
+            ),
         ];
         frame.prop_slots[slot] = PropFrameSlot {
             slot: source.slot,
@@ -2565,5 +2577,11 @@ mod tests {
             prop_glyphs("unknown_stored_prop", Species::Fuzz, None, None, None, None),
             Err(SceneGenerationError::UnknownAuthoredIdentity)
         );
+    }
+
+    #[test]
+    fn prop_cell_top_left_converts_to_retained_cell_bottom_left() {
+        assert_eq!(prop_origin_y_up(360.0, 20.0, 320.0), 20.0);
+        assert_eq!(prop_origin_y_up(360.0, 20.0, 300.0), 40.0);
     }
 }

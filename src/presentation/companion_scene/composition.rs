@@ -82,10 +82,13 @@ pub(crate) fn resolve_companion_composition(
         rows,
     ];
     let gauge_inner_radius_cells = gauge_inner_radii(input);
+    let aperture_radius_cells = [
+        f32::from(aperture_columns) / 2.0,
+        f32::from(input.rows) / 2.0,
+    ];
     let mut accepted_bounds = Vec::<[i16; 4]>::new();
     let mut prop_placements = Vec::with_capacity(input.props.len());
     let mut tank_foreground_reserved_regions = Vec::new();
-    let grounded_baseline_row = grounded_baseline_row(input.rows);
 
     for prop in input.props {
         let Some(footprint) =
@@ -105,18 +108,9 @@ pub(crate) fn resolve_companion_composition(
             i16::try_from(footprint_cells[1]).unwrap_or(i16::MAX),
         ];
         let grounded = is_floor_zone(prop.zone);
-        let candidate_rows = if grounded {
-            grounded_baseline_row.saturating_add(1).min(input.rows)
-        } else {
-            available_rows
-        };
+        let candidate_rows = if grounded { input.rows } else { available_rows };
         let candidate_bottom_reserve = if grounded {
-            [
-                0,
-                i16::try_from(grounded_baseline_row).unwrap_or(i16::MAX),
-                columns,
-                rows,
-            ]
+            [0, rows.saturating_sub(1), columns, rows]
         } else {
             bottom_reserve_cells
         };
@@ -161,7 +155,11 @@ pub(crate) fn resolve_companion_composition(
                     bounds,
                     columns,
                     rows,
-                    gauge_inner_radius_cells,
+                    if grounded {
+                        aperture_radius_cells
+                    } else {
+                        gauge_inner_radius_cells
+                    },
                     candidate_hud_reserve,
                     candidate_bottom_reserve,
                     &accepted_bounds,
@@ -206,13 +204,6 @@ pub(crate) fn resolve_companion_composition(
     }
 }
 
-fn grounded_baseline_row(rows: u16) -> u16 {
-    if rows == 0 {
-        return 0;
-    }
-    (f32::from(rows) * 0.76).ceil().clamp(1.0, f32::from(rows)) as u16
-}
-
 /// Columns occupied by the centered circular aperture. Landscape windows add
 /// grid columns outside that aperture; prop zones and the HUD stay aperture-local.
 fn horizontal_aperture_columns(input: CompanionCompositionInput<'_>) -> u16 {
@@ -245,23 +236,28 @@ fn hidden_placement(
 }
 
 fn hud_reserve(columns: u16, rows: u16) -> [i16; 4] {
-    centered_hud_reserve(columns, rows, 0.58)
+    centered_hud_reserve(columns, rows, 0.58, 0.90)
 }
 
 fn floor_hud_reserve(columns: u16, rows: u16) -> [i16; 4] {
-    // Grounded props share only the HUD's lower/subline band; the upper metric
-    // lines retain the wider reserve used by non-floor props and tank routing.
-    centered_hud_reserve(columns, rows, 0.42)
+    // Grounded props live below the HUD in the gauge's open bottom gap. Keep
+    // only the actual text band reserved so the substrate remains usable.
+    centered_hud_reserve(columns, rows, 0.38, 0.78)
 }
 
-fn centered_hud_reserve(columns: u16, rows: u16, width_fraction: f32) -> [i16; 4] {
+fn centered_hud_reserve(
+    columns: u16,
+    rows: u16,
+    width_fraction: f32,
+    bottom_fraction: f32,
+) -> [i16; 4] {
     let width = f32::from(columns) * width_fraction;
     let center = f32::from(columns) / 2.0;
     [
         (center - width / 2.0).floor() as i16,
         (f32::from(rows) * 0.58).floor() as i16,
         (center + width / 2.0).ceil() as i16,
-        (f32::from(rows) * 0.90).ceil() as i16,
+        (f32::from(rows) * bottom_fraction).ceil() as i16,
     ]
 }
 
@@ -575,16 +571,15 @@ mod tests {
         let mut expected_floor_hud = floor_hud_reserve(36, 18);
         expected_floor_hud[0] += 14;
         expected_floor_hud[2] += 14;
-        assert_eq!(expected_floor_hud, [24, 10, 40, 17]);
+        assert_eq!(expected_floor_hud, [25, 10, 39, 15]);
         assert_eq!(composition.prop_placements.len(), 1);
         let placement = composition.prop_placements[0];
         assert!(placement.visible);
-        assert_eq!(placement.anchor_cell, [23, 13]);
-        assert_eq!(placement.bounds_cells, [23, 13, 24, 14]);
+        assert_eq!(placement.bounds_cells[3], 17);
     }
 
     #[test]
-    fn grounded_props_meet_bed_horizon_inside_floor_hud_and_gauge_clearance() {
+    fn grounded_props_contact_the_tank_floor_without_changing_tank_reserves() {
         for catalog_id in [
             crate::game::habitat::TOKEN_PEBBLE_25K,
             crate::game::habitat::TOKEN_MOSS_TUFT_250K,
@@ -622,7 +617,7 @@ mod tests {
 
             let placement = composition.prop_placements[0];
             assert!(placement.visible, "{catalog_id}");
-            assert_eq!(placement.bounds_cells[3], 14, "{catalog_id}");
+            assert_eq!(placement.bounds_cells[3], 17, "{catalog_id}");
             assert!(
                 !intersects(placement.bounds_cells, floor_hud_reserve(36, 18)),
                 "{catalog_id}",
@@ -630,10 +625,8 @@ mod tests {
             let center = [18.0, 9.0];
             for col in [placement.bounds_cells[0], placement.bounds_cells[2] - 1] {
                 for row in [placement.bounds_cells[1], placement.bounds_cells[3] - 1] {
-                    let dx = (f32::from(col) + 0.5 - center[0])
-                        / composition.gauge_inner_radius_cells[0];
-                    let dy = (f32::from(row) + 0.5 - center[1])
-                        / composition.gauge_inner_radius_cells[1];
+                    let dx = (f32::from(col) + 0.5 - center[0]) / 18.0;
+                    let dy = (f32::from(row) + 0.5 - center[1]) / 9.0;
                     assert!(dx * dx + dy * dy <= 1.0, "{catalog_id}");
                 }
             }
@@ -738,13 +731,23 @@ mod tests {
                     )
                 );
                 let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
+                let safe_radii = if placement.grounded {
+                    let aperture_columns = if width_points > height_points {
+                        36.0
+                    } else {
+                        44.0
+                    };
+                    [aperture_columns / 2.0, f32::from(ROWS) / 2.0]
+                } else {
+                    expected_radii
+                };
                 for col in [f32::from(min_col) + 0.5, f32::from(max_col) - 0.5] {
                     for row in [f32::from(min_row) + 0.5, f32::from(max_row) - 0.5] {
-                        let dx = (col - center[0]) / expected_radii[0];
-                        let dy = (row - center[1]) / expected_radii[1];
+                        let dx = (col - center[0]) / safe_radii[0];
+                        let dy = (row - center[1]) / safe_radii[1];
                         assert!(
                             dx * dx + dy * dy <= 1.0 + f32::EPSILON,
-                            "{width_points}x{height_points} slot {} escaped the gauge-safe aperture",
+                            "{width_points}x{height_points} slot {} escaped its safe aperture",
                             placement.slot
                         );
                     }
@@ -770,9 +773,9 @@ mod tests {
             let composition = resolve_for(&props, width_points, height_points);
             let (expected_hud, expected_floor_hud, expected_hud_route) =
                 if width_points > height_points {
-                    ([11, 10, 32, 17], [14, 10, 29, 17], [11, 10, 21, 7])
+                    ([11, 10, 32, 17], [15, 10, 29, 15], [11, 10, 21, 7])
                 } else {
-                    ([9, 10, 35, 17], [12, 10, 32, 17], [9, 10, 26, 7])
+                    ([9, 10, 35, 17], [13, 10, 31, 15], [9, 10, 26, 7])
                 };
             let expected_bottom = [0, 13, 44, 18];
             assert_eq!(composition.hud_reserve_cells, expected_hud);
@@ -802,10 +805,7 @@ mod tests {
             {
                 if placement.grounded {
                     assert!(!intersects(placement.bounds_cells, expected_floor_hud));
-                    assert_eq!(
-                        placement.bounds_cells[3],
-                        grounded_baseline_row(ROWS) as i16
-                    );
+                    assert_eq!(placement.bounds_cells[3], ROWS as i16 - 1);
                 } else {
                     assert!(!intersects(placement.bounds_cells, expected_hud));
                     assert!(!intersects(placement.bounds_cells, expected_bottom));

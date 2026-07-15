@@ -8718,6 +8718,7 @@ mod tests {
             .expect("prop shadow shader body is bounded");
         assert!(prop_shadow.contains("slot < PROP_FRAME_GPU_COUNT"));
         assert!(prop_shadow.contains("frame_index < FRAME_GPU_VALUE_COUNT"));
+        assert!(prop_shadow.contains("footprint.y - cell_extent.y"));
         assert!(!source.contains("123u"));
     }
 
@@ -9637,10 +9638,10 @@ mod tests {
         };
         let hud_reserve = point_rect(composition.hud_reserve_cells);
         let floor_hud_reserve = point_rect([
-            (f32::from(grid.columns) * 0.29).floor() as i16,
+            (f32::from(grid.columns) * 0.31).floor() as i16,
             (f32::from(grid.rows) * 0.58).floor() as i16,
-            (f32::from(grid.columns) * 0.71).ceil() as i16,
-            (f32::from(grid.rows) * 0.90).ceil() as i16,
+            (f32::from(grid.columns) * 0.69).ceil() as i16,
+            (f32::from(grid.rows) * 0.78).ceil() as i16,
         ]);
         let bottom_reserve = point_rect([
             0,
@@ -9685,13 +9686,33 @@ mod tests {
                     "prop slot {slot} placement intersects the bottom reserve: {placement_roi:?}"
                 );
             }
-            for x in [roi[0], roi[0] + roi[2]] {
-                for y in [roi[1], roi[1] + roi[3]] {
-                    let dx = (x - gauge_center[0]) / gauge_inner_radius;
-                    let dy = (y - gauge_center[1]) / gauge_inner_radius;
+            let (safe_radius, safe_x, safe_y) = if placement.grounded {
+                let bounds = placement.bounds_cells;
+                (
+                    layout.width_points.min(layout.height_points) / 2.0,
+                    [
+                        (f32::from(bounds[0]) + 0.5) * grid.cell_extent_points[0],
+                        (f32::from(bounds[2]) - 0.5) * grid.cell_extent_points[0],
+                    ],
+                    [
+                        (f32::from(bounds[1]) + 0.5) * grid.cell_extent_points[1],
+                        (f32::from(bounds[3]) - 0.5) * grid.cell_extent_points[1],
+                    ],
+                )
+            } else {
+                (
+                    gauge_inner_radius,
+                    [roi[0], roi[0] + roi[2]],
+                    [roi[1], roi[1] + roi[3]],
+                )
+            };
+            for x in safe_x {
+                for y in safe_y {
+                    let dx = (x - gauge_center[0]) / safe_radius;
+                    let dy = (y - gauge_center[1]) / safe_radius;
                     assert!(
                         dx * dx + dy * dy <= 1.0,
-                        "prop slot {slot} projected ROI escaped the gauge-safe ellipse: {roi:?}"
+                        "prop slot {slot} projected ROI escaped its safe ellipse: {roi:?}"
                     );
                 }
             }
@@ -10202,7 +10223,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn prop_shadow_field_darkens_bed_without_tinting_glyphs() {
+    fn prop_shadow_field_darkens_bed_beneath_the_solid_glyph_core() {
         use crate::pet::generation::Species;
         use crate::presentation::companion_scene::{
             AppliedRevisions, DeviceEpoch, FrameRevision, LayoutGeneration, ResourceGeneration,
@@ -10319,7 +10340,8 @@ mod tests {
             frame.origin_points[0]
                 + frame.motion_offset_points[0]
                 + frame.footprint_points[0] * 0.5,
-            frame.origin_points[1] + frame.motion_offset_points[1] - frame.footprint_points[1]
+            frame.origin_points[1] + frame.motion_offset_points[1]
+                - (frame.footprint_points[1] - cell[1]).max(0.0)
                 + radius[1],
         ];
         let shadow_roi = [
@@ -10375,24 +10397,26 @@ mod tests {
         );
 
         let shadowed_glyph_pixels = rgba_roi(&shadowed, prop_roi, 1.0);
-        let solid_glyph_indices = glyph_pixels
+        let strongest_glyph_pixel = glyph_pixels
             .chunks_exact(4)
             .zip(without_glyph_pixels.chunks_exact(4))
             .enumerate()
-            .filter_map(|(index, (glyph, room))| {
+            .map(|(index, (glyph, room))| {
                 let contrast = glyph[..3]
                     .iter()
                     .zip(&room[..3])
                     .map(|(glyph, room)| u16::from(glyph.abs_diff(*room)))
                     .sum::<u16>();
-                (contrast >= 48).then_some(index)
+                (index, contrast)
             })
-            .collect::<Vec<_>>();
-        assert!(!solid_glyph_indices.is_empty());
-        assert!(solid_glyph_indices.into_iter().all(|index| {
-            glyph_pixels[index * 4..index * 4 + 4]
-                == shadowed_glyph_pixels[index * 4..index * 4 + 4]
-        }));
+            .max_by_key(|(_, contrast)| *contrast)
+            .expect("glyph ROI has pixels");
+        assert!(strongest_glyph_pixel.1 >= 48);
+        let index = strongest_glyph_pixel.0;
+        assert_eq!(
+            glyph_pixels[index * 4..index * 4 + 4],
+            shadowed_glyph_pixels[index * 4..index * 4 + 4],
+        );
     }
 
     #[cfg(target_os = "macos")]

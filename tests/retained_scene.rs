@@ -509,10 +509,10 @@ fn retained_full_cast_composition_matrix() {
             (f32::from(ROWS) * 0.90).ceil(),
         ];
         let floor_hud = [
-            aperture_start + (aperture_columns * 0.29).floor(),
+            aperture_start + (aperture_columns * 0.31).floor(),
             (f32::from(ROWS) * 0.58).floor(),
-            aperture_start + (aperture_columns * 0.71).ceil(),
-            (f32::from(ROWS) * 0.90).ceil(),
+            aperture_start + (aperture_columns * 0.69).ceil(),
+            (f32::from(ROWS) * 0.78).ceil(),
         ];
         let bottom = [
             0.0,
@@ -560,13 +560,18 @@ fn retained_full_cast_composition_matrix() {
                         | PropZoneSnapshot::FloorMid
                         | PropZoneSnapshot::FloorRight
                 );
+                let prop_safe_radii = if grounded {
+                    [aperture_columns / 2.0, f32::from(ROWS) / 2.0]
+                } else {
+                    safe_radii
+                };
                 for col in [bounds[0] + 0.5, bounds[2] - 0.5] {
                     for row in [bounds[1] + 0.5, bounds[3] - 0.5] {
-                        let dx = (col - center[0]) / safe_radii[0];
-                        let dy = (row - center[1]) / safe_radii[1];
+                        let dx = (col - center[0]) / prop_safe_radii[0];
+                        let dy = (row - center[1]) / prop_safe_radii[1];
                         assert!(
                             dx * dx + dy * dy <= 1.0 + f32::EPSILON,
-                            "{label} slot {} escaped the gauge-safe aperture",
+                            "{label} slot {} escaped its safe aperture",
                             frame.slot
                         );
                     }
@@ -578,7 +583,7 @@ fn retained_full_cast_composition_matrix() {
                 );
                 if grounded {
                     assert!(
-                        (bounds[3] - (f32::from(ROWS) * 0.76).ceil()).abs() < 0.0001,
+                        (bounds[3] - (f32::from(ROWS) - 1.0)).abs() < 0.0001,
                         "{label} slot {} lost its grounded baseline",
                         frame.slot
                     );

@@ -865,7 +865,7 @@ fn fs_prop_shadows(
                 );
                 let center = vec2<f32>(
                     origin.x + footprint.x * 0.5,
-                    origin.y - footprint.y + radii.y,
+                    origin.y - max(footprint.y - cell_extent.y, 0.0) + radii.y,
                 );
                 let distance = length((input.point_position - center) / radii);
                 let edge = max(fwidth(distance), 0.0001);

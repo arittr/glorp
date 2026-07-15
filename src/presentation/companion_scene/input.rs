@@ -263,6 +263,7 @@ impl CompanionSceneSnapshot {
             &prop_animation_states,
             PropFrameProjectionContext {
                 clock: input.clock,
+                species: vm.pet_render.generated_species,
                 asleep: vm.day_context.asleep,
                 options,
                 semantic_revision: super::SemanticRevision(1),
@@ -430,6 +431,7 @@ impl CompanionSceneSnapshot {
             &self.content.prop_animation_states,
             PropFrameProjectionContext {
                 clock,
+                species: self.topology.pet.species,
                 asleep: self.frame.asleep,
                 options,
                 semantic_revision: semantic_base,
@@ -837,6 +839,7 @@ fn tank_cell_depth(cell: &TankCellSnapshot) -> AuthoredDepthSnapshot {
 #[derive(Clone, Copy)]
 struct PropFrameProjectionContext<'a> {
     clock: super::CompanionProjectionClock,
+    species: crate::pet::generation::Species,
     asleep: bool,
     options: CompanionPresentationOptions,
     semantic_revision: super::SemanticRevision,
@@ -852,6 +855,7 @@ fn project_prop_frame_states(
 ) -> Vec<PropFrameSnapshot> {
     let PropFrameProjectionContext {
         clock,
+        species,
         asleep,
         options,
         semantic_revision,
@@ -868,22 +872,44 @@ fn project_prop_frame_states(
                 .iter()
                 .find(|placement| placement.slot == topology.stable_order);
             let visible = placement.is_some_and(|placement| placement.visible);
+            let active_footprint = crate::presentation::props::presentation_prop_footprint(
+                topology.catalog_id,
+                crate::presentation::props::PresentationPropVisualState {
+                    species,
+                    sprite_phase: semantic.sprite_phase,
+                    twinkle_active: semantic.twinkle_active,
+                    chest_lid_open: semantic.chest_lid_open,
+                    bloom_active: semantic.bloom_active,
+                },
+            );
+            let active_footprint_cells = active_footprint.map(|footprint| {
+                [
+                    u16::try_from(i16::from(footprint.max_dx) - i16::from(footprint.min_dx) + 1)
+                        .unwrap_or(0),
+                    u16::try_from(i16::from(footprint.max_dy) - i16::from(footprint.min_dy) + 1)
+                        .unwrap_or(0),
+                ]
+            });
             let origin_points = placement.map_or([0.0; 2], |placement| {
+                let vertical_inset_cells = active_footprint_cells
+                    .map(|active| placement.footprint_cells[1].saturating_sub(active[1]))
+                    .unwrap_or(0);
                 [
                     parallax.glyph_grid.y_up_origin_points[0]
                         + f32::from(placement.anchor_cell[0])
                             * parallax.glyph_grid.cell_extent_points[0],
                     parallax.glyph_grid.y_up_origin_points[1]
-                        + f32::from(placement.anchor_cell[1])
-                            * parallax.glyph_grid.cell_extent_points[1],
+                        + f32::from(
+                            placement.anchor_cell[1]
+                                .saturating_add(i16::try_from(vertical_inset_cells).unwrap_or(0)),
+                        ) * parallax.glyph_grid.cell_extent_points[1],
                 ]
             });
             let footprint_points = placement.map_or([0.0; 2], |placement| {
+                let footprint_cells = active_footprint_cells.unwrap_or(placement.footprint_cells);
                 [
-                    f32::from(placement.footprint_cells[0])
-                        * parallax.glyph_grid.cell_extent_points[0],
-                    f32::from(placement.footprint_cells[1])
-                        * parallax.glyph_grid.cell_extent_points[1],
+                    f32::from(footprint_cells[0]) * parallax.glyph_grid.cell_extent_points[0],
+                    f32::from(footprint_cells[1]) * parallax.glyph_grid.cell_extent_points[1],
                 ]
             });
             let depth_parallax = bounded_depth_parallax_points(
@@ -2579,6 +2605,7 @@ mod tests {
                 &semantics,
                 super::PropFrameProjectionContext {
                     clock: CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 0),
+                    species: Species::Fuzz,
                     asleep: false,
                     options: super::CompanionPresentationOptions { reduce_motion },
                     semantic_revision: SemanticRevision(1),
@@ -2676,6 +2703,7 @@ mod tests {
             &semantics,
             super::PropFrameProjectionContext {
                 clock: CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 450),
+                species: Species::Fuzz,
                 asleep: false,
                 options: super::CompanionPresentationOptions::STANDARD,
                 semantic_revision: SemanticRevision(2),
@@ -2784,6 +2812,7 @@ mod tests {
                 &semantics,
                 super::PropFrameProjectionContext {
                     clock: CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 0),
+                    species: Species::Fuzz,
                     asleep: false,
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(1),
@@ -2798,6 +2827,73 @@ mod tests {
                 "zone={zone:?}, depth={authored_depth:?}, visible={visible}",
             );
         }
+    }
+
+    #[test]
+    fn grounded_prop_active_sprite_stays_bottom_aligned_inside_frozen_footprint() {
+        use crate::presentation::companion_scene::{
+            AuthoredDepthSnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
+            PropPresentationMotion, PropTopologySnapshot, PropZoneSnapshot, SemanticRevision,
+        };
+
+        let topology = [PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+            stable_order: 0,
+            zone: PropZoneSnapshot::FloorMid,
+            authored_depth: AuthoredDepthSnapshot::Foreground,
+            presentation_motion: PropPresentationMotion::Static,
+        }];
+        let composition = super::CompanionComposition {
+            prop_placements: vec![super::super::composition::CompanionPropPlacement {
+                slot: 0,
+                visible: true,
+                anchor_cell: [8, 15],
+                bounds_cells: [8, 15, 11, 17],
+                footprint_cells: [3, 2],
+                grounded: true,
+            }],
+            hud_reserve_cells: [0; 4],
+            gauge_inner_radius_cells: [0.0; 2],
+            tank_reserved_regions: Vec::new(),
+            tank_foreground_reserved_regions: Vec::new(),
+        };
+        let project = |bloom_active| {
+            let semantics = [PropAnimationSnapshot {
+                catalog_id: crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+                stable_order: 0,
+                kind: PropAnimationKindSnapshot::Animated,
+                sprite_phase: Some(0),
+                twinkle_active: None,
+                motion_phase: None,
+                chest_lid_open: None,
+                bloom_active: Some(bloom_active),
+            }];
+            super::project_prop_frame_states(
+                &topology,
+                &semantics,
+                super::PropFrameProjectionContext {
+                    clock: CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 0),
+                    species: Species::Fuzz,
+                    asleep: false,
+                    options: super::CompanionPresentationOptions::STANDARD,
+                    semantic_revision: SemanticRevision(1),
+                    previous: None,
+                    composition: &composition,
+                    parallax: test_depth_parallax_context(false),
+                },
+            )[0]
+        };
+
+        let young = project(false);
+        let bloomed = project(true);
+        assert_eq!(young.origin_points[1], 320.0);
+        assert_eq!(young.footprint_points, [3.0 * (360.0 / 44.0), 20.0]);
+        assert_eq!(bloomed.origin_points[1], 300.0);
+        assert_eq!(bloomed.footprint_points, [3.0 * (360.0 / 44.0), 40.0]);
+        assert_eq!(
+            young.origin_points[1] + young.footprint_points[1],
+            bloomed.origin_points[1] + bloomed.footprint_points[1],
+        );
     }
 
     #[test]
@@ -2959,6 +3055,7 @@ mod tests {
                 std::slice::from_ref(&initial),
                 super::PropFrameProjectionContext {
                     clock,
+                    species: Species::Fuzz,
                     asleep: false,
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
@@ -2972,6 +3069,7 @@ mod tests {
                 std::slice::from_ref(&initial),
                 super::PropFrameProjectionContext {
                     clock,
+                    species: Species::Fuzz,
                     asleep: false,
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
@@ -2990,6 +3088,7 @@ mod tests {
                 std::slice::from_ref(&initial),
                 super::PropFrameProjectionContext {
                     clock,
+                    species: Species::Fuzz,
                     asleep: false,
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
@@ -3005,6 +3104,7 @@ mod tests {
                 std::slice::from_ref(&initial),
                 super::PropFrameProjectionContext {
                     clock: CompanionProjectionClock::new(at_zero, clock.elapsed_ms + 777),
+                    species: Species::Fuzz,
                     asleep: false,
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
@@ -3034,6 +3134,7 @@ mod tests {
                 std::slice::from_ref(&motion),
                 super::PropFrameProjectionContext {
                     clock: CompanionProjectionClock::new(at_motion, clock.elapsed_ms + 2_000),
+                    species: Species::Fuzz,
                     asleep: false,
                     options: super::CompanionPresentationOptions { reduce_motion: true },
                     semantic_revision: SemanticRevision(8),

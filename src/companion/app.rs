@@ -4437,9 +4437,10 @@ mod tests {
         let grounded_prop =
             crate::game::habitat::catalog_prop_by_str(crate::game::habitat::TOKEN_MOSS_TUFT_250K)
                 .expect("grounded prop catalog entry");
+        let projection_now = time::macros::datetime!(2026-07-15 17:35 UTC);
         vm.habitat.earned_props = vec![crate::tui::view_model::EarnedHabitatPropView {
             id: crate::storage::state::HabitatPropId::new(grounded_prop.id),
-            earned_at: time::OffsetDateTime::UNIX_EPOCH,
+            earned_at: projection_now,
             kind: grounded_prop.kind,
             display_priority: grounded_prop.display_priority,
             source: crate::storage::state::HabitatPropSource::LifetimeTokens {
@@ -4464,7 +4465,7 @@ mod tests {
             let snapshot = CompanionSceneSnapshot::project_with_input_and_options(
                 &vm,
                 CompanionSceneProjectionInput::round(
-                    CompanionProjectionClock::new(time::macros::datetime!(2026-07-15 17:35 UTC), 0),
+                    CompanionProjectionClock::new(projection_now, 0),
                     CompanionLogicalLayout::round(width as f32, height as f32),
                     metrics.grid_cols,
                     metrics.grid_rows,
@@ -4514,8 +4515,8 @@ mod tests {
         let square_baseline = normalized_grounded_baseline(&square, 360.0);
         let landscape_baseline = normalized_grounded_baseline(&landscape, 1692.0);
         assert!(
-            (square_baseline - 14.0 / 18.0).abs() <= 0.001,
-            "grounded prop should meet the bed horizon: square={square_baseline:.3}",
+            (square_baseline - 17.0 / 18.0).abs() <= 0.001,
+            "grounded prop should contact the tank floor: square={square_baseline:.3}",
         );
         assert!(
             (landscape_baseline - square_baseline).abs() <= 0.03,
