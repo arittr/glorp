@@ -85,16 +85,17 @@ fn stable_floor_lane_variant(catalog_id: &str) -> bool {
         .is_multiple_of(2)
 }
 
-fn floor_lane_order(prop: &PropTopologySnapshot) -> [FloorDepthLane; 3] {
-    use FloorDepthLane::{Middle, Near, Rear};
-    let alternate = stable_floor_lane_variant(prop.catalog_id);
-    match (prop.authored_depth, alternate) {
-        (AuthoredDepthSnapshot::Background, false) => [Rear, Middle, Near],
-        (AuthoredDepthSnapshot::Background, true) => [Middle, Rear, Near],
-        (AuthoredDepthSnapshot::BehindPet, false) => [Middle, Rear, Near],
-        (AuthoredDepthSnapshot::BehindPet, true) => [Rear, Middle, Near],
-        (AuthoredDepthSnapshot::Foreground, false) => [Near, Middle, Rear],
-        (AuthoredDepthSnapshot::Foreground, true) => [Middle, Near, Rear],
+fn floor_lane(prop: &PropTopologySnapshot) -> FloorDepthLane {
+    match prop.authored_depth {
+        AuthoredDepthSnapshot::Background => FloorDepthLane::Rear,
+        AuthoredDepthSnapshot::BehindPet => {
+            if stable_floor_lane_variant(prop.catalog_id) {
+                FloorDepthLane::Rear
+            } else {
+                FloorDepthLane::Middle
+            }
+        }
+        AuthoredDepthSnapshot::Foreground => FloorDepthLane::Near,
     }
 }
 
@@ -309,19 +310,19 @@ fn grounded_side_lane_anchors(
 ) -> Vec<CandidateAnchor> {
     let rows = i16::try_from(rows).unwrap_or(i16::MAX);
     let grounded_y = CandidateAxis::End { extent: rows, offset: -1 };
-    let left = CandidateAnchor {
-        x: CandidateAxis::End { extent: floor_hud_columns[0], offset: 0 },
+    let left = [0, -2, -4].map(|offset| CandidateAnchor {
+        x: CandidateAxis::End { extent: floor_hud_columns[0], offset },
         y: grounded_y,
-    };
-    let right = CandidateAnchor {
-        x: CandidateAxis::Start(floor_hud_columns[1]),
+    });
+    let right = [0, 2, 4].map(|offset| CandidateAnchor {
+        x: CandidateAxis::Start(floor_hud_columns[1].saturating_add(offset)),
         y: grounded_y,
-    };
+    });
 
     match zone {
-        PropZoneSnapshot::FloorLeft => vec![left],
-        PropZoneSnapshot::FloorMid => vec![left, right],
-        PropZoneSnapshot::FloorRight => vec![right],
+        PropZoneSnapshot::FloorLeft => left.to_vec(),
+        PropZoneSnapshot::FloorMid => vec![left[0], right[0], left[1], right[1], left[2], right[2]],
+        PropZoneSnapshot::FloorRight => right.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -336,19 +337,15 @@ fn grounded_candidate_anchors(
     horizontal.extend(candidate_anchors(prop.zone, columns, rows));
     let rows = i16::try_from(rows).unwrap_or(i16::MAX);
 
-    floor_lane_order(prop)
+    let lane = floor_lane(prop);
+    horizontal
         .into_iter()
-        .flat_map(|lane| {
-            horizontal
-                .iter()
-                .copied()
-                .map(move |candidate| CandidateAnchor {
-                    x: candidate.x,
-                    y: CandidateAxis::End {
-                        extent: rows,
-                        offset: lane.bottom_offset(),
-                    },
-                })
+        .map(|candidate| CandidateAnchor {
+            x: candidate.x,
+            y: CandidateAxis::End {
+                extent: rows,
+                offset: lane.bottom_offset(),
+            },
         })
         .collect()
 }
@@ -686,14 +683,131 @@ mod tests {
     }
 
     #[test]
+    fn authored_floor_depth_owns_contact_across_catalog_variants() {
+        for (catalog_id, authored_depth, expected_contact) in [
+            (
+                crate::game::habitat::TOKEN_SPARK_500K,
+                AuthoredDepthSnapshot::Background,
+                15,
+            ),
+            (
+                crate::game::habitat::TOKEN_SHARD_1M,
+                AuthoredDepthSnapshot::Background,
+                15,
+            ),
+            (
+                crate::game::habitat::TOKEN_SPARK_500K,
+                AuthoredDepthSnapshot::Foreground,
+                17,
+            ),
+            (
+                crate::game::habitat::TOKEN_SHARD_1M,
+                AuthoredDepthSnapshot::Foreground,
+                17,
+            ),
+            (
+                crate::game::habitat::TOKEN_SPARK_500K,
+                AuthoredDepthSnapshot::BehindPet,
+                15,
+            ),
+            (
+                crate::game::habitat::TOKEN_SHARD_1M,
+                AuthoredDepthSnapshot::BehindPet,
+                16,
+            ),
+        ] {
+            let props = [prop_topology(
+                catalog_id,
+                0,
+                PropZoneSnapshot::FloorLeft,
+                authored_depth,
+            )];
+            let placement = resolve_for(&props, 360.0, 360.0).prop_placements[0];
+
+            assert!(placement.visible, "{catalog_id} {authored_depth:?}");
+            assert_eq!(
+                placement.bounds_cells[3], expected_contact,
+                "{catalog_id} {authored_depth:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_lane_competition_never_changes_an_accepted_contact() {
+        let fixtures = [
+            crate::game::habitat::TOKEN_PEBBLE_25K,
+            crate::game::habitat::TOKEN_SHELL_100K,
+            crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+            crate::game::habitat::TOKEN_SHARD_1M,
+            crate::game::habitat::TOKEN_ORBIT_5M,
+        ];
+        let arrangements = [
+            vec![0, 1, 2, 3],
+            vec![3, 2, 1, 0],
+            vec![0, 1, 3],
+            vec![0, 1, 2, 3, 4],
+        ];
+
+        for &(width_points, height_points) in SURFACES {
+            for arrangement in &arrangements {
+                let props = arrangement
+                    .iter()
+                    .copied()
+                    .map(|index| {
+                        prop_topology(
+                            fixtures[index],
+                            u8::try_from(index).unwrap(),
+                            PropZoneSnapshot::FloorLeft,
+                            AuthoredDepthSnapshot::BehindPet,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let composition = resolve_for(&props, width_points, height_points);
+
+                for (prop, placement) in props.iter().zip(&composition.prop_placements) {
+                    if placement.visible {
+                        assert_eq!(
+                            placement.bounds_cells[3], 16,
+                            "{width_points}x{height_points} {arrangement:?} {} changed lanes",
+                            prop.catalog_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn full_cast_grounded_props_do_not_collapse_to_one_floor_contact() {
         let props = full_prop_topology();
         let composition = resolve_for(&props, 360.0, 360.0);
-        let contacts = composition
-            .prop_placements
+        let visible_grounded = props
             .iter()
-            .filter(|placement| placement.visible && placement.grounded)
-            .map(|placement| placement.bounds_cells[3])
+            .zip(&composition.prop_placements)
+            .filter(|(_, placement)| placement.visible && placement.grounded)
+            .collect::<Vec<_>>();
+
+        assert!(
+            visible_grounded
+                .iter()
+                .any(|(prop, _)| { prop.authored_depth == AuthoredDepthSnapshot::BehindPet }),
+            "full cast hid every grounded BehindPet prop: {visible_grounded:?}"
+        );
+        for catalog_id in [
+            crate::game::habitat::TOKEN_REEDS_5M,
+            crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+        ] {
+            assert!(
+                visible_grounded
+                    .iter()
+                    .any(|(prop, _)| prop.catalog_id == catalog_id),
+                "full cast hid previously accepted {catalog_id}: {visible_grounded:?}"
+            );
+        }
+
+        let contacts = visible_grounded
+            .iter()
+            .map(|(_, placement)| placement.bounds_cells[3])
             .collect::<std::collections::BTreeSet<_>>();
 
         assert!(
@@ -703,6 +817,16 @@ mod tests {
         assert!(contacts
             .iter()
             .all(|contact| [15, 16, 17].contains(contact)));
+        for (index, (_, left)) in visible_grounded.iter().enumerate() {
+            for (_, right) in &visible_grounded[index + 1..] {
+                assert!(
+                    !intersects(expanded(left.bounds_cells), right.bounds_cells),
+                    "grounded slots {} and {} lost their gutter",
+                    left.slot,
+                    right.slot
+                );
+            }
+        }
     }
 
     #[test]

@@ -52,24 +52,31 @@ moving a prop toward the rear never makes it float. The active sprite remains
 bottom-aligned within its frozen maximum footprint, and its contact shadow is
 derived from the same projected origin and footprint.
 
-### Stable lane preference
+### Stable lane assignment
 
-Authored depth is a lane preference, not a replacement for draw ordering:
+Authored depth is authoritative for accepted floor contact, not a replacement for
+draw ordering:
 
-- `Background` prefers rear, then middle, then near;
-- `BehindPet` deterministically prefers rear or middle, then the other, then
-  near; and
-- `Foreground` prefers near, then middle, then rear.
+- `Background` is fixed to rear;
+- `BehindPet` is fixed to rear or middle by a catalog-ID-stable discriminator;
+  and
+- `Foreground` is fixed to near.
 
-When multiple props share a depth bucket, a catalog-ID-stable discriminator
-chooses their first preference. It must not use `stable_order`, current visible
-inventory length, animation phase, time, or viewport size, so earning or hiding
-another prop cannot move an existing prop between depth lanes.
+The discriminator applies only to `BehindPet`. It must not use `stable_order`,
+current visible inventory length, animation phase, time, or viewport size, so
+earning, hiding, or reordering another prop cannot move an existing prop between
+depth lanes.
 
-Within each lane, the existing zone-specific horizontal candidates and the
-current aperture, HUD, gauge, gutter, and collision checks remain authoritative.
-If a preferred lane is unavailable, the solver tries the remaining valid lanes
-before hiding the prop. It never stacks footprints.
+Within the assigned lane, grounded props first try a bounded set of horizontal
+contacts beside the floor HUD: left zones use offsets `0`, `-2`, and `-4` from
+the HUD's left edge, right zones use `0`, `+2`, and `+4` from its right edge,
+and middle zones interleave both sequences. The existing zone-specific
+horizontal candidates follow. The current aperture, HUD, gauge, gutter, and
+collision checks remain authoritative for every candidate. If every horizontal
+candidate in that lane is unavailable, the solver hides the prop. It never
+falls through to another depth lane or stacks footprints. This final-review
+correction resolves packing versus resize stability in favor of stable
+anchoring while keeping a grounded `BehindPet` prop available in the full cast.
 
 ### Existing Z and depth cues remain intact
 
@@ -85,7 +92,7 @@ placement still looks too flat.
 
 ## Resize And Animation Invariants
 
-- The same catalog prop keeps the same preferred lane across resize,
+- The same catalog prop keeps the same assigned lane across resize,
   fullscreen, display changes, animation phases, and semantic refreshes.
 - Resize may change horizontal acceptance because the circular aperture changes,
   but may not detach a prop from its authored surface.
@@ -102,15 +109,19 @@ Add focused composition tests before implementation to prove:
 
 1. a representative set of grounded props occupies more than one contact lane;
 2. every grounded footprint ends on one of the valid floor contact rows;
-3. authored foreground props prefer the near lane while behind/background props
-   prefer rear or middle lanes;
+3. authored background props remain rear, foreground props remain near, and only
+   behind-pet props use the rear/middle catalog discriminator;
 4. lane choice is catalog-stable across inventory ordering and supported surface
    sizes;
 5. floor sprites remain bottom-aligned through active animation footprints;
 6. ceiling, wall, and air fixtures retain their attachment-zone bounds;
-7. no prop overlaps the HUD, gauges, aperture, or another accepted footprint;
+7. same-lane competition hides a prop after horizontal exhaustion instead of
+   changing its accepted contact lane;
+8. the full cast keeps a grounded behind-pet prop visible alongside its existing
+   foreground props without losing the one-cell gutter;
+9. no prop overlaps the HUD, gauges, aperture, or another accepted footprint;
    and
-8. foreground tank reservations follow the final moved prop bounds.
+10. foreground tank reservations follow the final moved prop bounds.
 
 Then run the existing companion-scene, retained-scene, and Preview Lab prop
 checks. Human review should confirm that the floor reads as rear/middle/near

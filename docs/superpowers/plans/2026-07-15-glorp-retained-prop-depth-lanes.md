@@ -4,7 +4,7 @@
 
 **Goal:** Distribute grounded retained-renderer props across stable rear, middle, and near floor lanes while every prop remains attached to its authored floor, ceiling, wall, or air zone.
 
-**Architecture:** Extend the pure companion composition solver with deterministic floor-lane candidate ordering. Keep authored world Z and every retained GPU contract unchanged; lane placement is a logical-cell composition concern, and the existing frame projection automatically carries the accepted origin, footprint, contact shadow, and tank reservation forward.
+**Architecture:** Extend the pure companion composition solver with deterministic fixed floor-lane assignment. Keep authored world Z and every retained GPU contract unchanged; lane placement is a logical-cell composition concern, and the existing frame projection automatically carries the accepted origin, footprint, contact shadow, and tank reservation forward.
 
 **Tech Stack:** Rust, the existing `CompanionComposition` solver, Rust unit tests, retained-scene integration tests, and Preview Lab.
 
@@ -12,7 +12,8 @@
 
 - `PropZoneSnapshot` remains the physical attachment authority: floor props contact the substrate, ceiling props remain at the top, wall props remain on their side, and air props remain interior.
 - Canonical 18-row floor contacts use exclusive bottom bounds 15, 16, and 17 for rear, middle, and near lanes.
-- Lane preference is deterministic from catalog ID and authored depth; it does not depend on `stable_order`, visible inventory length, time, animation phase, or viewport size.
+- Authored depth fixes Background to rear and Foreground to near; only BehindPet uses catalog identity to choose rear or middle. Accepted depth does not depend on `stable_order`, visible inventory length, time, animation phase, or viewport size.
+- A grounded prop tries bounded floor-HUD-edge offsets (`0/-2/-4` on the left and `0/+2/+4` on the right, interleaved for the middle) followed by the existing generic horizontal candidates in its assigned lane, then hides. It never falls through to another lane. This final-review correction favors stable anchoring while preserving a grounded BehindPet prop in the full cast.
 - Existing aperture, HUD, gauge, gutter, collision, active-footprint bottom alignment, shadow, and foreground tank-reservation behavior remains authoritative.
 - Do not change `AuthoredDepthSnapshot`, scene-node Z, parent layers, depth-cue scale, parallax, opacity, saturation, renderer ABI, shaders, or non-retained renderers.
 - Do not create a compatibility path, physics solver, dynamic rebalancer, or per-frame repacking.
@@ -31,7 +32,7 @@
 
 **Interfaces:**
 - Consumes: `PropTopologySnapshot { catalog_id, stable_order, zone, authored_depth, .. }`, `CandidateAnchor`, `candidate_anchors`, and the existing composition exclusions.
-- Produces: private `FloorDepthLane`, `floor_lane_order(&PropTopologySnapshot) -> [FloorDepthLane; 3]`, `stable_floor_lane_variant(&str) -> bool`, and `grounded_candidate_anchors(&PropTopologySnapshot, u16, u16, [i16; 2]) -> Vec<CandidateAnchor>`.
+- Produces: private `FloorDepthLane`, `floor_lane(&PropTopologySnapshot) -> FloorDepthLane`, `stable_floor_lane_variant(&str) -> bool`, and `grounded_candidate_anchors(&PropTopologySnapshot, u16, u16, [i16; 2]) -> Vec<CandidateAnchor>`.
 - Preserves: `CompanionPropPlacement`, `PropFrameSnapshot`, scene frame slots, GPU buffers, renderer nodes, and every public or serialized contract.
 
 - [ ] **Step 1: Add the failing floor-lane behavior test**
@@ -207,7 +208,7 @@ fn non_floor_props_keep_their_authored_attachment_regions() {
 
 Run the non-floor test before production changes and confirm PASS; it is a baseline contract, not the TDD red test. Its literals come directly from the existing authored candidate boundaries and must not be derived with production helpers.
 
-- [ ] **Step 5: Implement deterministic floor-lane candidate ordering**
+- [ ] **Step 5: Implement deterministic fixed floor-lane assignment**
 
 Add the private lane type and deterministic catalog discriminator near `CandidateAnchor`:
 
@@ -244,21 +245,45 @@ fn stable_floor_lane_variant(catalog_id: &str) -> bool {
         .is_multiple_of(2)
 }
 
-fn floor_lane_order(prop: &PropTopologySnapshot) -> [FloorDepthLane; 3] {
-    use FloorDepthLane::{Middle, Near, Rear};
-    let alternate = stable_floor_lane_variant(prop.catalog_id);
-    match (prop.authored_depth, alternate) {
-        (AuthoredDepthSnapshot::Background, false) => [Rear, Middle, Near],
-        (AuthoredDepthSnapshot::Background, true) => [Middle, Rear, Near],
-        (AuthoredDepthSnapshot::BehindPet, false) => [Middle, Rear, Near],
-        (AuthoredDepthSnapshot::BehindPet, true) => [Rear, Middle, Near],
-        (AuthoredDepthSnapshot::Foreground, false) => [Near, Middle, Rear],
-        (AuthoredDepthSnapshot::Foreground, true) => [Middle, Near, Rear],
+fn floor_lane(prop: &PropTopologySnapshot) -> FloorDepthLane {
+    match prop.authored_depth {
+        AuthoredDepthSnapshot::Background => FloorDepthLane::Rear,
+        AuthoredDepthSnapshot::BehindPet => {
+            if stable_floor_lane_variant(prop.catalog_id) {
+                FloorDepthLane::Rear
+            } else {
+                FloorDepthLane::Middle
+            }
+        }
+        AuthoredDepthSnapshot::Foreground => FloorDepthLane::Near,
     }
 }
 ```
 
-Keep the existing horizontal candidate vocabulary, but replace each grounded candidate's Y axis for every preferred lane:
+Extend the grounded horizontal vocabulary deterministically beside the floor HUD: left zones try offsets `0`, `-2`, and `-4` from the left edge, right zones try `0`, `+2`, and `+4` from the right edge, and middle zones interleave both sequences. Keep the existing generic zone candidates after these, then replace every grounded candidate's Y axis with the one assigned lane. If those horizontal candidates are exhausted, the prop hides instead of changing depth:
+
+```rust
+let left = [0, -2, -4].map(|offset| CandidateAnchor {
+    x: CandidateAxis::End {
+        extent: floor_hud_columns[0],
+        offset,
+    },
+    y: grounded_y,
+});
+let right = [0, 2, 4].map(|offset| CandidateAnchor {
+    x: CandidateAxis::Start(floor_hud_columns[1].saturating_add(offset)),
+    y: grounded_y,
+});
+
+match zone {
+    PropZoneSnapshot::FloorLeft => left.to_vec(),
+    PropZoneSnapshot::FloorMid => vec![
+        left[0], right[0], left[1], right[1], left[2], right[2],
+    ],
+    PropZoneSnapshot::FloorRight => right.to_vec(),
+    _ => Vec::new(),
+}
+```
 
 ```rust
 fn grounded_candidate_anchors(
@@ -271,16 +296,15 @@ fn grounded_candidate_anchors(
     horizontal.extend(candidate_anchors(prop.zone, columns, rows));
     let rows = i16::try_from(rows).unwrap_or(i16::MAX);
 
-    floor_lane_order(prop)
+    let lane = floor_lane(prop);
+    horizontal
         .into_iter()
-        .flat_map(|lane| {
-            horizontal.iter().copied().map(move |candidate| CandidateAnchor {
-                x: candidate.x,
-                y: CandidateAxis::End {
-                    extent: rows,
-                    offset: lane.bottom_offset(),
-                },
-            })
+        .map(|candidate| CandidateAnchor {
+            x: candidate.x,
+            y: CandidateAxis::End {
+                extent: rows,
+                offset: lane.bottom_offset(),
+            },
         })
         .collect()
 }
@@ -301,7 +325,7 @@ let candidates = if grounded {
 };
 ```
 
-The code snippets are the intended minimal shape. If Rust borrow inference requires a small local collection or closure adjustment, keep the same private interfaces and ordering semantics rather than expanding scope.
+The code snippets are the intended minimal shape. If Rust borrow inference requires a small local collection or closure adjustment, keep the same private interfaces and fixed-lane semantics rather than expanding scope.
 
 - [ ] **Step 6: Verify GREEN and preserve projection behavior**
 
