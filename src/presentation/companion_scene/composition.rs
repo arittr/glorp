@@ -66,7 +66,11 @@ pub(crate) fn resolve_companion_composition(
     let rows = i16::try_from(input.rows).unwrap_or(i16::MAX);
     let bottom_reserved_rows = input.bottom_reserved_rows.min(input.rows);
     let available_rows = input.rows.saturating_sub(bottom_reserved_rows);
-    let hud_reserve_cells = hud_reserve(input.columns, input.rows);
+    let aperture_columns = horizontal_aperture_columns(input);
+    let aperture_start_column = (columns - i16::try_from(aperture_columns).unwrap_or(i16::MAX)) / 2;
+    let mut hud_reserve_cells = hud_reserve(aperture_columns, input.rows);
+    hud_reserve_cells[0] = hud_reserve_cells[0].saturating_add(aperture_start_column);
+    hud_reserve_cells[2] = hud_reserve_cells[2].saturating_add(aperture_start_column);
     let bottom_reserve_cells = [
         0,
         i16::try_from(available_rows).unwrap_or(i16::MAX),
@@ -95,9 +99,13 @@ pub(crate) fn resolve_companion_composition(
             i16::try_from(footprint_cells[0]).unwrap_or(i16::MAX),
             i16::try_from(footprint_cells[1]).unwrap_or(i16::MAX),
         ];
-        let accepted = candidate_anchors(prop.zone, input.columns, available_rows)
+        let accepted = candidate_anchors(prop.zone, aperture_columns, available_rows)
             .into_iter()
-            .map(|candidate| candidate.resolve(footprint_i16))
+            .map(|candidate| {
+                let mut top_left = candidate.resolve(footprint_i16);
+                top_left[0] = top_left[0].saturating_add(aperture_start_column);
+                top_left
+            })
             .find_map(|top_left| {
                 let anchor_cell = [
                     top_left[0] - i16::from(footprint.min_dx),
@@ -157,6 +165,23 @@ pub(crate) fn resolve_companion_composition(
         tank_reserved_regions,
         tank_foreground_reserved_regions,
     }
+}
+
+/// Columns occupied by the centered circular aperture. Landscape windows add
+/// grid columns outside that aperture; prop zones and the HUD stay aperture-local.
+fn horizontal_aperture_columns(input: CompanionCompositionInput<'_>) -> u16 {
+    if input.columns == 0
+        || !input.width_points.is_finite()
+        || !input.height_points.is_finite()
+        || input.width_points <= 0.0
+        || input.height_points <= 0.0
+    {
+        return input.columns;
+    }
+    let aperture_fraction = input.width_points.min(input.height_points) / input.width_points;
+    (aperture_fraction * f32::from(input.columns))
+        .round()
+        .clamp(1.0, f32::from(input.columns)) as u16
 }
 
 fn hidden_placement(
@@ -444,6 +469,36 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn landscape_composition_uses_centered_aperture_columns() {
+        let spec =
+            crate::game::habitat::catalog_prop_by_str(crate::game::habitat::TOKEN_PEBBLE_25K)
+                .expect("pebble catalog entry");
+        let props = [PropTopologySnapshot {
+            catalog_id: spec.id,
+            stable_order: 0,
+            zone: spec.zone.into(),
+            authored_depth: spec.pet_layer.into(),
+            presentation_motion: PropPresentationMotion::Static,
+        }];
+
+        let composition = resolve_companion_composition(CompanionCompositionInput {
+            columns: 64,
+            rows: 18,
+            width_points: 3008.0,
+            height_points: 1692.0,
+            bottom_reserved_rows: 5,
+            props: &props,
+        });
+
+        assert_eq!(composition.hud_reserve_cells, [21, 10, 43, 17]);
+        assert_eq!(composition.prop_placements.len(), 1);
+        let placement = composition.prop_placements[0];
+        assert!(placement.visible);
+        assert_eq!(placement.anchor_cell, [18, 11]);
+        assert_eq!(placement.bounds_cells, [18, 11, 19, 12]);
+    }
+
     fn composition_bytes(composition: &CompanionComposition) -> Vec<u8> {
         let placements = composition
             .prop_placements
@@ -549,7 +604,11 @@ mod tests {
         let props = full_prop_topology();
         for &(width_points, height_points) in SURFACES {
             let composition = resolve_for(&props, width_points, height_points);
-            let expected_hud = [9, 10, 35, 17];
+            let (expected_hud, expected_hud_route) = if width_points > height_points {
+                ([11, 10, 32, 17], [11, 10, 21, 7])
+            } else {
+                ([9, 10, 35, 17], [9, 10, 26, 7])
+            };
             let expected_bottom = [0, 13, 44, 18];
             assert_eq!(composition.hud_reserve_cells, expected_hud);
             assert_eq!(composition.tank_reserved_regions.len(), 2);
@@ -560,7 +619,7 @@ mod tests {
                     composition.tank_reserved_regions[0].width,
                     composition.tank_reserved_regions[0].height,
                 ],
-                [9, 10, 26, 7]
+                expected_hud_route
             );
             assert_eq!(
                 [

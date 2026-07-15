@@ -3757,13 +3757,13 @@ pub(super) struct CompanionGridMetrics {
     pub origin_y: f64,
 }
 
-/// Target number of columns across the full view width.
+/// Target number of columns across the view's short axis.
 ///
 /// **TUNABLE** — the pet is PET_W=13 of these columns; FEWER cols = bigger
 /// pet/glyphs.  Lower this for tiny displays (e.g. a 480px 2.1″ round screen);
 /// raise it for large desktop windows.  The font size is *derived* from this
-/// value and the actual view width, so the pet stays a consistent fraction of
-/// the display regardless of window size.
+/// value and the view's short axis, so the pet stays a consistent fraction of
+/// the round aperture regardless of window aspect ratio.
 // Pet scale lever: fewer cols → larger cells → bigger pet/props. With the organic
 // wander the pet is allowed to swim partly past the round rim, so a bigger pet no
 // longer fights its movement. Tuned on device.
@@ -3779,8 +3779,8 @@ const COMPANION_PROBE_FONT_SIZE: f64 = 16.0;
 /// `origin_x`/`origin_y` offset so the grid is positioned in the middle of the
 /// AppKit view.
 ///
-/// Font size is derived from `view_w` and `COMPANION_TARGET_COLS` so the pet
-/// is always a consistent fraction of the display.  Increasing
+/// Font size is derived from the view's short axis and `COMPANION_TARGET_COLS`
+/// so the pet is always a consistent fraction of the round aperture. Increasing
 /// `COMPANION_TARGET_COLS` → more, smaller columns; decreasing it → fewer,
 /// larger columns (bigger pet).
 ///
@@ -3800,8 +3800,8 @@ pub(super) fn companion_grid_metrics(view_w: f64, view_h: f64) -> Option<Compani
             return None;
         }
 
-        // 2. Desired cell width from the target column count.
-        let cell_w = view_w / COMPANION_TARGET_COLS as f64;
+        // 2. Desired cell width from the target count across the round aperture.
+        let cell_w = view_w.min(view_h) / COMPANION_TARGET_COLS as f64;
 
         // 3. Derive font size so "M" advance ≈ cell_w (measured ratio, no hardcoding).
         let font_size = COMPANION_PROBE_FONT_SIZE * cell_w / probe_advance;
@@ -3817,9 +3817,9 @@ pub(super) fn companion_grid_metrics(view_w: f64, view_h: f64) -> Option<Compani
             return None;
         }
 
-        let grid_cols = COMPANION_TARGET_COLS;
+        let grid_cols = (view_w / cell_w).floor() as u16;
         let grid_rows = (view_h / cell_h).floor() as u16;
-        if grid_cols == 0 || grid_rows == 0 {
+        if grid_cols == 0 || grid_rows <= 1 {
             return None;
         }
         let total_grid_w = grid_cols as f64 * cell_w;
@@ -4422,6 +4422,99 @@ mod tests {
                 SceneRuntimeRollout::Live,
             ),
             1.0 / 15.0,
+        );
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn production_grid_preserves_grounded_props_across_landscape_resize() {
+        use crate::presentation::companion_scene::{
+            input::CompanionPresentationOptions, CompanionLogicalLayout, CompanionProjectionClock,
+            CompanionSceneProjectionInput, CompanionSceneSnapshot,
+        };
+
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        let grounded_prop =
+            crate::game::habitat::catalog_prop_by_str(crate::game::habitat::TOKEN_MOSS_TUFT_250K)
+                .expect("grounded prop catalog entry");
+        vm.habitat.earned_props = vec![crate::tui::view_model::EarnedHabitatPropView {
+            id: crate::storage::state::HabitatPropId::new(grounded_prop.id),
+            earned_at: time::OffsetDateTime::UNIX_EPOCH,
+            kind: grounded_prop.kind,
+            display_priority: grounded_prop.display_priority,
+            source: crate::storage::state::HabitatPropSource::LifetimeTokens {
+                threshold: grounded_prop
+                    .lifetime_threshold
+                    .expect("grounded prop lifetime threshold"),
+            },
+        }];
+        let rendered = crate::pet::render::render_pet(
+            &crate::pet::generation::generate_pet("grounded-prop-resize")
+                .with_species(crate::pet::generation::Species::Crystal),
+            crate::game::evolution::Stage::S3,
+            crate::game::metabolism::Mood::Content,
+            crate::pet::render::AnimationFrame::default(),
+        );
+        vm.pet_render.generated_species = crate::pet::generation::Species::Crystal;
+        vm.pet_render.stage = crate::game::evolution::Stage::S3;
+        vm.pet_art = rendered.lines;
+        vm.pet_spans = rendered.spans;
+        let project = |width: f64, height: f64| {
+            let metrics = companion_grid_metrics(width, height).expect("production grid metrics");
+            let snapshot = CompanionSceneSnapshot::project_with_input_and_options(
+                &vm,
+                CompanionSceneProjectionInput::round(
+                    CompanionProjectionClock::new(time::macros::datetime!(2026-07-15 17:35 UTC), 0),
+                    CompanionLogicalLayout::round(width as f32, height as f32),
+                    metrics.grid_cols,
+                    metrics.grid_rows,
+                    crate::round::scene::current_round_motion_clearance(metrics.grid_rows),
+                ),
+                CompanionPresentationOptions { reduce_motion: true },
+            )
+            .expect("project direct retained scene at production geometry");
+            (metrics, snapshot)
+        };
+        let normalized_grounded_origin = |snapshot: &CompanionSceneSnapshot, height: f32| -> f32 {
+            let index = snapshot
+                .topology
+                .visible_props
+                .iter()
+                .position(|prop| prop.catalog_id == crate::game::habitat::TOKEN_MOSS_TUFT_250K)
+                .expect("grounded prop topology");
+            let frame = &snapshot.frame.prop_instances[index];
+            assert!(
+                frame.visible,
+                "grounded prop remains visible at height {height}"
+            );
+            frame.origin_points[1] / height
+        };
+
+        let (square_metrics, square) = project(360.0, 360.0);
+        let (landscape_metrics, landscape) = project(3008.0, 1692.0);
+        let row_difference = square_metrics
+            .grid_rows
+            .abs_diff(landscape_metrics.grid_rows);
+
+        assert!(
+            row_difference <= 1,
+            "landscape resize should preserve vertical density: square={}x{}, landscape={}x{}",
+            square_metrics.grid_cols,
+            square_metrics.grid_rows,
+            landscape_metrics.grid_cols,
+            landscape_metrics.grid_rows,
+        );
+        assert!(
+            landscape_metrics.grid_cols > square_metrics.grid_cols,
+            "landscape resize should add columns: square={}, landscape={}",
+            square_metrics.grid_cols,
+            landscape_metrics.grid_cols,
+        );
+        let square_origin = normalized_grounded_origin(&square, 360.0);
+        let landscape_origin = normalized_grounded_origin(&landscape, 1692.0);
+        assert!(
+            (landscape_origin - square_origin).abs() <= 0.03,
+            "grounded prop origin should stay anchored: square={square_origin:.3}, landscape={landscape_origin:.3}",
         );
     }
 
