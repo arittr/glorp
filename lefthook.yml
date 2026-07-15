@@ -7,9 +7,11 @@ pre-commit:
       stage_fixed: false
     - name: clippy
       glob: "*.{rs,toml}"
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --lib --bins --features retained-renderer -- -D warnings
 
 pre-push:
   jobs:
     - name: test
       run: cargo test --locked
+    - name: clippy-full
+      run: cargo clippy --all-targets --all-features -- -D warnings

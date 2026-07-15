@@ -8,6 +8,15 @@ license = "MIT"
 members = [".", "xtask"]
 default-members = ["."]
 
+# Tests need line tables for useful panic backtraces, but full debug information
+# across wgpu/AppKit and every dependency makes each test binary unnecessarily
+# expensive to link and assess on macOS.
+[profile.test]
+debug = 1
+
+[profile.test.package."*"]
+debug = 0
+
 [[bin]]
 name = "glorp"
 path = "src/main.rs"
