@@ -69,8 +69,12 @@ pub(crate) fn resolve_companion_composition(
     let aperture_columns = horizontal_aperture_columns(input);
     let aperture_start_column = (columns - i16::try_from(aperture_columns).unwrap_or(i16::MAX)) / 2;
     let mut hud_reserve_cells = hud_reserve(aperture_columns, input.rows);
+    let floor_hud_reserve_local = floor_hud_reserve(aperture_columns, input.rows);
+    let mut floor_hud_reserve_cells = floor_hud_reserve_local;
     hud_reserve_cells[0] = hud_reserve_cells[0].saturating_add(aperture_start_column);
     hud_reserve_cells[2] = hud_reserve_cells[2].saturating_add(aperture_start_column);
+    floor_hud_reserve_cells[0] = floor_hud_reserve_cells[0].saturating_add(aperture_start_column);
+    floor_hud_reserve_cells[2] = floor_hud_reserve_cells[2].saturating_add(aperture_start_column);
     let bottom_reserve_cells = [
         0,
         i16::try_from(available_rows).unwrap_or(i16::MAX),
@@ -81,6 +85,7 @@ pub(crate) fn resolve_companion_composition(
     let mut accepted_bounds = Vec::<[i16; 4]>::new();
     let mut prop_placements = Vec::with_capacity(input.props.len());
     let mut tank_foreground_reserved_regions = Vec::new();
+    let grounded_baseline_row = grounded_baseline_row(input.rows);
 
     for prop in input.props {
         let Some(footprint) =
@@ -99,7 +104,42 @@ pub(crate) fn resolve_companion_composition(
             i16::try_from(footprint_cells[0]).unwrap_or(i16::MAX),
             i16::try_from(footprint_cells[1]).unwrap_or(i16::MAX),
         ];
-        let accepted = candidate_anchors(prop.zone, aperture_columns, available_rows)
+        let grounded = is_floor_zone(prop.zone);
+        let candidate_rows = if grounded {
+            grounded_baseline_row.saturating_add(1).min(input.rows)
+        } else {
+            available_rows
+        };
+        let candidate_bottom_reserve = if grounded {
+            [
+                0,
+                i16::try_from(grounded_baseline_row).unwrap_or(i16::MAX),
+                columns,
+                rows,
+            ]
+        } else {
+            bottom_reserve_cells
+        };
+        let mut candidates = if grounded {
+            grounded_side_lane_anchors(
+                prop.zone,
+                candidate_rows,
+                [floor_hud_reserve_local[0], floor_hud_reserve_local[2]],
+            )
+        } else {
+            Vec::new()
+        };
+        candidates.extend(candidate_anchors(
+            prop.zone,
+            aperture_columns,
+            candidate_rows,
+        ));
+        let candidate_hud_reserve = if grounded {
+            floor_hud_reserve_cells
+        } else {
+            hud_reserve_cells
+        };
+        let accepted = candidates
             .into_iter()
             .map(|candidate| {
                 let mut top_left = candidate.resolve(footprint_i16);
@@ -122,13 +162,12 @@ pub(crate) fn resolve_companion_composition(
                     columns,
                     rows,
                     gauge_inner_radius_cells,
-                    hud_reserve_cells,
-                    bottom_reserve_cells,
+                    candidate_hud_reserve,
+                    candidate_bottom_reserve,
                     &accepted_bounds,
                 )
                 .then_some((anchor_cell, bounds))
             });
-        let grounded = is_floor_zone(prop.zone);
         if let Some((anchor_cell, bounds_cells)) = accepted {
             accepted_bounds.push(bounds_cells);
             if prop.authored_depth == AuthoredDepthSnapshot::Foreground {
@@ -167,6 +206,13 @@ pub(crate) fn resolve_companion_composition(
     }
 }
 
+fn grounded_baseline_row(rows: u16) -> u16 {
+    if rows == 0 {
+        return 0;
+    }
+    (f32::from(rows) * 0.76).ceil().clamp(1.0, f32::from(rows)) as u16
+}
+
 /// Columns occupied by the centered circular aperture. Landscape windows add
 /// grid columns outside that aperture; prop zones and the HUD stay aperture-local.
 fn horizontal_aperture_columns(input: CompanionCompositionInput<'_>) -> u16 {
@@ -199,7 +245,17 @@ fn hidden_placement(
 }
 
 fn hud_reserve(columns: u16, rows: u16) -> [i16; 4] {
-    let width = f32::from(columns) * 0.58;
+    centered_hud_reserve(columns, rows, 0.58)
+}
+
+fn floor_hud_reserve(columns: u16, rows: u16) -> [i16; 4] {
+    // Grounded props share only the HUD's lower/subline band; the upper metric
+    // lines retain the wider reserve used by non-floor props and tank routing.
+    centered_hud_reserve(columns, rows, 0.42)
+}
+
+fn centered_hud_reserve(columns: u16, rows: u16, width_fraction: f32) -> [i16; 4] {
+    let width = f32::from(columns) * width_fraction;
     let center = f32::from(columns) / 2.0;
     [
         (center - width / 2.0).floor() as i16,
@@ -207,6 +263,30 @@ fn hud_reserve(columns: u16, rows: u16) -> [i16; 4] {
         (center + width / 2.0).ceil() as i16,
         (f32::from(rows) * 0.90).ceil() as i16,
     ]
+}
+
+fn grounded_side_lane_anchors(
+    zone: PropZoneSnapshot,
+    rows: u16,
+    floor_hud_columns: [i16; 2],
+) -> Vec<CandidateAnchor> {
+    let rows = i16::try_from(rows).unwrap_or(i16::MAX);
+    let grounded_y = CandidateAxis::End { extent: rows, offset: -1 };
+    let left = CandidateAnchor {
+        x: CandidateAxis::End { extent: floor_hud_columns[0], offset: 0 },
+        y: grounded_y,
+    };
+    let right = CandidateAnchor {
+        x: CandidateAxis::Start(floor_hud_columns[1]),
+        y: grounded_y,
+    };
+
+    match zone {
+        PropZoneSnapshot::FloorLeft => vec![left],
+        PropZoneSnapshot::FloorMid => vec![left, right],
+        PropZoneSnapshot::FloorRight => vec![right],
+        _ => Vec::new(),
+    }
 }
 
 fn gauge_inner_radii(input: CompanionCompositionInput<'_>) -> [f32; 2] {
@@ -492,11 +572,95 @@ mod tests {
         });
 
         assert_eq!(composition.hud_reserve_cells, [21, 10, 43, 17]);
+        let mut expected_floor_hud = floor_hud_reserve(36, 18);
+        expected_floor_hud[0] += 14;
+        expected_floor_hud[2] += 14;
+        assert_eq!(expected_floor_hud, [24, 10, 40, 17]);
         assert_eq!(composition.prop_placements.len(), 1);
         let placement = composition.prop_placements[0];
         assert!(placement.visible);
-        assert_eq!(placement.anchor_cell, [18, 11]);
-        assert_eq!(placement.bounds_cells, [18, 11, 19, 12]);
+        assert_eq!(placement.anchor_cell, [23, 13]);
+        assert_eq!(placement.bounds_cells, [23, 13, 24, 14]);
+    }
+
+    #[test]
+    fn grounded_props_meet_bed_horizon_inside_floor_hud_and_gauge_clearance() {
+        for catalog_id in [
+            crate::game::habitat::TOKEN_PEBBLE_25K,
+            crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+        ] {
+            let spec = crate::game::habitat::catalog_prop_by_str(catalog_id)
+                .expect("grounded prop catalog entry");
+            let props = [PropTopologySnapshot {
+                catalog_id: spec.id,
+                stable_order: 0,
+                zone: spec.zone.into(),
+                authored_depth: spec.pet_layer.into(),
+                presentation_motion: PropPresentationMotion::Static,
+            }];
+            let composition = resolve_companion_composition(CompanionCompositionInput {
+                columns: 36,
+                rows: 18,
+                width_points: 360.0,
+                height_points: 360.0,
+                bottom_reserved_rows: 5,
+                props: &props,
+            });
+
+            assert_eq!(composition.tank_reserved_regions.len(), 2, "{catalog_id}");
+            let bottom_route_reserve = composition.tank_reserved_regions[1];
+            assert_eq!(
+                [
+                    bottom_route_reserve.x,
+                    bottom_route_reserve.y,
+                    bottom_route_reserve.width,
+                    bottom_route_reserve.height,
+                ],
+                [0, 13, 36, 5],
+                "{catalog_id}",
+            );
+
+            let placement = composition.prop_placements[0];
+            assert!(placement.visible, "{catalog_id}");
+            assert_eq!(placement.bounds_cells[3], 14, "{catalog_id}");
+            assert!(
+                !intersects(placement.bounds_cells, floor_hud_reserve(36, 18)),
+                "{catalog_id}",
+            );
+            let center = [18.0, 9.0];
+            for col in [placement.bounds_cells[0], placement.bounds_cells[2] - 1] {
+                for row in [placement.bounds_cells[1], placement.bounds_cells[3] - 1] {
+                    let dx = (f32::from(col) + 0.5 - center[0])
+                        / composition.gauge_inner_radius_cells[0];
+                    let dy = (f32::from(row) + 0.5 - center[1])
+                        / composition.gauge_inner_radius_cells[1];
+                    assert!(dx * dx + dy * dy <= 1.0, "{catalog_id}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_grid_hides_grounded_props_without_panicking() {
+        let props = [PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            zone: PropZoneSnapshot::FloorLeft,
+            authored_depth: AuthoredDepthSnapshot::Foreground,
+            presentation_motion: PropPresentationMotion::Static,
+        }];
+
+        let composition = resolve_companion_composition(CompanionCompositionInput {
+            columns: 0,
+            rows: 0,
+            width_points: 0.0,
+            height_points: 0.0,
+            bottom_reserved_rows: 0,
+            props: &props,
+        });
+
+        assert!(!composition.prop_placements[0].visible);
+        assert!(composition.tank_reserved_regions.is_empty());
     }
 
     fn composition_bytes(composition: &CompanionComposition) -> Vec<u8> {
@@ -604,11 +768,12 @@ mod tests {
         let props = full_prop_topology();
         for &(width_points, height_points) in SURFACES {
             let composition = resolve_for(&props, width_points, height_points);
-            let (expected_hud, expected_hud_route) = if width_points > height_points {
-                ([11, 10, 32, 17], [11, 10, 21, 7])
-            } else {
-                ([9, 10, 35, 17], [9, 10, 26, 7])
-            };
+            let (expected_hud, expected_floor_hud, expected_hud_route) =
+                if width_points > height_points {
+                    ([11, 10, 32, 17], [14, 10, 29, 17], [11, 10, 21, 7])
+                } else {
+                    ([9, 10, 35, 17], [12, 10, 32, 17], [9, 10, 26, 7])
+                };
             let expected_bottom = [0, 13, 44, 18];
             assert_eq!(composition.hud_reserve_cells, expected_hud);
             assert_eq!(composition.tank_reserved_regions.len(), 2);
@@ -635,8 +800,16 @@ mod tests {
                 .iter()
                 .filter(|placement| placement.visible)
             {
-                assert!(!intersects(placement.bounds_cells, expected_hud));
-                assert!(!intersects(placement.bounds_cells, expected_bottom));
+                if placement.grounded {
+                    assert!(!intersects(placement.bounds_cells, expected_floor_hud));
+                    assert_eq!(
+                        placement.bounds_cells[3],
+                        grounded_baseline_row(ROWS) as i16
+                    );
+                } else {
+                    assert!(!intersects(placement.bounds_cells, expected_hud));
+                    assert!(!intersects(placement.bounds_cells, expected_bottom));
+                }
             }
             let expected_foreground = composition
                 .prop_placements

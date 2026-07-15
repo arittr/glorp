@@ -4475,20 +4475,21 @@ mod tests {
             .expect("project direct retained scene at production geometry");
             (metrics, snapshot)
         };
-        let normalized_grounded_origin = |snapshot: &CompanionSceneSnapshot, height: f32| -> f32 {
-            let index = snapshot
-                .topology
-                .visible_props
-                .iter()
-                .position(|prop| prop.catalog_id == crate::game::habitat::TOKEN_MOSS_TUFT_250K)
-                .expect("grounded prop topology");
-            let frame = &snapshot.frame.prop_instances[index];
-            assert!(
-                frame.visible,
-                "grounded prop remains visible at height {height}"
-            );
-            frame.origin_points[1] / height
-        };
+        let normalized_grounded_baseline =
+            |snapshot: &CompanionSceneSnapshot, height: f32| -> f32 {
+                let index = snapshot
+                    .topology
+                    .visible_props
+                    .iter()
+                    .position(|prop| prop.catalog_id == crate::game::habitat::TOKEN_MOSS_TUFT_250K)
+                    .expect("grounded prop topology");
+                let frame = &snapshot.frame.prop_instances[index];
+                assert!(
+                    frame.visible,
+                    "grounded prop remains visible at height {height}"
+                );
+                (frame.origin_points[1] + frame.footprint_points[1]) / height
+            };
 
         let (square_metrics, square) = project(360.0, 360.0);
         let (landscape_metrics, landscape) = project(3008.0, 1692.0);
@@ -4510,11 +4511,15 @@ mod tests {
             square_metrics.grid_cols,
             landscape_metrics.grid_cols,
         );
-        let square_origin = normalized_grounded_origin(&square, 360.0);
-        let landscape_origin = normalized_grounded_origin(&landscape, 1692.0);
+        let square_baseline = normalized_grounded_baseline(&square, 360.0);
+        let landscape_baseline = normalized_grounded_baseline(&landscape, 1692.0);
         assert!(
-            (landscape_origin - square_origin).abs() <= 0.03,
-            "grounded prop origin should stay anchored: square={square_origin:.3}, landscape={landscape_origin:.3}",
+            (square_baseline - 14.0 / 18.0).abs() <= 0.001,
+            "grounded prop should meet the bed horizon: square={square_baseline:.3}",
+        );
+        assert!(
+            (landscape_baseline - square_baseline).abs() <= 0.03,
+            "grounded prop baseline should stay anchored: square={square_baseline:.3}, landscape={landscape_baseline:.3}",
         );
     }
 

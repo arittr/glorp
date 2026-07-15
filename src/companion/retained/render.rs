@@ -9636,6 +9636,12 @@ mod tests {
             ]
         };
         let hud_reserve = point_rect(composition.hud_reserve_cells);
+        let floor_hud_reserve = point_rect([
+            (f32::from(grid.columns) * 0.29).floor() as i16,
+            (f32::from(grid.rows) * 0.58).floor() as i16,
+            (f32::from(grid.columns) * 0.71).ceil() as i16,
+            (f32::from(grid.rows) * 0.90).ceil() as i16,
+        ]);
         let bottom_reserve = point_rect([
             0,
             i16::try_from(grid.rows - clearance.bottom_reserved_rows).unwrap(),
@@ -9656,14 +9662,29 @@ mod tests {
         let gauge_inner_radius = (gauge.pace.radius - gauge.pace.stroke_width / 2.0) as f32;
         for slot in &visible_prop_slots {
             let roi = prop_roi(&original_cpu, usize::from(*slot), 0.0);
+            let placement = composition
+                .prop_placements
+                .iter()
+                .find(|placement| placement.slot == *slot)
+                .expect("composition placement for visible prop");
+            let placement_roi = point_rect(placement.bounds_cells);
             assert!(
-                !intersects(roi, hud_reserve),
-                "prop slot {slot} projected ROI intersects the HUD reserve: {roi:?}"
+                !intersects(
+                    placement_roi,
+                    if placement.grounded {
+                        floor_hud_reserve
+                    } else {
+                        hud_reserve
+                    },
+                ),
+                "prop slot {slot} placement intersects the HUD reserve: {placement_roi:?}"
             );
-            assert!(
-                !intersects(roi, bottom_reserve),
-                "prop slot {slot} projected ROI intersects the bottom reserve: {roi:?}"
-            );
+            if !placement.grounded {
+                assert!(
+                    !intersects(placement_roi, bottom_reserve),
+                    "prop slot {slot} placement intersects the bottom reserve: {placement_roi:?}"
+                );
+            }
             for x in [roi[0], roi[0] + roi[2]] {
                 for y in [roi[1], roi[1] + roi[3]] {
                     let dx = (x - gauge_center[0]) / gauge_inner_radius;
@@ -12081,7 +12102,7 @@ mod tests {
 
         let baseline_plan = candidate.draw_plan.clone();
         assert!(cpu.accepted_frame_for_test().prop_slots[0].visible);
-        assert!(!cpu.accepted_frame_for_test().prop_slots[1].visible);
+        assert!(cpu.accepted_frame_for_test().prop_slots[1].visible);
         let suppress = |plan: &mut SceneDrawPlan, primitive_index: u32| {
             let mut found = false;
             for draw in plan
@@ -12108,6 +12129,7 @@ mod tests {
             ("tank inhabitant 1", &[8, 14]),
             ("pet body", &[11]),
             ("prop 0", &[5]),
+            ("prop 1", &[6]),
             ("pet particles", &[12]),
             ("gauges", &[15]),
             ("status", &[16]),
@@ -12132,22 +12154,6 @@ mod tests {
                 "active production layer was inert: {label}",
             );
         }
-        candidate.draw_plan = baseline_plan.clone();
-        suppress(&mut candidate.draw_plan, 6);
-        let without_hidden_prop = renderer
-            .render_offscreen(
-                &device,
-                &queue,
-                &shared,
-                &mut candidate,
-                request.clone(),
-                &prepared_hud,
-            )
-            .expect("hidden prop omission render");
-        assert_eq!(
-            without_hidden_prop.rgba, outcome.rgba,
-            "hidden production prop unexpectedly contributed pixels"
-        );
         candidate.draw_plan = baseline_plan;
 
         let zero_hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(

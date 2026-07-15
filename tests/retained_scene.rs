@@ -379,7 +379,7 @@ fn retained_full_cast_composition_matrix() {
     use glorp::pet::render::{render_pet, AnimationFrame};
     use glorp::presentation::companion_scene::{
         CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
-        CompanionSceneSnapshot,
+        CompanionSceneSnapshot, PropZoneSnapshot,
     };
     use glorp::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
     use time::macros::{date, datetime};
@@ -499,10 +499,19 @@ fn retained_full_cast_composition_matrix() {
             inner_radius as f32 / cell[1] - 0.5,
         ];
         let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
+        let aperture_columns =
+            (width_points.min(height_points) / width_points * f32::from(COLUMNS)).round();
+        let aperture_start = ((f32::from(COLUMNS) - aperture_columns) / 2.0).floor();
         let hud = [
-            (f32::from(COLUMNS) * 0.21).floor(),
+            aperture_start + (aperture_columns * 0.21).floor(),
             (f32::from(ROWS) * 0.58).floor(),
-            (f32::from(COLUMNS) * 0.79).ceil(),
+            aperture_start + (aperture_columns * 0.79).ceil(),
+            (f32::from(ROWS) * 0.90).ceil(),
+        ];
+        let floor_hud = [
+            aperture_start + (aperture_columns * 0.29).floor(),
+            (f32::from(ROWS) * 0.58).floor(),
+            aperture_start + (aperture_columns * 0.71).ceil(),
             (f32::from(ROWS) * 0.90).ceil(),
         ];
         let bottom = [
@@ -539,6 +548,18 @@ fn retained_full_cast_composition_matrix() {
                     min[1] + frame.footprint_points[1] / cell[1],
                 ];
                 let bounds = [min[0], min[1], max[0], max[1]];
+                let prop = first
+                    .topology
+                    .visible_props
+                    .iter()
+                    .find(|prop| prop.stable_order == frame.slot)
+                    .expect("prop topology for visible frame");
+                let grounded = matches!(
+                    prop.zone,
+                    PropZoneSnapshot::FloorLeft
+                        | PropZoneSnapshot::FloorMid
+                        | PropZoneSnapshot::FloorRight
+                );
                 for col in [bounds[0] + 0.5, bounds[2] - 0.5] {
                     for row in [bounds[1] + 0.5, bounds[3] - 0.5] {
                         let dx = (col - center[0]) / safe_radii[0];
@@ -551,15 +572,23 @@ fn retained_full_cast_composition_matrix() {
                     }
                 }
                 assert!(
-                    !intersects(bounds, hud),
+                    !intersects(bounds, if grounded { floor_hud } else { hud }),
                     "{label} slot {} overlaps HUD",
                     frame.slot
                 );
-                assert!(
-                    !intersects(bounds, bottom),
-                    "{label} slot {} overlaps bottom reserve",
-                    frame.slot
-                );
+                if grounded {
+                    assert!(
+                        (bounds[3] - (f32::from(ROWS) * 0.76).ceil()).abs() < 0.0001,
+                        "{label} slot {} lost its grounded baseline",
+                        frame.slot
+                    );
+                } else {
+                    assert!(
+                        !intersects(bounds, bottom),
+                        "{label} slot {} overlaps bottom reserve",
+                        frame.slot
+                    );
+                }
                 bounds
             })
             .collect::<Vec<_>>();
