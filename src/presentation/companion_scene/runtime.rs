@@ -4299,21 +4299,22 @@ mod tests {
                 duration_ms: 900,
                 curve: super::super::EaseCurve::SmoothStep,
             };
-        let expected_parallax = expected_depth_parallax(&previous, clock, 0.045);
+        let depth_parallax = expected_depth_parallax(&previous, clock, 0.045);
+        let expected_prop_parallax = [depth_parallax[0], -depth_parallax[1]];
         assert!(
-            expected_parallax != [0.0; 2],
+            expected_prop_parallax != [0.0; 2],
             "fixture needs nonzero displacement"
         );
         assert_points_close(
             previous.frame.prop_instances[0].motion_offset_points,
-            expected_parallax,
+            expected_prop_parallax,
         );
         let previous = Arc::new(previous);
 
         let mut newest = (*previous).clone();
         newest.content.prop_animation_states[0].motion_phase = Some(1);
         newest.frame.prop_instances[0].motion_offset_points =
-            [expected_parallax[0], 3.0 + expected_parallax[1]];
+            [expected_prop_parallax[0], 3.0 + expected_prop_parallax[1]];
         newest.frame.prop_instances[0].transition = None;
         let mut runtime = CompanionSceneRuntimeState::with_active(Arc::clone(&previous)).unwrap();
         commit_snapshot(&mut runtime, Arc::new(newest));
@@ -4338,7 +4339,7 @@ mod tests {
             .unwrap();
         assert_points_close(
             projected.frame.prop_instances[0].motion_offset_points,
-            expected_parallax,
+            expected_prop_parallax,
         );
     }
 

@@ -982,7 +982,7 @@ fn project_prop_frame_states(
             };
             let motion_offset_points = [
                 semantic_motion_offset_points[0] + depth_parallax[0],
-                semantic_motion_offset_points[1] + depth_parallax[1],
+                semantic_motion_offset_points[1] - depth_parallax[1],
             ];
             let opacity = if !visible {
                 0.0
@@ -2531,6 +2531,82 @@ mod tests {
     }
 
     #[test]
+    fn prop_vertical_parallax_opposes_top_down_pet_motion_without_reversing_semantic_lift() {
+        use crate::presentation::companion_scene::{
+            AuthoredDepthSnapshot, EaseCurve, PropAnimationKindSnapshot, PropAnimationSnapshot,
+            PropPresentationMotion, PropTopologySnapshot, PropZoneSnapshot, SemanticRevision,
+        };
+
+        let topology = [PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            zone: PropZoneSnapshot::FloorLeft,
+            authored_depth: AuthoredDepthSnapshot::Foreground,
+            presentation_motion: PropPresentationMotion::TwoPoseEase {
+                duration_ms: 900,
+                curve: EaseCurve::SmoothStep,
+            },
+        }];
+        let semantics = [PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            kind: PropAnimationKindSnapshot::Animated,
+            sprite_phase: Some(0),
+            twinkle_active: None,
+            motion_phase: Some(1),
+            chest_lid_open: None,
+            bloom_active: None,
+        }];
+        let composition = super::CompanionComposition {
+            prop_placements: vec![super::super::composition::CompanionPropPlacement {
+                slot: 0,
+                visible: true,
+                anchor_cell: [3, 4],
+                bounds_cells: [3, 4, 4, 5],
+                footprint_cells: [1, 1],
+                grounded: true,
+            }],
+            hud_reserve_cells: [0; 4],
+            gauge_inner_radius_cells: [0.0; 2],
+            tank_reserved_regions: Vec::new(),
+            tank_foreground_reserved_regions: Vec::new(),
+        };
+        let project = |vertical_displacement_cells: f32, reduce_motion: bool| {
+            let mut parallax = test_depth_parallax_context(reduce_motion);
+            parallax.motion.motion_top_left_cells.y = vertical_displacement_cells;
+            super::project_prop_frame_states(
+                &topology,
+                &semantics,
+                super::PropFrameProjectionContext {
+                    clock: CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 0),
+                    asleep: false,
+                    options: super::CompanionPresentationOptions { reduce_motion },
+                    semantic_revision: SemanticRevision(1),
+                    previous: None,
+                    composition: &composition,
+                    parallax,
+                },
+            )[0]
+        };
+        let assert_close = |actual: f32, expected: f32| {
+            assert!(
+                (actual - expected).abs() < 0.0001,
+                "actual={actual}, expected={expected}"
+            );
+        };
+
+        for (vertical_displacement_cells, expected_y_up_points) in [(4.0, -0.6), (-4.0, 6.6)] {
+            let standard = project(vertical_displacement_cells, false);
+            assert_close(standard.motion_offset_points[0], 0.0);
+            assert_close(standard.motion_offset_points[1], expected_y_up_points);
+
+            let reduced = project(vertical_displacement_cells, true);
+            assert_eq!(reduced.motion_offset_points, [0.0, 3.0]);
+            assert!(reduced.transition.is_none());
+        }
+    }
+
+    #[test]
     fn frame_revision_rebase_keeps_two_pose_transition_anchors_semantic_only() {
         use crate::presentation::companion_scene::{
             AuthoredDepthSnapshot, EaseCurve, PropAnimationKindSnapshot, PropAnimationSnapshot,
@@ -2614,7 +2690,7 @@ mod tests {
         assert_eq!(anchor.target_pose, [0.0, 3.0]);
         assert_eq!(
             frames[0].motion_offset_points,
-            [current_parallax[0], 1.5 + current_parallax[1]]
+            [current_parallax[0], 1.5 - current_parallax[1]]
         );
     }
 

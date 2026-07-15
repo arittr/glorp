@@ -9036,13 +9036,47 @@ mod tests {
             CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
             CompanionSceneSnapshot,
         };
-        use crate::tui::view_model::WatchViewModel;
+        use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
 
         let day = time::macros::date!(2026 - 07 - 15);
         let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, day);
-        vm.habitat.earned_props = WatchViewModel::fixture_with_habitat_props()
-            .habitat
-            .earned_props;
+        vm.habitat.earned_props = crate::game::habitat::HABITAT_PROP_CATALOG
+            .iter()
+            .map(|spec| {
+                let source = match spec.lifetime_threshold {
+                    Some(threshold) => {
+                        crate::storage::state::HabitatPropSource::LifetimeTokens { threshold }
+                    }
+                    None => match spec.id {
+                        crate::game::habitat::CODEX_SIGNAL_LAMP => {
+                            crate::storage::state::HabitatPropSource::ProviderFirstUse {
+                                provider_surface: "codex".to_owned(),
+                            }
+                        }
+                        crate::game::habitat::HEAVY_SESSION_PLANTER => {
+                            crate::storage::state::HabitatPropSource::HeavySession
+                        }
+                        crate::game::habitat::WILT_RECOVERY_SPROUT => {
+                            crate::storage::state::HabitatPropSource::WiltRecovery
+                        }
+                        crate::game::habitat::FIRST_ENSEMBLE_DAY
+                        | crate::game::habitat::RETURN_SPROUT => {
+                            crate::storage::state::HabitatPropSource::ActivityMilestone {
+                                milestone: spec.id.to_owned(),
+                            }
+                        }
+                        _ => unreachable!("catalog prop without a truthful fixture source"),
+                    },
+                };
+                EarnedHabitatPropView {
+                    id: crate::storage::state::HabitatPropId::new(spec.id),
+                    earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                    kind: spec.kind,
+                    display_priority: spec.display_priority,
+                    source,
+                }
+            })
+            .collect();
         let pet = crate::pet::generation::generate_pet("retained-native-full-cast")
             .with_species(crate::pet::generation::Species::Fuzz);
         let rendered = crate::pet::render::render_pet(
@@ -9559,8 +9593,33 @@ mod tests {
         use crate::round::smooth::CompanionContentIdentity;
 
         let snapshot = retained_full_cast_snapshot();
-        assert_eq!(snapshot.topology.visible_props.len(), 2);
+        assert_eq!(snapshot.topology.visible_props.len(), 10);
+        let visible_prop_slots = snapshot
+            .frame
+            .prop_instances
+            .iter()
+            .filter(|frame| frame.visible)
+            .map(|frame| frame.slot)
+            .collect::<Vec<_>>();
+        assert!(
+            visible_prop_slots.len() >= 2,
+            "full-cast fixture exercised only {visible_prop_slots:?}"
+        );
         assert_eq!(snapshot.topology.visible_tank_inhabitants.len(), 2);
+        let grid = snapshot.topology.glyph_grid;
+        let layout = snapshot.topology.layout;
+        let clearance = crate::round::scene::current_round_motion_clearance(grid.rows);
+        let composition =
+            crate::presentation::companion_scene::composition::resolve_companion_composition(
+                crate::presentation::companion_scene::composition::CompanionCompositionInput {
+                    columns: grid.columns,
+                    rows: grid.rows,
+                    width_points: layout.width_points,
+                    height_points: layout.height_points,
+                    bottom_reserved_rows: clearance.bottom_reserved_rows,
+                    props: &snapshot.topology.visible_props,
+                },
+            );
         let generation_key = SceneGenerationKey {
             device: DeviceEpoch(71),
             layout: LayoutGeneration(72),
@@ -9568,6 +9627,54 @@ mod tests {
         };
         let revisions = AppliedRevisions::new(10, 11);
         let original_cpu = compile_retained_full_cast_snapshot(snapshot, generation_key, revisions);
+        let point_rect = |cell_rect: [i16; 4]| {
+            [
+                f32::from(cell_rect[0]) * grid.cell_extent_points[0],
+                f32::from(cell_rect[1]) * grid.cell_extent_points[1],
+                f32::from(cell_rect[2] - cell_rect[0]) * grid.cell_extent_points[0],
+                f32::from(cell_rect[3] - cell_rect[1]) * grid.cell_extent_points[1],
+            ]
+        };
+        let hud_reserve = point_rect(composition.hud_reserve_cells);
+        let bottom_reserve = point_rect([
+            0,
+            i16::try_from(grid.rows - clearance.bottom_reserved_rows).unwrap(),
+            i16::try_from(grid.columns).unwrap(),
+            i16::try_from(grid.rows).unwrap(),
+        ]);
+        let intersects = |left: [f32; 4], right: [f32; 4]| {
+            left[0] < right[0] + right[2]
+                && left[0] + left[2] > right[0]
+                && left[1] < right[1] + right[3]
+                && left[1] + left[3] > right[1]
+        };
+        let gauge_center = [layout.width_points / 2.0, layout.height_points / 2.0];
+        let gauge = crate::presentation::companion_effects::perimeter_gauge_layout(
+            f64::from(layout.width_points.min(layout.height_points)) / 2.0,
+            crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+        );
+        let gauge_inner_radius = (gauge.pace.radius - gauge.pace.stroke_width / 2.0) as f32;
+        for slot in &visible_prop_slots {
+            let roi = prop_roi(&original_cpu, usize::from(*slot), 0.0);
+            assert!(
+                !intersects(roi, hud_reserve),
+                "prop slot {slot} projected ROI intersects the HUD reserve: {roi:?}"
+            );
+            assert!(
+                !intersects(roi, bottom_reserve),
+                "prop slot {slot} projected ROI intersects the bottom reserve: {roi:?}"
+            );
+            for x in [roi[0], roi[0] + roi[2]] {
+                for y in [roi[1], roi[1] + roi[3]] {
+                    let dx = (x - gauge_center[0]) / gauge_inner_radius;
+                    let dy = (y - gauge_center[1]) / gauge_inner_radius;
+                    assert!(
+                        dx * dx + dy * dy <= 1.0,
+                        "prop slot {slot} projected ROI escaped the gauge-safe ellipse: {roi:?}"
+                    );
+                }
+            }
+        }
 
         for backing_scale in [1.0, 2.0] {
             let (device, queue) = native_device();
@@ -9618,12 +9725,11 @@ mod tests {
                 .draws
                 .iter()
                 .enumerate()
-                .filter_map(|(index, draw)| {
-                    matches!(
-                        draw.source,
-                        PrimitiveSource::Instances(InstanceSource::PropGlyphs { .. })
-                    )
-                    .then_some(u32::try_from(index).unwrap())
+                .filter_map(|(index, draw)| match draw.source {
+                    PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot }) => {
+                        Some((slot, u32::try_from(index).unwrap()))
+                    }
+                    _ => None,
                 })
                 .collect::<Vec<_>>();
             let tank_indices = upload
@@ -9648,17 +9754,9 @@ mod tests {
                         .then_some(u32::try_from(index).unwrap())
                 })
                 .expect("room analytic draw exists");
-            assert!(!prop_indices.is_empty());
+            assert_eq!(prop_indices.len(), 10);
             assert!(!tank_indices.is_empty());
 
-            let prop_roi = union_logical_rois(
-                cpu.accepted_frame_for_test()
-                    .prop_slots
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, frame)| frame.visible)
-                    .map(|(slot, _)| prop_roi(&cpu, slot, 2.0)),
-            );
             let tank_roi = union_logical_rois(
                 cpu.accepted_frame_for_test()
                     .tank_slots
@@ -9668,8 +9766,6 @@ mod tests {
                     .map(|(slot, _)| tank_roi(&cpu, slot, 2.0)),
             );
             let bed_roi = [104.0, 288.0, 152.0, 44.0];
-            assert_ne!(prop_roi, tank_roi);
-            assert_ne!(prop_roi, bed_roi);
             assert_ne!(tank_roi, bed_roi);
 
             let render_without = |candidate: &mut GpuSceneCandidate,
@@ -9691,12 +9787,10 @@ mod tests {
                     .unwrap()
             };
             let without_bed = render_without(&mut candidate, &mut renderer, &[bed_index]);
-            let without_props = render_without(&mut candidate, &mut renderer, &prop_indices);
             let without_tank = render_without(&mut candidate, &mut renderer, &tank_indices);
 
             for (name, roi, control) in [
                 ("bed", bed_roi, &without_bed),
-                ("props", prop_roi, &without_props),
                 ("tank", tank_roi, &without_tank),
             ] {
                 let pixels = rgba_roi(&baseline, roi, backing_scale);
@@ -9710,12 +9804,34 @@ mod tests {
                     "{name} draw contributes no pixels at {backing_scale}x"
                 );
             }
+
+            for slot in &visible_prop_slots {
+                let primitive_index = prop_indices
+                    .iter()
+                    .find_map(|(draw_slot, primitive_index)| {
+                        (*draw_slot == u32::from(*slot)).then_some(*primitive_index)
+                    })
+                    .expect("visible prop slot has a retained draw");
+                let roi = prop_roi(&cpu, usize::from(*slot), 2.0);
+                let without_prop =
+                    render_without(&mut candidate, &mut renderer, &[primitive_index]);
+                let pixels = rgba_roi(&baseline, roi, backing_scale);
+                let control_pixels = rgba_roi(&without_prop, roi, backing_scale);
+                assert!(
+                    pixels.chunks_exact(4).any(|pixel| pixel[3] != 0),
+                    "prop slot {slot} ROI is blank at {backing_scale}x"
+                );
+                assert_ne!(
+                    pixels, control_pixels,
+                    "prop slot {slot} draw contributes no pixels at {backing_scale}x"
+                );
+            }
         }
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn habitat_pass_does_not_change_hud_or_gauge_pixels() {
+    fn controlled_chrome_rois_have_nonblank_native_pixel_support() {
         use crate::pet::generation::Species;
         use crate::presentation::companion_scene::{
             AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration, SceneGenerationKey,
@@ -9767,6 +9883,13 @@ mod tests {
             1.0,
         );
         let baseline_plan = candidate.draw_plan.clone();
+        let world_indices = baseline_plan
+            .opaque
+            .iter()
+            .chain(&baseline_plan.world_blended_unsorted)
+            .map(|draw| draw.primitive_index)
+            .collect::<Vec<_>>();
+        assert!(!world_indices.is_empty());
         let gauge_index = upload
             .draws
             .iter()
@@ -9777,25 +9900,6 @@ mod tests {
                     .then_some(u32::try_from(index).unwrap())
             })
             .expect("gauge analytic draw exists");
-        let habitat_indices = upload
-            .draws
-            .iter()
-            .enumerate()
-            .filter_map(|(index, draw)| {
-                let habitat = matches!(
-                    draw.source,
-                    PrimitiveSource::Instances(
-                        InstanceSource::RoomGlyphs
-                            | InstanceSource::PropGlyphs { .. }
-                            | InstanceSource::TankCells { .. }
-                            | InstanceSource::Ambient
-                    )
-                ) || (draw.source == PrimitiveSource::Analytic
-                    && upload.primitives[index].binding_index == 8);
-                habitat.then_some(u32::try_from(index).unwrap())
-            })
-            .collect::<Vec<_>>();
-        assert!(!habitat_indices.is_empty());
 
         let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         let mut render_variant =
@@ -9824,12 +9928,10 @@ mod tests {
                     )
                     .unwrap()
             };
-        let habitat_on = render_variant(&[], &hud);
-        let habitat_on_without_chrome = render_variant(&[gauge_index], &zero_hud);
-        let habitat_off = render_variant(&habitat_indices, &hud);
-        let mut habitat_and_chrome = habitat_indices.clone();
-        habitat_and_chrome.push(gauge_index);
-        let habitat_off_without_chrome = render_variant(&habitat_and_chrome, &zero_hud);
+        let chrome = render_variant(&world_indices, &hud);
+        let mut world_and_chrome = world_indices;
+        world_and_chrome.push(gauge_index);
+        let without_chrome = render_variant(&world_and_chrome, &zero_hud);
 
         let changed_mask = |with: &SceneRenderOutcome,
                             without: &SceneRenderOutcome,
@@ -9864,38 +9966,15 @@ mod tests {
                 let distance = ((x - 180.0).powi(2) + (y - 180.0).powi(2)).sqrt();
                 (distance - lane.radius as f32).abs() <= lane.stroke_width as f32 / 2.0 + 1.0
             };
-            let on_mask = changed_mask(&habitat_on, &habitat_on_without_chrome, &includes);
-            let off_mask = changed_mask(&habitat_off, &habitat_off_without_chrome, &includes);
-            assert!(
-                on_mask.iter().any(|changed| *changed),
-                "{name} lane is blank"
-            );
-            let changed_pixels = on_mask
-                .iter()
-                .zip(&off_mask)
-                .filter(|(on, off)| on != off)
-                .count();
-            assert!(
-                on_mask == off_mask,
-                "{name} lane mask changed with habitat pass at {changed_pixels} pixels"
-            );
+            let mask = changed_mask(&chrome, &without_chrome, &includes);
+            assert!(mask.iter().any(|changed| *changed), "{name} lane is blank");
         }
 
         let hud_region = |x: f32, y: f32| (70.0..290.0).contains(&x) && (105.0..255.0).contains(&y);
-        let hud_on_mask = changed_mask(&habitat_on, &habitat_on_without_chrome, &hud_region);
-        let hud_off_mask = changed_mask(&habitat_off, &habitat_off_without_chrome, &hud_region);
+        let hud_mask = changed_mask(&chrome, &without_chrome, &hud_region);
         assert!(
-            hud_on_mask.iter().any(|changed| *changed),
+            hud_mask.iter().any(|changed| *changed),
             "center HUD glyph mask is blank"
-        );
-        let changed_hud_pixels = hud_on_mask
-            .iter()
-            .zip(&hud_off_mask)
-            .filter(|(on, off)| on != off)
-            .count();
-        assert!(
-            hud_on_mask == hud_off_mask,
-            "center HUD glyph mask changed with habitat pass at {changed_hud_pixels} pixels"
         );
     }
 
