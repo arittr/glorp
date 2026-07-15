@@ -44,6 +44,11 @@ Transient recovery owned by the retained scene runtime is unchanged. Only the
 current escalation from retained failure to host-level Smooth fallback is
 removed.
 
+Dev-only bounded review and fault-injection processes are the exception to the
+keep-running rule: after recording the terminal category and any available
+retained metrics, they exit nonzero instead of waiting for an automation timeout.
+They still never create or paint Smooth.
+
 ## Diagnostics
 
 The first terminal failure writes one boundary diagnostic containing the
