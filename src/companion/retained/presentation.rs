@@ -49,12 +49,6 @@ pub(crate) enum FrameDisposition {
     Captured,
     Skipped(SkipReason),
     Failed(RetainedFailureCategory),
-    /// The runtime has requested a Smooth fallback but the degraded path has not
-    /// yet painted. Carried on [`RendererRuntimeState`](crate::commands::companion_mode::RendererRuntimeState).
-    FallbackPending(RetainedFailureCategory),
-    /// The Smooth fallback has painted a frame, acknowledging the degradation is
-    /// on screen. Carried on [`RendererRuntimeState`](crate::commands::companion_mode::RendererRuntimeState).
-    FallbackPainted(RetainedFailureCategory),
 }
 
 /// Static failure category for a retained render outcome or an asynchronous GPU

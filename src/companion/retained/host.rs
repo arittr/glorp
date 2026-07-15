@@ -2048,11 +2048,6 @@ impl ActiveRetainedHost {
         self.host.metrics.record_hidden_tick(tick_start);
     }
 
-    pub(crate) fn record_fallback(&mut self) {
-        self.host.metrics.record_fallback();
-        self.host.metrics.record_fallback_pending();
-    }
-
     pub(crate) fn runtime_metrics_snapshot(
         &self,
         inventory: CompanionCapacityInventory,

@@ -682,34 +682,23 @@ mod tests {
 
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
     #[test]
-    fn fallback_preserves_requested_renderer() {
-        let mut state = RendererRuntimeState::new(
-            CompanionRendererRequest::Retained,
-            EffectiveCompanionRenderer::Retained,
-        );
-        state.fallback_to_smooth("retained-device-lost");
-        assert_eq!(state.requested(), CompanionRendererRequest::Retained);
-        assert_eq!(state.effective(), EffectiveCompanionRenderer::Smooth);
-        assert_eq!(state.transition_count(), 1);
-        assert_eq!(state.last_fallback_reason(), Some("retained-device-lost"));
-    }
-
-    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
-    #[test]
-    fn initialization_failure_is_labeled_and_smooth_paint_is_acknowledged() {
+    fn terminal_failure_preserves_retained_selection_and_first_category() {
         use crate::companion::retained::{FrameDisposition, RetainedFailureCategory};
 
         let mut state = RendererRuntimeState::fixture_retained();
-        state.request_fallback(RetainedFailureCategory::DeviceUnavailable);
+        assert!(state.record_terminal_failure(RetainedFailureCategory::DeviceUnavailable));
+        assert!(!state.record_terminal_failure(RetainedFailureCategory::DeviceValidation));
+        assert_eq!(state.effective(), EffectiveCompanionRenderer::Retained);
+        assert_eq!(
+            state.terminal_failure(),
+            Some(RetainedFailureCategory::DeviceUnavailable)
+        );
         assert_eq!(
             state.disposition(),
-            FrameDisposition::FallbackPending(RetainedFailureCategory::DeviceUnavailable,)
+            FrameDisposition::Failed(RetainedFailureCategory::DeviceUnavailable)
         );
-        state.acknowledge_smooth_paint();
-        assert_eq!(
-            state.disposition(),
-            FrameDisposition::FallbackPainted(RetainedFailureCategory::DeviceUnavailable,)
-        );
+        assert_eq!(state.transition_count(), 0);
+        assert_eq!(state.last_fallback_reason(), None);
     }
 
     #[cfg(all(
@@ -1182,20 +1171,14 @@ fn resolve_auto_renderer(
     EffectiveCompanionRenderer::Smooth
 }
 
-/// Live renderer state for one running companion. The requested renderer is the
-/// operator's intent and never changes; only the effective renderer degrades on
-/// a runtime fallback, which is counted for diagnostics.
+/// Live renderer state for one running companion. Renderer selection is fixed at
+/// construction; retained renderer health is recorded independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererRuntimeState {
     requested: CompanionRendererRequest,
     effective: EffectiveCompanionRenderer,
-    transition_count: u64,
-    last_fallback_reason: Option<&'static str>,
-    /// The acknowledged-fallback disposition. `None` until a runtime or startup
-    /// fault requests a Smooth fallback; then `FallbackPending` until the first
-    /// Smooth paint acknowledges it as `FallbackPainted`.
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
-    fallback: Option<FrameDisposition>,
+    terminal_failure: Option<RetainedFailureCategory>,
 }
 
 impl RendererRuntimeState {
@@ -1203,10 +1186,8 @@ impl RendererRuntimeState {
         Self {
             requested,
             effective,
-            transition_count: 0,
-            last_fallback_reason: None,
             #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
-            fallback: None,
+            terminal_failure: None,
         }
     }
 
@@ -1219,53 +1200,40 @@ impl RendererRuntimeState {
     }
 
     pub fn transition_count(&self) -> u64 {
-        self.transition_count
+        0
     }
 
     pub fn last_fallback_reason(&self) -> Option<&'static str> {
-        self.last_fallback_reason
+        None
     }
 
-    /// Degrades the effective renderer to Smooth after a runtime failure. The
-    /// requested renderer is preserved so intent survives the fallback.
-    pub fn fallback_to_smooth(&mut self, reason: &'static str) {
-        self.effective = EffectiveCompanionRenderer::Smooth;
-        self.transition_count = self.transition_count.saturating_add(1);
-        self.last_fallback_reason = Some(reason);
-    }
-
-    /// Requests the acknowledged Smooth fallback for `category`: degrades the
-    /// effective renderer to Smooth and records a `FallbackPending` disposition.
-    /// The pending disposition is not acknowledged until the first Smooth paint
-    /// lands via [`acknowledge_smooth_paint`](Self::acknowledge_smooth_paint), so
-    /// a review capture can prove the degraded path actually reached the screen.
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
-    pub(crate) fn request_fallback(&mut self, category: RetainedFailureCategory) {
-        self.fallback_to_smooth(category.category());
-        self.fallback = Some(FrameDisposition::FallbackPending(category));
-    }
-
-    /// Acknowledges that the Smooth fallback has painted a frame. Promotes a
-    /// `FallbackPending` disposition to `FallbackPainted`; a no-op when no
-    /// fallback is pending, so calling it after every Smooth paint is safe.
-    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
-    pub(crate) fn acknowledge_smooth_paint(&mut self) {
-        if let Some(FrameDisposition::FallbackPending(category)) = self.fallback {
-            self.fallback = Some(FrameDisposition::FallbackPainted(category));
+    pub(crate) fn record_terminal_failure(&mut self, category: RetainedFailureCategory) -> bool {
+        if self.terminal_failure.is_some() {
+            false
+        } else {
+            self.terminal_failure = Some(category);
+            true
         }
     }
 
-    /// The current acknowledged-fallback disposition. Before any fallback this is
-    /// `SurfacePresentCalled` (the healthy retained terminal); after a fallback it
-    /// reports `FallbackPending` then `FallbackPainted`.
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    pub(crate) fn terminal_failure(&self) -> Option<RetainedFailureCategory> {
+        self.terminal_failure
+    }
+
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    // Typed review-evidence seam; production gating reads `terminal_failure`
+    // directly and tests cover the corresponding disposition contract.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn disposition(&self) -> FrameDisposition {
-        self.fallback
+        self.terminal_failure
+            .map(FrameDisposition::Failed)
             .unwrap_or(FrameDisposition::SurfacePresentCalled)
     }
 
     /// A retained runtime that has resolved to the Retained renderer, for driving
-    /// the acknowledged-fallback state transitions under test.
+    /// terminal-failure state transitions under test.
     #[cfg(all(test, target_os = "macos", feature = "retained-renderer"))]
     pub(crate) fn fixture_retained() -> Self {
         Self::new(

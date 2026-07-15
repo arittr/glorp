@@ -973,14 +973,6 @@ impl CompanionRuntimeMetrics {
         }
     }
 
-    pub(crate) fn record_fallback(&mut self) {
-        increment(&mut self.fallback_count, 1);
-    }
-
-    pub(crate) fn record_fallback_pending(&mut self) {
-        increment(&mut self.fallback_pending_transitions, 1);
-    }
-
     pub(crate) fn record_capture_attempt(&mut self) {
         increment(&mut self.capture_attempted, 1);
     }
@@ -1384,8 +1376,6 @@ mod tests {
         metrics.record_present(Duration::from_millis(120));
         metrics.record_resize_invalidation();
         metrics.record_scale_invalidation();
-        metrics.record_fallback();
-        metrics.record_fallback_pending();
         metrics.record_persistent_gpu_create(3);
         metrics.observe_nodes(72);
         let snapshot = metrics.snapshot(
@@ -1459,8 +1449,9 @@ mod tests {
         assert_eq!(snapshot.longest_visible_no_present_ms, 120);
         assert_eq!(snapshot.resize_invalidations, 1);
         assert_eq!(snapshot.scale_invalidations, 1);
-        assert_eq!(snapshot.fallback_count, 1);
-        assert_eq!(snapshot.fallback_pending_transitions, 1);
+        assert_eq!(snapshot.fallback_count, 0);
+        assert_eq!(snapshot.fallback_pending_transitions, 0);
+        assert_eq!(snapshot.fallback_painted_transitions, 0);
         assert_eq!(snapshot.persistent_gpu_objects_created, 3);
         assert_eq!(snapshot.node_high_water, 72);
         assert_eq!(snapshot.identity.layout_generation, None);

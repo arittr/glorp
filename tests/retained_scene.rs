@@ -69,13 +69,36 @@ fn rollout_live_activates_then_presents_active_scene_versions() {
     let live = source_between(
         APP_SOURCE,
         "\nfn service_live_scene_runtime(",
-        "\nfn prepare_cold_smooth_fallback_once(",
+        "\nfn handle_scene_runtime_failure(",
     );
     assert!(live.contains("advance_scene_generation(true)"));
     assert!(live.contains("activate_candidate("));
     assert!(live.contains("present_active_scene("));
     assert!(HOST_SOURCE.contains("Result<ScenePresentOutcome, RetainedFailureCategory>"));
     assert!(HOST_SOURCE.contains("ScenePresentOutcome::Presented(version)"));
+}
+
+#[test]
+fn terminal_failure_retains_the_host_and_never_constructs_smooth_fallback() {
+    let freeze = source_between(
+        APP_SOURCE,
+        "\nfn freeze_retained(",
+        "\nfn record_frame_preparation_error(",
+    );
+    assert!(freeze.contains("record_terminal_failure(error)"));
+    for forbidden in [
+        "request_fallback",
+        "restore_appkit",
+        "new_round_view",
+        "acknowledge_smooth_paint",
+        "retained_host.take()",
+        "record_fallback",
+    ] {
+        assert!(
+            !freeze.contains(forbidden),
+            "terminal failure path must not call {forbidden}"
+        );
+    }
 }
 
 #[test]

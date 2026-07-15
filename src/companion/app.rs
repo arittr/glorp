@@ -21,6 +21,8 @@ use crate::commands::watch::{
     build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
 };
 use crate::companion::render::{build_draw_commands, RoundColor, RoundDrawCommand, RoundDrawKind};
+#[cfg(feature = "retained-renderer")]
+use crate::companion::retained::RetainedFailureCategory;
 use crate::error::{GlorpError, Result};
 use crate::paths::AppPaths;
 use crate::presentation::pixel::{
@@ -687,8 +689,6 @@ struct AppState {
     reduce_motion: bool,
     #[cfg(feature = "retained-renderer")]
     scene_progress: SceneProgressPolicy,
-    #[cfg(feature = "retained-renderer")]
-    cold_smooth_fallback: ColdSmoothFallbackGate,
     pixel_input: Option<PixelPetInput>,
     pixel_state: Option<PixelRendererState>,
     pixel_frame: Option<PixelFrame>,
@@ -713,8 +713,6 @@ struct AppState {
     review_lifetime_frames: Option<u64>,
     #[cfg(feature = "retained-renderer")]
     runtime_baseline_visibility: RuntimeBaselineVisibilityPhase,
-    #[cfg(feature = "retained-renderer")]
-    terminal_runtime_metrics: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
     metric_cache: CompanionMetricCache,
     last_good_frame: Option<PreparedCompanionFrame>,
     #[allow(dead_code)] // Read by the Task 5 paint boundary.
@@ -777,24 +775,6 @@ impl SceneSurfaceTransitionState {
         SceneSurfaceTransitionTick {
             defer_surface_resize: false,
             refresh_layout,
-        }
-    }
-}
-
-#[cfg(feature = "retained-renderer")]
-#[derive(Debug, Default)]
-struct ColdSmoothFallbackGate {
-    prepared: bool,
-}
-
-#[cfg(feature = "retained-renderer")]
-impl ColdSmoothFallbackGate {
-    fn take_prepare_request(&mut self) -> bool {
-        if self.prepared {
-            false
-        } else {
-            self.prepared = true;
-            true
         }
     }
 }
@@ -1188,6 +1168,14 @@ fn companion_accessibility_value() -> String {
     })
 }
 
+#[cfg(feature = "retained-renderer")]
+fn retained_startup_failure(category: RetainedFailureCategory) -> GlorpError {
+    GlorpError::Message(format!(
+        "retained renderer initialization failed ({})",
+        category.category()
+    ))
+}
+
 pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) -> Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| GlorpError::Message("glorp companion must run on the main thread".into()))?;
@@ -1209,9 +1197,6 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             error.category()
         ))
     })?;
-    #[cfg(feature = "retained-renderer")]
-    let mut renderer_runtime = RendererRuntimeState::new(request, effective);
-    #[cfg(not(feature = "retained-renderer"))]
     let renderer_runtime = RendererRuntimeState::new(request, effective);
     let paths = AppPaths::resolve()?;
     paths.ensure()?;
@@ -1301,14 +1286,13 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
         window.makeKeyAndOrderFront(None);
     }
     // Prepare all fallible GPU work on a detached layer, then activate (install
-    // the layer on the view) only on success. A failure in either phase falls the
-    // effective renderer back to Smooth and leaves the view with no residual
-    // retained layer, so the review capture below reads the true post-fallback
-    // renderer.
+    // the layer on the view) only on success. Retained startup is atomic: a
+    // failure returns the sanitized retained category instead of selecting a
+    // different renderer.
     #[cfg(feature = "retained-renderer")]
     let mut retained_host = if renderer_runtime.effective().is_retained() {
-        // Dev/test-only: an injected initialization fault forces the startup path
-        // down the acknowledged Smooth fallback without ever building a host.
+        // Dev/test-only: an injected initialization fault exercises the retained
+        // startup error without ever building a host.
         #[cfg(feature = "dev-preview")]
         let injected_init_fault = review.retained_fault_injection.and_then(
             crate::commands::companion_mode::RetainedFaultInjection::initialization_category,
@@ -1323,8 +1307,7 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
                 "glorp retained renderer initialization fault injected: {}\n",
                 category.category()
             ));
-            renderer_runtime.request_fallback(category);
-            None
+            return Err(retained_startup_failure(category));
         } else {
             let mailbox = crate::companion::retained::GpuErrorMailbox::new();
             let activation =
@@ -1348,8 +1331,7 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
                         "glorp retained renderer initialization failed: {}\n",
                         error.category()
                     ));
-                    renderer_runtime.request_fallback(error);
-                    None
+                    return Err(retained_startup_failure(error));
                 }
             }
         }
@@ -1450,8 +1432,6 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             },
             #[cfg(feature = "retained-renderer")]
             scene_progress: SceneProgressPolicy::default(),
-            #[cfg(feature = "retained-renderer")]
-            cold_smooth_fallback: ColdSmoothFallbackGate::default(),
             pixel_input,
             pixel_state,
             pixel_frame,
@@ -1475,8 +1455,6 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             } else {
                 RuntimeBaselineVisibilityPhase::Inactive
             },
-            #[cfg(feature = "retained-renderer")]
-            terminal_runtime_metrics: None,
             metric_cache: CompanionMetricCache::default(),
             last_good_frame: None,
             last_frame_preparation_error: None,
@@ -1486,13 +1464,7 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     });
 
     #[cfg(feature = "retained-renderer")]
-    let needs_initial_smooth_frame = APP_STATE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .is_some_and(|state| state.retained_host.is_none())
-    });
-    #[cfg(feature = "retained-renderer")]
-    if needs_initial_smooth_frame {
+    if !effective.is_retained() {
         prepare_current_frame_from_state();
     }
     #[cfg(not(feature = "retained-renderer"))]
@@ -1702,6 +1674,14 @@ fn ui_tick() {
     });
     let _mtm = MainThreadMarker::new().expect("companion ui_tick on non-main thread");
     drain_poll_results();
+    #[cfg(feature = "retained-renderer")]
+    if APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|state| !retained_work_allowed(&state.renderer_runtime))
+    }) {
+        return;
+    }
     // AppKit does not need fresh backing-store contents for a window that cannot
     // be seen. Pausing the CPU renderer here preserves the time-based motion: on
     // reveal the next tick samples the current drift/depth/bob position instead
@@ -1787,7 +1767,6 @@ fn ui_tick() {
         if let Err(error) = result {
             handle_scene_runtime_failure(error);
         }
-        drive_smooth_fallback_paint();
         finish_review_capture_if_due();
         record_retained_ui_tick(started_at);
         return;
@@ -1847,12 +1826,13 @@ fn ui_tick() {
             return;
         }
         crate::companion::retained::ResourcePreparationTick::FailedWithoutActive(category) => {
-            fallback_from_retained(category);
+            freeze_retained(category);
+            record_retained_ui_tick(started_at);
+            return;
         }
     }
     animate_pet();
     prepare_current_frame_from_state();
-    drive_smooth_fallback_paint();
     finish_review_capture_if_due();
     #[cfg(feature = "retained-renderer")]
     record_retained_ui_tick(started_at);
@@ -1929,34 +1909,10 @@ fn present_retained_active_generation() -> bool {
     true
 }
 
-/// After a runtime fallback tears down the retained host, force an unconditional
-/// AppKit display transaction. Only the resulting on-screen `drawRect:` callback
-/// may acknowledge the fallback and advance review evidence; the timer callback
-/// never invokes AppKit drawing primitives directly.
 #[cfg(feature = "retained-renderer")]
-fn drive_smooth_fallback_paint() {
-    use crate::companion::retained::FrameDisposition;
-
-    let view = APP_STATE.with(|cell| {
-        let state = cell.borrow();
-        let state = state.as_ref()?;
-        match state.renderer_runtime.disposition() {
-            FrameDisposition::FallbackPending(_) | FrameDisposition::FallbackPainted(_) => {
-                Some(state.view.clone())
-            }
-            _ => None,
-        }
-    });
-    if let Some(view) = view {
-        unsafe {
-            view.setNeedsDisplay(true);
-            view.displayRectIgnoringOpacity(view.bounds());
-        }
-    }
+fn retained_work_allowed(runtime: &RendererRuntimeState) -> bool {
+    runtime.terminal_failure().is_none()
 }
-
-#[cfg(not(feature = "retained-renderer"))]
-fn drive_smooth_fallback_paint() {}
 
 fn companion_view_is_visible() -> bool {
     APP_STATE.with(|cell| {
@@ -2337,31 +2293,7 @@ fn service_live_scene_runtime(
 }
 
 #[cfg(feature = "retained-renderer")]
-fn prepare_cold_smooth_fallback_once() {
-    let should_prepare = APP_STATE.with(|cell| {
-        let mut state = cell.borrow_mut();
-        let Some(state) = state.as_mut() else {
-            return false;
-        };
-        if !state.cold_smooth_fallback.take_prepare_request() {
-            return false;
-        }
-        let now = time::OffsetDateTime::now_utc();
-        let _ = prepare_smooth_view_model_for_tick(
-            &mut state.vm,
-            state.smooth_semantic_art_tick_index,
-            now,
-        );
-        state.scene = derive_round_scene_model(&state.vm, now);
-        true
-    });
-    if should_prepare {
-        prepare_current_frame_from_state();
-    }
-}
-
-#[cfg(feature = "retained-renderer")]
-fn handle_scene_runtime_failure(error: crate::companion::retained::RetainedFailureCategory) {
+fn handle_scene_runtime_failure(error: RetainedFailureCategory) {
     let rollout = APP_STATE.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -2369,8 +2301,7 @@ fn handle_scene_runtime_failure(error: crate::companion::retained::RetainedFailu
             .unwrap_or(SceneRuntimeRollout::Off)
     });
     if rollout == SceneRuntimeRollout::Live {
-        fallback_from_retained(error);
-        prepare_cold_smooth_fallback_once();
+        freeze_retained(error);
     } else if rollout == SceneRuntimeRollout::Shadow {
         write_boundary_diagnostic(format_args!(
             "glorp retained scene shadow failed without changing presentation: {}\n",
@@ -2543,16 +2474,7 @@ fn present_retained_frame_with(present_identity: RetainedPresentIdentity) {
                 }
                 None
             }
-            // A failed present routes to the Smooth fallback. The fallback
-            // dispositions are carried by RendererRuntimeState, not a per-frame
-            // FrameProgress, so they never originate here; matching them
-            // explicitly keeps them from being silently swallowed by a wildcard
-            // and routes them to the same fallback path if one ever leaks through.
-            Some(
-                FrameDisposition::Failed(category)
-                | FrameDisposition::FallbackPending(category)
-                | FrameDisposition::FallbackPainted(category),
-            ) => Some(category),
+            Some(FrameDisposition::Failed(category)) => Some(category),
             // A Skipped on-screen present dropped nothing to display, but this
             // tick DID prepare a valid frame — which is exactly what the offscreen
             // retained review capture consumes. Advance the review's bounded-run
@@ -2568,7 +2490,7 @@ fn present_retained_frame_with(present_identity: RetainedPresentIdentity) {
         }
     });
     if let Some(category) = failure {
-        fallback_from_retained(category);
+        freeze_retained(category);
     }
 }
 
@@ -2576,42 +2498,40 @@ fn present_retained_frame_with(present_identity: RetainedPresentIdentity) {
 fn present_retained_frame() {}
 
 #[cfg(feature = "retained-renderer")]
-fn fallback_from_retained(error: crate::companion::retained::RetainedFailureCategory) {
-    APP_STATE.with(|cell| {
+fn freeze_retained(error: RetainedFailureCategory) {
+    let exit_review = APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
-        let Some(state) = state.as_mut() else { return };
-        if state.retained_host.is_none() {
-            return;
-        }
-        if let Some(host) = state.retained_host.as_mut() {
-            host.record_fallback();
-            if state.runtime_metrics_out.is_some() {
-                state.terminal_runtime_metrics = Some(host.runtime_metrics_snapshot(
-                    crate::companion::paired_review::full_preview_capacity_inventory(),
-                ));
-            }
-        }
-        state.retained_host.take();
-        // Establish the pending state before AppKit invalidation can synchronously
-        // dispatch `drawRect:`. The callback, not teardown, owns the first genuine
-        // on-screen Smooth-paint acknowledgement.
-        state.renderer_runtime.request_fallback(error);
-        crate::companion::retained::ActiveRetainedHost::restore_appkit(state.view.as_super());
-        // A view that has hosted a CAMetalLayer does not reliably re-enter AppKit's
-        // window-backed display machinery after the layer is removed. Replace only
-        // that mutated content view with the same RoundView class and bounds. All
-        // semantic/presentation/review state remains in AppState; subsequent code
-        // reads the new authoritative view from `state.view`.
-        if let Some(mtm) = MainThreadMarker::new() {
-            let replacement = new_round_view(mtm, state.view.frame());
-            state.window.setContentView(Some(&replacement));
-            state.view = replacement;
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        if !state.renderer_runtime.record_terminal_failure(error) {
+            return false;
         }
         write_boundary_diagnostic(format_args!(
-            "glorp retained renderer fell back to Smooth: {}\n",
+            "glorp retained renderer frozen after terminal failure: {}\n",
             error.category()
         ));
+        state.review_capture.is_some() || state.runtime_metrics_out.is_some()
     });
+    if exit_review {
+        finish_terminal_retained_review();
+    }
+}
+
+#[cfg(feature = "retained-renderer")]
+fn finish_terminal_retained_review() {
+    let metrics_error = APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        state
+            .as_mut()
+            .and_then(|state| write_runtime_metrics_if_requested(state).err())
+    });
+    if let Some(error) = metrics_error {
+        write_boundary_diagnostic(format_args!(
+            "glorp runtime metrics write failed: {error}\n"
+        ));
+    }
+    std::process::exit(1);
 }
 
 fn record_frame_preparation_error(state: &mut AppState, err: CompanionFramePreparationError) {
@@ -2906,25 +2826,14 @@ fn write_runtime_metrics_if_requested(state: &mut AppState) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let live = state
-        .retained_host
-        .as_ref()
-        .map(|host| host.runtime_metrics_snapshot(inventory));
-    let snapshot = select_terminal_runtime_metrics(live, state.terminal_runtime_metrics.clone())?;
+    let host = state.retained_host.as_ref().ok_or_else(|| {
+        GlorpError::Message(
+            "retained runtime metrics requested without a live retained host".into(),
+        )
+    })?;
+    let snapshot = host.runtime_metrics_snapshot(inventory);
     std::fs::write(path, serde_json::to_vec_pretty(&snapshot)?)?;
     Ok(())
-}
-
-#[cfg(feature = "retained-renderer")]
-fn select_terminal_runtime_metrics(
-    live: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
-    terminal: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
-) -> Result<crate::companion::retained::CompanionRuntimeMetricsSnapshot> {
-    live.or(terminal).ok_or_else(|| {
-        GlorpError::Message(
-            "retained runtime metrics requested without live or terminal evidence".into(),
-        )
-    })
 }
 
 /// Freezes the last-good frame and produces the paired Smooth/Retained capture.
@@ -3214,24 +3123,6 @@ fn record_review_frame(
 ) {
     APP_STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
-            // A Smooth paint after a runtime fallback acknowledges the degraded
-            // path reached the screen (no-op unless a fallback is pending). A live
-            // retained host paints via Metal, not this AppKit path, so this only
-            // ever promotes the disposition once the host has been torn down.
-            #[cfg(feature = "retained-renderer")]
-            {
-                let pending = matches!(
-                    state.renderer_runtime.disposition(),
-                    crate::companion::retained::FrameDisposition::FallbackPending(_)
-                );
-                state.renderer_runtime.acknowledge_smooth_paint();
-                if pending {
-                    if let Some(metrics) = state.terminal_runtime_metrics.as_mut() {
-                        metrics.fallback_painted_transitions =
-                            metrics.fallback_painted_transitions.saturating_add(1);
-                    }
-                }
-            }
             if let Some(capture) = state.review_capture.as_mut() {
                 capture.record_frame(smooth_sample);
             }
@@ -4452,7 +4343,31 @@ mod tests {
 
     #[cfg(feature = "retained-renderer")]
     #[test]
-    fn acknowledged_smooth_fallback_does_not_request_direct_terminal_capture() {
+    fn retained_startup_error_keeps_the_sanitized_category() {
+        let error = retained_startup_failure(
+            crate::companion::retained::RetainedFailureCategory::DeviceUnavailable,
+        );
+        assert_eq!(
+            error.to_string(),
+            "retained renderer initialization failed (retained-device-unavailable)"
+        );
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn terminal_retained_failure_stops_future_render_work() {
+        use crate::companion::retained::RetainedFailureCategory;
+
+        let mut runtime = RendererRuntimeState::fixture_retained();
+        assert!(retained_work_allowed(&runtime));
+        runtime.record_terminal_failure(RetainedFailureCategory::DeviceUnavailable);
+        assert!(!retained_work_allowed(&runtime));
+        assert_eq!(runtime.effective(), EffectiveCompanionRenderer::Retained);
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn explicit_smooth_does_not_request_direct_terminal_capture() {
         assert!(should_run_direct_terminal_capture(
             EffectiveCompanionRenderer::Retained,
             SceneRuntimeRollout::Live,
@@ -4649,15 +4564,6 @@ mod tests {
 
     #[cfg(feature = "retained-renderer")]
     #[test]
-    fn scene_runtime_fallback_cold_builds_smooth_frame_exactly_once() {
-        let mut gate = ColdSmoothFallbackGate::default();
-        assert!(gate.take_prepare_request());
-        assert!(!gate.take_prepare_request());
-        assert!(!gate.take_prepare_request());
-    }
-
-    #[cfg(feature = "retained-renderer")]
-    #[test]
     fn scene_progress_watchdog_falls_back_at_the_first_exceeded_bound() {
         let started = Instant::now();
         let mut progress = SceneProgressPolicy::default();
@@ -4798,33 +4704,6 @@ mod tests {
         phase.record_hidden_ui_tick();
         assert_eq!(phase, RuntimeBaselineVisibilityPhase::Complete);
         assert!(phase.ready_for_terminal_work());
-    }
-
-    #[cfg(feature = "retained-renderer")]
-    #[test]
-    fn terminal_capture_snapshot_survives_live_host_teardown() {
-        let mut metrics = crate::companion::retained::CompanionRuntimeMetrics::default();
-        metrics.record_capture_attempt();
-        metrics.record_capture_success();
-        let terminal = metrics.snapshot(
-            crate::companion::retained::RuntimeIdentity::baseline(),
-            crate::companion::retained::CompanionCapacityInventory::contract_fixture(),
-            crate::companion::retained::RuntimeFixtureIdentity {
-                fixture_id: "glorp-scene-baseline-v2",
-                seed: "test",
-                update_source: "fixed",
-                semantic_cadence_ms: 250,
-                logical_width: 360.0,
-                logical_height: 360.0,
-                physical_width: 720,
-                physical_height: 720,
-                backing_scale: 2.0,
-            },
-        );
-        let selected = select_terminal_runtime_metrics(None, Some(terminal)).unwrap();
-        assert_eq!(selected.capture_attempted, 1);
-        assert_eq!(selected.capture_succeeded, 1);
-        assert_eq!(selected.capture_failed, 0);
     }
 
     #[test]

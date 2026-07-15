@@ -940,8 +940,6 @@ pub(crate) fn disposition_kebab(disposition: FrameDisposition) -> &'static str {
         FrameDisposition::Captured => "captured",
         FrameDisposition::Skipped(_) => "skipped",
         FrameDisposition::Failed(category) => category.category(),
-        FrameDisposition::FallbackPending(_) => "fallback-pending",
-        FrameDisposition::FallbackPainted(_) => "fallback-painted",
     }
 }
 

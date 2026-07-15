@@ -1133,9 +1133,7 @@ fn activation_outcome(
         Some(FrameDisposition::Skipped(SkipReason::ResourcePreparation)) => {
             ActivationAttemptOutcome::CandidateRejected(CandidateFailure::Resource)
         }
-        Some(FrameDisposition::Failed(failure))
-        | Some(FrameDisposition::FallbackPending(failure))
-        | Some(FrameDisposition::FallbackPainted(failure)) => failure_activation_outcome(failure),
+        Some(FrameDisposition::Failed(failure)) => failure_activation_outcome(failure),
         Some(FrameDisposition::Captured) | Some(FrameDisposition::SurfacePresentCalled) | None => {
             ActivationAttemptOutcome::CandidateRejected(CandidateFailure::PreSubmitEncode)
         }

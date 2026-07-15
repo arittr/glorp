@@ -472,13 +472,16 @@ fn draw_scene_reads_only_last_good_frame_and_never_records_runtime_metrics() {
 }
 
 #[test]
-fn terminal_metrics_survive_fallback_and_follow_paired_capture() {
+fn terminal_metrics_require_the_live_retained_host_and_follow_paired_capture() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
     let text = read(&path);
     assert!(
-        text.contains("terminal_runtime_metrics"),
-        "fallback must preserve a terminal runtime snapshot after host teardown"
+        !text.contains("terminal_runtime_metrics"),
+        "terminal failure must retain the live host instead of copying teardown metrics"
     );
+    let metrics = function_body_from(&text, "fn write_runtime_metrics_if_requested(");
+    assert!(metrics.contains("state.retained_host.as_ref()"));
+    assert!(metrics.contains("retained runtime metrics requested without a live retained host"));
     let finish = text
         .find("fn finish_review_capture_if_due()")
         .expect("finish_review_capture_if_due exists");
@@ -870,15 +873,22 @@ fn active_hold_precedes_worker_service_and_no_active_records_explicit_skip() {
     let tick_start = text.find("fn ui_tick()").expect("ui_tick exists");
     let tick_tail = &text[tick_start..];
     let tick_end = tick_tail
-        .find("\n/// After a runtime fallback")
+        .find("\n#[cfg(feature = \"retained-renderer\")]\nfn record_retained_ui_tick")
         .expect("ui_tick end marker exists");
     let tick = &tick_tail[..tick_end];
+    let terminal_guard = tick
+        .find("retained_work_allowed")
+        .expect("terminal retained work guard exists");
+    let first_animation = tick.find("animate_pet()").expect("animation work exists");
     let worker_service = tick
         .find("drive_retained_resource_preparation()")
         .expect("worker service is driven");
     let hold = tick
         .find("present_retained_active_generation()")
         .expect("active generation presentation exists");
+    assert!(terminal_guard < first_animation);
+    assert!(terminal_guard < hold);
+    assert!(terminal_guard < worker_service);
     assert!(hold < worker_service);
     assert!(tick.contains("ResourcePreparationTick::YieldedWithoutActive"));
 
