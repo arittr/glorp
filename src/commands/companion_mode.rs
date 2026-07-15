@@ -320,11 +320,10 @@ impl SceneRuntimeRollout {
     }
 }
 
-/// One-line rollback for the direct Retained scene route during the Gate D
-/// canary. This remains `false` after the release-candidate hold hit the progress
-/// watchdog; Auto Retained uses `Off` and explicit Retained uses `Shadow`, so
-/// both present through the legacy translator until the blocker is fixed.
-pub const AUTO_SCENE_RUNTIME_ON_APPLE_SILICON: bool = false;
+/// One-line rollback for the direct Retained scene route. The resize, display,
+/// fullscreen, pacing, and composition blockers have been cleared, so capable
+/// Apple-Silicon launches now present the direct scene by default.
+pub const AUTO_SCENE_RUNTIME_ON_APPLE_SILICON: bool = true;
 
 pub const fn resolve_scene_rollout(
     retained_scene_review: bool,
@@ -521,11 +520,10 @@ mod tests {
     }
 
     #[test]
-    fn scene_runtime_rollout_one_line_rollback_disables_direct_retained_paths() {
-        const { assert!(!AUTO_SCENE_RUNTIME_ON_APPLE_SILICON) };
+    fn scene_runtime_cutover_enables_direct_retained_paths() {
         assert_eq!(
             resolve_scene_rollout(true, AUTO_SCENE_RUNTIME_ON_APPLE_SILICON),
-            SceneRuntimeRollout::Shadow
+            SceneRuntimeRollout::Live
         );
     }
 
@@ -566,10 +564,10 @@ mod tests {
             None,
             AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
         );
-        assert_eq!(auto_rollout, SceneRuntimeRollout::Off);
+        assert_eq!(auto_rollout, SceneRuntimeRollout::Live);
         assert_eq!(
             effective_scene_route(EffectiveCompanionRenderer::Retained, auto_rollout),
-            EffectiveSceneRoute::Legacy
+            EffectiveSceneRoute::Direct
         );
 
         let explicit_retained = resolve_scene_runtime_rollout(
@@ -578,10 +576,10 @@ mod tests {
             None,
             AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
         );
-        assert_eq!(explicit_retained, SceneRuntimeRollout::Shadow);
+        assert_eq!(explicit_retained, SceneRuntimeRollout::Live);
         assert_eq!(
             effective_scene_route(EffectiveCompanionRenderer::Retained, explicit_retained),
-            EffectiveSceneRoute::Legacy
+            EffectiveSceneRoute::Direct
         );
 
         let explicit_live = resolve_scene_runtime_rollout(
@@ -875,7 +873,7 @@ mod tests {
             "{text}"
         );
         if expected.is_retained() {
-            assert!(text.contains("effective-scene-route=legacy"), "{text}");
+            assert!(text.contains("effective-scene-route=direct"), "{text}");
         } else {
             assert!(
                 text.contains("effective-scene-route=not-applicable"),
@@ -892,10 +890,9 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("requested-renderer=retained"), "{text}");
         assert!(text.contains("retained-compiled=true"), "{text}");
-        // Explicit Retained remains available, but the failed hold triggered the
-        // one-line scene-route rollback to the legacy translator.
+        // Explicit Retained follows the enabled automatic direct-scene cutover.
         assert!(text.contains("effective-renderer=retained"), "{text}");
-        assert!(text.contains("effective-scene-route=legacy"), "{text}");
+        assert!(text.contains("effective-scene-route=direct"), "{text}");
     }
 
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]

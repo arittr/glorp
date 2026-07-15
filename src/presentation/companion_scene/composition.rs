@@ -229,11 +229,14 @@ fn candidate_anchors(zone: PropZoneSnapshot, columns: u16, rows: u16) -> Vec<Can
         ],
         PropZoneSnapshot::FloorMid => vec![
             anchor(center_x(0), end_y(-1)),
+            anchor(center_x(-13), end_y(-1)),
+            anchor(center_x(13), end_y(-1)),
             anchor(center_x(-7), end_y(-1)),
             anchor(center_x(7), end_y(-1)),
             anchor(center_x(0), end_y(-2)),
         ],
         PropZoneSnapshot::FloorRight => vec![
+            anchor(end_x(-4), end_y(-1)),
             anchor(end_x(-5), end_y(-1)),
             anchor(end_x(-3), end_y(-1)),
             anchor(end_x(-7), end_y(-2)),
@@ -244,6 +247,7 @@ fn candidate_anchors(zone: PropZoneSnapshot, columns: u16, rows: u16) -> Vec<Can
             anchor(start_x(4), center_y(2)),
         ],
         PropZoneSnapshot::WallRight => vec![
+            anchor(end_x(-6), center_y(0)),
             anchor(end_x(-2), center_y(0)),
             anchor(end_x(-4), center_y(-2)),
             anchor(end_x(-2), center_y(2)),
@@ -265,6 +269,9 @@ fn candidate_anchors(zone: PropZoneSnapshot, columns: u16, rows: u16) -> Vec<Can
             anchor(end_x(-7), start_y(6)),
         ],
         PropZoneSnapshot::Ceiling => vec![
+            anchor(center_x(0), start_y(4)),
+            anchor(center_x(-8), start_y(4)),
+            anchor(center_x(8), start_y(4)),
             anchor(center_x(0), start_y(1)),
             anchor(center_x(-8), start_y(1)),
             anchor(center_x(8), start_y(1)),

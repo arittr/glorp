@@ -4491,6 +4491,122 @@ mod tests {
 
     #[cfg(feature = "retained-renderer")]
     #[test]
+    fn direct_scene_production_grid_keeps_earned_props_visible() {
+        use crate::game::habitat::HABITAT_PROP_CATALOG;
+        use crate::presentation::companion_scene::{
+            CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+            CompanionSceneSnapshot,
+        };
+
+        let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(
+            120,
+            time::macros::date!(2026 - 07 - 15),
+        );
+        const MATURE_PROP_IDS: &[&str] = &[
+            "token_pebble_25k",
+            "token_shell_100k",
+            "codex_signal_lamp",
+            "token_moss_tuft_250k",
+            "token_spark_500k",
+            "token_friendly_cloud_750k",
+            "token_shard_1m",
+            "token_treasure_chest_2m",
+            "token_orbit_5m",
+            "token_reeds_5m",
+            "token_lantern_10m",
+            "token_hanging_vine_25m",
+            "token_geode_50m",
+            "token_bonsai_100m",
+            "token_constellation_250m",
+            "token_aurora_500m",
+            "heavy_session_planter",
+        ];
+        vm.habitat.earned_props = HABITAT_PROP_CATALOG
+            .iter()
+            .filter(|spec| MATURE_PROP_IDS.contains(&spec.id))
+            .map(|spec| {
+                let source = match spec.id {
+                    crate::game::habitat::CODEX_SIGNAL_LAMP => {
+                        crate::storage::state::HabitatPropSource::ProviderFirstUse {
+                            provider_surface: "codex".to_owned(),
+                        }
+                    }
+                    crate::game::habitat::HEAVY_SESSION_PLANTER => {
+                        crate::storage::state::HabitatPropSource::HeavySession
+                    }
+                    _ => crate::storage::state::HabitatPropSource::LifetimeTokens {
+                        threshold: spec
+                            .lifetime_threshold
+                            .expect("mature fixture prop has a lifetime threshold"),
+                    },
+                };
+                crate::tui::view_model::EarnedHabitatPropView {
+                    id: crate::storage::state::HabitatPropId::new(spec.id),
+                    earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                    kind: spec.kind,
+                    display_priority: spec.display_priority,
+                    source,
+                }
+            })
+            .collect();
+        let rendered = crate::pet::render::render_pet(
+            &crate::pet::generation::generate_pet("direct-scene-production-grid")
+                .with_species(crate::pet::generation::Species::Crystal),
+            crate::game::evolution::Stage::S3,
+            crate::game::metabolism::Mood::Content,
+            crate::pet::render::AnimationFrame::default(),
+        );
+        vm.pet_render.generated_species = crate::pet::generation::Species::Crystal;
+        vm.pet_render.stage = crate::game::evolution::Stage::S3;
+        vm.pet_art = rendered.lines;
+        vm.pet_spans = rendered.spans;
+        let width = 690.0;
+        let height = 690.0;
+        let metrics = companion_grid_metrics(width, height).expect("production grid metrics");
+        let snapshot = CompanionSceneSnapshot::project_with_input(
+            &vm,
+            CompanionSceneProjectionInput::round(
+                CompanionProjectionClock::new(time::macros::datetime!(2026-07-15 17:35 UTC), 0),
+                CompanionLogicalLayout::round(width as f32, height as f32),
+                metrics.grid_cols,
+                metrics.grid_rows,
+                crate::round::scene::current_round_motion_clearance(metrics.grid_rows),
+            ),
+        )
+        .expect("project direct retained scene at production geometry");
+
+        let visible_count = snapshot
+            .frame
+            .prop_instances
+            .iter()
+            .filter(|prop| prop.visible && prop.opacity > 0.0)
+            .count();
+        let placement_summary = snapshot
+            .topology
+            .visible_props
+            .iter()
+            .zip(&snapshot.frame.prop_instances)
+            .map(|(topology, frame)| {
+                (
+                    topology.catalog_id,
+                    topology.zone,
+                    frame.visible,
+                    frame.origin_points,
+                    frame.footprint_points,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            visible_count >= 4,
+            "production grid {}x{} retained only {visible_count} readable props from {} projected slots: {placement_summary:?}",
+            metrics.grid_cols,
+            metrics.grid_rows,
+            snapshot.topology.visible_props.len(),
+        );
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
     fn active_scene_defers_surface_resize_during_live_drag() {
         let mut resize = SceneSurfaceTransitionState::default();
 
