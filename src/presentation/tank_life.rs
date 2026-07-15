@@ -49,6 +49,27 @@ impl TankRouteGeometry {
             literal_floor_allowed: false,
         }
     }
+
+    pub(crate) fn with_composition_clearance(
+        mut self,
+        gauge_inner_radius_cells: [f32; 2],
+        reserved_regions: &[TankRouteRect],
+        foreground_reserved_regions: &[TankRouteRect],
+    ) -> Self {
+        if let Some(aperture) = &mut self.aperture {
+            aperture.radius_cols = gauge_inner_radius_cells[0]
+                .floor()
+                .clamp(1.0, f32::from(u16::MAX)) as u16;
+            aperture.radius_rows = gauge_inner_radius_cells[1]
+                .floor()
+                .clamp(1.0, f32::from(u16::MAX)) as u16;
+        }
+        self.reserved_regions.extend_from_slice(reserved_regions);
+        self.foreground_reserved_regions
+            .extend_from_slice(foreground_reserved_regions);
+        self.literal_floor_allowed = false;
+        self
+    }
 }
 
 pub(crate) const fn pet_face_reserved_region(pet_rect: TankRouteRect) -> TankRouteRect {

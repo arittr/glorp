@@ -515,6 +515,9 @@ fn checksum_frame_with_projection(
         encode_points(&mut hash, slot.motion_offset_points)?;
         hash.f32(slot.opacity)
             .map_err(|_| SceneGenerationError::NonFinite)?;
+        encode_points(&mut hash, slot.footprint_points)?;
+        hash.f32(slot.contact_shadow_strength)
+            .map_err(|_| SceneGenerationError::NonFinite)?;
     }
     for slot in &frame.room_glyph_slots {
         hash.u8(slot.slot);

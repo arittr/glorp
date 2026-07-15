@@ -713,13 +713,15 @@ fn project_prop_frame_delta(
     for source in &snapshot.frame.prop_instances {
         output.push(PropFrameSlot {
             slot: source.slot,
-            visible: true,
+            visible: source.visible,
             origin_points: [
                 source.origin_points[0],
                 snapshot.topology.layout.height_points - source.origin_points[1],
             ],
             motion_offset_points: source.motion_offset_points,
             opacity: source.opacity,
+            footprint_points: source.footprint_points,
+            contact_shadow_strength: source.contact_shadow_strength,
         });
     }
 }
@@ -1063,7 +1065,8 @@ fn build_template(
     let mut add_node = |name: String,
                         parent: Option<&str>,
                         z: f32,
-                        bounds: Bounds3|
+                        bounds: Bounds3,
+                        depth_cue: DepthCue|
      -> Result<NodeId, SceneGenerationError> {
         let node_alias = alias(name)?;
         let id = NodeId::from_alias(&node_alias);
@@ -1076,7 +1079,7 @@ fn build_template(
             parent,
             base_transform: Transform3::translated([0.0, 0.0, z]),
             local_bounds: bounds,
-            depth_cue: DepthCue::NEUTRAL,
+            depth_cue,
         });
         Ok(id)
     };
@@ -1112,7 +1115,7 @@ fn build_template(
         ("chrome.hud", Some("chrome.screen"), 0.0),
         ("chrome.dim", Some("chrome.screen"), 0.0),
     ] {
-        add_node(name.to_owned(), parent, z, scene_bounds)?;
+        add_node(name.to_owned(), parent, z, scene_bounds, DepthCue::NEUTRAL)?;
     }
 
     for prop in &snapshot.topology.visible_props {
@@ -1129,19 +1132,27 @@ fn build_template(
             }
             _ => -1.60 + f32::from(prop.stable_order) * 0.01,
         };
-        add_node(prop_alias.clone(), Some(parent), z, unit_bounds)?;
+        add_node(
+            prop_alias.clone(),
+            Some(parent),
+            z,
+            unit_bounds,
+            prop.authored_depth.depth_cue(),
+        )?;
         if prop.catalog_id == crate::game::habitat::TOKEN_TREASURE_CHEST_2M {
             add_node(
                 format!("{prop_alias}.body"),
                 Some(&prop_alias),
                 0.0,
                 unit_bounds,
+                DepthCue::NEUTRAL,
             )?;
             add_node(
                 format!("{prop_alias}.lid"),
                 Some(&prop_alias),
                 0.0,
                 unit_bounds,
+                DepthCue::NEUTRAL,
             )?;
         }
     }
@@ -1152,12 +1163,14 @@ fn build_template(
             Some("world.tank.behind"),
             -1.45 + f32::from(tank.stable_order) * 0.01,
             unit_bounds,
+            crate::presentation::companion_scene::AuthoredDepthSnapshot::BehindPet.depth_cue(),
         )?;
         add_node(
             format!("{tank_alias}.foreground"),
             Some("world.tank.foreground"),
             1.35 + f32::from(tank.stable_order) * 0.01,
             unit_bounds,
+            crate::presentation::companion_scene::AuthoredDepthSnapshot::Foreground.depth_cue(),
         )?;
     }
 
@@ -2368,10 +2381,12 @@ fn build_frame(
         ];
         frame.prop_slots[slot] = PropFrameSlot {
             slot: source.slot,
-            visible: true,
+            visible: source.visible,
             origin_points: origin,
             motion_offset_points: source.motion_offset_points,
             opacity: source.opacity,
+            footprint_points: source.footprint_points,
+            contact_shadow_strength: source.contact_shadow_strength,
         };
     }
     for (semantic, source) in snapshot

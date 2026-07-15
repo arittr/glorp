@@ -357,6 +357,30 @@ pub enum AuthoredDepthSnapshot {
     Foreground,
 }
 
+impl AuthoredDepthSnapshot {
+    pub(crate) const fn parallax_multiplier(self) -> f32 {
+        match self {
+            Self::Background => 0.010,
+            Self::BehindPet => 0.030,
+            Self::Foreground => 0.045,
+        }
+    }
+
+    pub(crate) const fn depth_cue(self) -> DepthCue {
+        let (opacity, saturation) = match self {
+            Self::Background => (0.82, 0.78),
+            Self::BehindPet => (0.94, 0.90),
+            Self::Foreground => (1.0, 1.05),
+        };
+        DepthCue {
+            scale: 1.0,
+            y_offset_points_up: 0.0,
+            opacity,
+            saturation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ContentSnapshot {
     pub mood: Mood,
@@ -597,9 +621,12 @@ pub struct RoomGlyphFrameSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct PropFrameSnapshot {
     pub slot: u8,
+    pub visible: bool,
     pub origin_points: [f32; 2],
     pub motion_offset_points: [f32; 2],
     pub opacity: f32,
+    pub footprint_points: [f32; 2],
+    pub contact_shadow_strength: f32,
     pub transition: Option<PropTransitionAnchor>,
 }
 

@@ -2179,9 +2179,7 @@ fn validate_instance_frame_slots(frame: &SceneFrame) -> Result<(), SceneValidati
         SceneValidationError::AmbientSlotOutOfBounds,
     )?;
     for slot in &frame.prop_slots {
-        validate_points(slot.origin_points)?;
-        validate_points(slot.motion_offset_points)?;
-        validate_unit_interval(slot.opacity)?;
+        validate_prop_frame_slot(*slot)?;
     }
     for slot in &frame.room_glyph_slots {
         validate_points(slot.position_points)?;
@@ -2225,7 +2223,9 @@ fn validate_content_frame_canonical(
             && (frame.visible
                 || !zero2(frame.origin_points)
                 || !zero2(frame.motion_offset_points)
-                || frame.opacity.to_bits() != 0)
+                || frame.opacity.to_bits() != 0
+                || !zero2(frame.footprint_points)
+                || frame.contact_shadow_strength.to_bits() != 0)
         {
             return Err(SceneValidationError::NonCanonicalEmptySlot);
         }
@@ -2294,9 +2294,7 @@ fn validate_changed_instance_frame_slots(delta: &FrameDelta) -> Result<(), Scene
         SceneValidationError::AmbientSlotOutOfBounds,
     )?;
     for slot in &delta.prop_slots {
-        validate_points(slot.origin_points)?;
-        validate_points(slot.motion_offset_points)?;
-        validate_unit_interval(slot.opacity)?;
+        validate_prop_frame_slot(*slot)?;
     }
     for slot in &delta.room_glyph_slots {
         validate_points(slot.position_points)?;
@@ -2324,6 +2322,25 @@ fn validate_points(points: [f32; 2]) -> Result<(), SceneValidationError> {
         .all(|value| value.is_finite())
         .then_some(())
         .ok_or(SceneValidationError::NonFiniteFrameValue)
+}
+
+fn validate_prop_frame_slot(slot: PropFrameSlot) -> Result<(), SceneValidationError> {
+    validate_points(slot.origin_points)?;
+    validate_points(slot.motion_offset_points)?;
+    validate_points(slot.footprint_points)?;
+    validate_unit_interval(slot.opacity)?;
+    if slot.footprint_points.into_iter().any(|extent| extent < 0.0)
+        || !slot.contact_shadow_strength.is_finite()
+        || !(0.0..=1.0).contains(&slot.contact_shadow_strength)
+        || (!slot.visible && slot.contact_shadow_strength != 0.0)
+    {
+        return if slot.contact_shadow_strength.is_finite() {
+            Err(SceneValidationError::InvalidFrameValue)
+        } else {
+            Err(SceneValidationError::NonFiniteFrameValue)
+        };
+    }
+    Ok(())
 }
 
 fn validate_unique_slots(
@@ -2792,6 +2809,48 @@ mod tests {
         assert_eq!(
             validate_template(&template),
             Err(SceneValidationError::NodeCapacityExceeded)
+        );
+    }
+
+    #[test]
+    fn prop_frame_footprint_visibility_and_shadow_strength_are_validated() {
+        let fixture = SceneFixture::valid();
+        let accepted = validate_template(&fixture.template).unwrap();
+
+        let mut frame = fixture.frame.clone();
+        frame.prop_slots[0].footprint_points = [f32::NAN, 1.0];
+        assert_eq!(
+            validate_frame(&frame, &accepted).map(|_| ()),
+            Err(SceneValidationError::NonFiniteFrameValue)
+        );
+
+        let mut frame = fixture.frame.clone();
+        frame.prop_slots[0].footprint_points = [-1.0, 1.0];
+        assert_eq!(
+            validate_frame(&frame, &accepted).map(|_| ()),
+            Err(SceneValidationError::InvalidFrameValue)
+        );
+
+        let mut frame = fixture.frame.clone();
+        frame.prop_slots[0].contact_shadow_strength = f32::INFINITY;
+        assert_eq!(
+            validate_frame(&frame, &accepted).map(|_| ()),
+            Err(SceneValidationError::NonFiniteFrameValue)
+        );
+
+        let mut frame = fixture.frame.clone();
+        frame.prop_slots[0].contact_shadow_strength = 1.01;
+        assert_eq!(
+            validate_frame(&frame, &accepted).map(|_| ()),
+            Err(SceneValidationError::InvalidFrameValue)
+        );
+
+        let mut frame = fixture.frame.clone();
+        frame.prop_slots[0].visible = false;
+        frame.prop_slots[0].contact_shadow_strength = 0.25;
+        assert_eq!(
+            validate_frame(&frame, &accepted).map(|_| ()),
+            Err(SceneValidationError::InvalidFrameValue)
         );
     }
 

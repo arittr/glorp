@@ -308,5 +308,14 @@ fn retained_snapshot_keeps_fixed_prop_slots_when_composition_hides_an_accent() {
         .unwrap();
     assert_eq!(first_frame.opacity, 0.0);
     assert_eq!(second_frame.opacity, 0.0);
+    assert!(!first_frame.visible);
+    assert!(!second_frame.visible);
     assert_eq!(first_frame.origin_points, second_frame.origin_points);
+    assert_eq!(first_frame.footprint_points, second_frame.footprint_points);
+    assert!(first_frame
+        .footprint_points
+        .iter()
+        .all(|extent| *extent > 0.0));
+    assert_eq!(first_frame.contact_shadow_strength, 0.0);
+    assert_eq!(second_frame.contact_shadow_strength, 0.0);
 }

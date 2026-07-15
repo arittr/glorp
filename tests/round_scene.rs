@@ -260,6 +260,167 @@ fn round_scene_tank_life_foreground_avoids_pet_face_and_bottom_hud() {
     }
 }
 
+#[test]
+fn tank_routes_avoid_composition_chrome_and_foreground_props() {
+    use glorp::game::habitat::{HabitatPropKind, HEAVY_SESSION_PLANTER};
+    use glorp::presentation::companion_scene::{
+        AuthoredDepthSnapshot, CompanionLogicalLayout, CompanionProjectionClock,
+        CompanionSceneProjectionInput, CompanionSceneSnapshot, TankLayerSnapshot,
+    };
+    use glorp::storage::state::HabitatPropSource;
+    use glorp::tui::view_model::EarnedHabitatPropView;
+
+    const COLS: u16 = 44;
+    const ROWS: u16 = 18;
+    const EXTENT_POINTS: f32 = 260.0;
+
+    let now = datetime!(2026-07-08 18:00 UTC);
+    let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(60, now.date());
+    vm.habitat.earned_props.push(EarnedHabitatPropView {
+        id: HabitatPropId::new(HEAVY_SESSION_PLANTER),
+        earned_at: time::OffsetDateTime::UNIX_EPOCH,
+        kind: HabitatPropKind::Trophy,
+        display_priority: 148,
+        source: HabitatPropSource::HeavySession,
+    });
+    let rendered = glorp::pet::render::render_pet(
+        &glorp::pet::generation::generate_pet(&vm.pet_render.seed)
+            .with_species(vm.pet_render.generated_species),
+        vm.pet_render.stage,
+        Mood::Content,
+        glorp::pet::render::AnimationFrame::default(),
+    );
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+
+    let clearance = glorp::round::scene::current_round_motion_clearance(ROWS);
+    let input = CompanionSceneProjectionInput::round(
+        CompanionProjectionClock::new(now, 0),
+        CompanionLogicalLayout::round(EXTENT_POINTS, EXTENT_POINTS),
+        COLS,
+        ROWS,
+        clearance,
+    );
+    let snapshot = CompanionSceneSnapshot::project_with_input(&vm, input).unwrap();
+    let scene = glorp::round::scene::build_round_scene_draw_list(
+        &vm,
+        now,
+        COLS,
+        ROWS,
+        &glorp::round::scene::companion_roam_motion(),
+    );
+    let protected =
+        glorp::round::scene::round_tank_life_protected_regions_for_test(scene.pet_rect, COLS, ROWS);
+
+    // Mirror the public, fixed gauge geometry contract to recover the innermost
+    // safe radii used by CompanionComposition, then apply its conservative floor.
+    let aperture_radius = f64::from(EXTENT_POINTS) / 2.0;
+    let outer_inset = 3.0_f64.max(aperture_radius * 0.012);
+    let xp_width = (aperture_radius * 0.050).clamp(6.0, 16.0);
+    let daily_width = (aperture_radius * 0.040).clamp(5.0, 13.0);
+    let pace_width = (aperture_radius * 0.034).clamp(4.0, 11.0);
+    let lane_gap = (aperture_radius * 0.010).clamp(1.5, 4.0);
+    let xp_radius = aperture_radius - outer_inset - xp_width / 2.0;
+    let daily_radius = xp_radius - xp_width / 2.0 - lane_gap - daily_width / 2.0;
+    let pace_radius = daily_radius - daily_width / 2.0 - lane_gap - pace_width / 2.0;
+    let inner_radius_points = pace_radius - pace_width / 2.0;
+    let radius_cols = ((inner_radius_points / (f64::from(EXTENT_POINTS) / f64::from(COLS))) - 0.5)
+        .max(0.0)
+        .floor() as i32;
+    let radius_rows = ((inner_radius_points / (f64::from(EXTENT_POINTS) / f64::from(ROWS))) - 0.5)
+        .max(0.0)
+        .floor() as i32;
+
+    let cell_extent = [
+        EXTENT_POINTS / f32::from(COLS),
+        EXTENT_POINTS / f32::from(ROWS),
+    ];
+    let foreground_prop_rects = snapshot
+        .topology
+        .visible_props
+        .iter()
+        .filter(|prop| prop.authored_depth == AuthoredDepthSnapshot::Foreground)
+        .filter_map(|prop| {
+            let frame = snapshot
+                .frame
+                .prop_instances
+                .iter()
+                .find(|frame| frame.slot == prop.stable_order)?;
+            frame.visible.then(|| {
+                let x = (frame.origin_points[0] / cell_extent[0]).round() as i32;
+                let y = (frame.origin_points[1] / cell_extent[1]).round() as i32;
+                let width = (frame.footprint_points[0] / cell_extent[0]).round() as i32;
+                let height = (frame.footprint_points[1] / cell_extent[1]).round() as i32;
+                [x - 1, y - 1, x + width + 1, y + height + 1]
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !foreground_prop_rects.is_empty(),
+        "fixture must project an accepted foreground prop"
+    );
+
+    let hud = [
+        ((f32::from(COLS) / 2.0) - (f32::from(COLS) * 0.58) / 2.0).floor() as i32,
+        (f32::from(ROWS) * 0.58).floor() as i32,
+        ((f32::from(COLS) / 2.0) + (f32::from(COLS) * 0.58) / 2.0).ceil() as i32,
+        (f32::from(ROWS) * 0.90).ceil() as i32,
+    ];
+    let bottom = [
+        0,
+        i32::from(ROWS - clearance.bottom_reserved_rows),
+        i32::from(COLS),
+        i32::from(ROWS),
+    ];
+    let contains = |rect: [i32; 4], col: u16, row: u16| {
+        i32::from(col) >= rect[0]
+            && i32::from(col) < rect[2]
+            && i32::from(row) >= rect[1]
+            && i32::from(row) < rect[3]
+    };
+
+    let cells = snapshot
+        .content
+        .tank_animation_states
+        .iter()
+        .flat_map(|tank| &tank.cells)
+        .collect::<Vec<_>>();
+    assert!(!cells.is_empty(), "fixture must resolve visible tank cells");
+    for cell in cells {
+        let dx = i32::from(cell.col) - i32::from(COLS / 2);
+        let dy = i32::from(cell.row) - i32::from(ROWS / 2);
+        assert!(
+            dx * dx * radius_rows * radius_rows + dy * dy * radius_cols * radius_cols
+                <= radius_cols * radius_cols * radius_rows * radius_rows,
+            "tank cell {:?} at ({}, {}) escaped the gauge-safe aperture",
+            cell.glyph,
+            cell.col,
+            cell.row
+        );
+        assert!(!contains(hud, cell.col, cell.row));
+        assert!(!contains(bottom, cell.col, cell.row));
+
+        if cell.layer == TankLayerSnapshot::Foreground {
+            assert!(
+                !protected.pet_face.iter().any(|region| {
+                    glorp::tui::component::rect_contains(*region, cell.col, cell.row)
+                }),
+                "foreground tank cell at ({}, {}) overlaps the pet face",
+                cell.col,
+                cell.row
+            );
+            assert!(
+                foreground_prop_rects
+                    .iter()
+                    .all(|rect| !contains(*rect, cell.col, cell.row)),
+                "foreground tank cell at ({}, {}) overlaps a foreground prop",
+                cell.col,
+                cell.row
+            );
+        }
+    }
+}
+
 /// The round companion renders `WatchViewModel.pet_art` into a circular
 /// aperture; a Heavy-tier Glitch S6 day earns up to three persistent repair
 /// marks (one-cell `Pattern`/`Accent` spans carrying a `+ = : .` glyph — see

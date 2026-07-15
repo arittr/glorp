@@ -603,10 +603,29 @@ fn rebase_semantic_transition_frames(
         if transitioned {
             match topology.presentation_motion {
                 super::PropPresentationMotion::TwoPoseEase { duration_ms, curve } => {
-                    let target_pose = newest_frame.motion_offset_points;
-                    newest_frame.motion_offset_points = previous_frame.motion_offset_points;
+                    let source_pose = previous_frame.transition.map_or_else(
+                        || {
+                            super::input::prop_two_pose_target(
+                                topology.catalog_id,
+                                previous_semantic.and_then(|state| state.motion_phase),
+                            )
+                        },
+                        |anchor| {
+                            super::input::resolve_prop_transition(anchor, previous.frame.elapsed_ms)
+                        },
+                    );
+                    let target_pose = super::input::prop_two_pose_target(
+                        topology.catalog_id,
+                        newest_semantic.and_then(|state| state.motion_phase),
+                    );
+                    let parallax = [
+                        newest_frame.motion_offset_points[0] - target_pose[0],
+                        newest_frame.motion_offset_points[1] - target_pose[1],
+                    ];
+                    newest_frame.motion_offset_points =
+                        [source_pose[0] + parallax[0], source_pose[1] + parallax[1]];
                     newest_frame.transition = Some(super::PropTransitionAnchor {
-                        source_pose: previous_frame.motion_offset_points,
+                        source_pose,
                         target_pose,
                         source_opacity: newest_frame.opacity,
                         target_opacity: newest_frame.opacity,
@@ -656,9 +675,21 @@ fn rebase_semantic_transition_frames(
         };
         for (newest_cell, previous_cell) in newest_frame.cells.iter_mut().zip(&previous_frame.cells)
         {
-            newest_cell.target_position_points = newest_cell.position_points;
-            newest_cell.source_position_points = previous_cell.position_points;
-            newest_cell.position_points = previous_cell.position_points;
+            let target_position = newest_cell.target_position_points;
+            let parallax = [
+                newest_cell.position_points[0] - target_position[0],
+                newest_cell.position_points[1] - target_position[1],
+            ];
+            let source_position = super::input::resolve_tank_transition_position(
+                previous_frame,
+                previous_cell,
+                previous.frame.elapsed_ms,
+            );
+            newest_cell.source_position_points = source_position;
+            newest_cell.position_points = [
+                source_position[0] + parallax[0],
+                source_position[1] + parallax[1],
+            ];
         }
         newest_frame.semantic_revision = semantic_revision;
         newest_frame.started_at_monotonic_ms = newest.frame.elapsed_ms;
@@ -2814,11 +2845,11 @@ mod tests {
     use crate::presentation::companion_scene::{
         AmbientFrameSnapshot, AmbientSemanticKindSnapshot, AmbientSemanticSnapshot,
         AuthoredDepthSnapshot, CompanionDayPhase, CompanionGlyphGrid, CompanionLogicalLayout,
-        CompanionSceneSnapshot, ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot,
-        LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot, PetLatticeSnapshot,
-        PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
-        PropFrameSnapshot, PropPresentationMotion, PropTopologySnapshot, PropZoneSnapshot,
-        RoomGlyphContentSnapshot, RoomGlyphFrameSnapshot, RoomTopologySnapshot,
+        CompanionProjectionClock, CompanionSceneSnapshot, ContentSnapshot, DepthCue, FrameSnapshot,
+        GaugeLevelSnapshot, LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot,
+        PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
+        PropAnimationSnapshot, PropFrameSnapshot, PropPresentationMotion, PropTopologySnapshot,
+        PropZoneSnapshot, RoomGlyphContentSnapshot, RoomGlyphFrameSnapshot, RoomTopologySnapshot,
         TankAnimationSnapshot, TankCellFrameSnapshot, TankCellSnapshot, TankFrameSnapshot,
         TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
         TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
@@ -2959,9 +2990,12 @@ mod tests {
                 room_glyphs: Vec::new(),
                 prop_instances: vec![PropFrameSnapshot {
                     slot: 0,
+                    visible: true,
                     origin_points: [120.0, 140.0],
                     motion_offset_points: [0.0; 2],
                     opacity: 1.0,
+                    footprint_points: [0.0; 2],
+                    contact_shadow_strength: 0.0,
                     transition: None,
                 }],
                 tank_instances: vec![TankFrameSnapshot {
@@ -3020,6 +3054,55 @@ mod tests {
 
     fn offset_pet_depth(snapshot: &mut CompanionSceneSnapshot, delta: f32) {
         set_pet_depth(snapshot, snapshot.frame.pet_depth + delta);
+    }
+
+    fn parallax_regression_clock() -> CompanionProjectionClock {
+        CompanionProjectionClock::new(time::macros::datetime!(2026-07-11 12:00 UTC), 2_731)
+    }
+
+    fn expected_depth_parallax(
+        snapshot: &CompanionSceneSnapshot,
+        clock: CompanionProjectionClock,
+        multiplier: f32,
+    ) -> [f32; 2] {
+        let grid = snapshot.topology.glyph_grid;
+        let motion = crate::round::motion::project_round_companion_motion_with_options(
+            snapshot.frame.pet_motion_input,
+            clock.wall_time,
+            clock.elapsed_ms,
+            crate::round::motion::RoundCompanionMotionViewport {
+                grid_columns: grid.columns,
+                grid_rows: grid.rows,
+                width_points: snapshot.topology.layout.width_points,
+                height_points: snapshot.topology.layout.height_points,
+                clearance: crate::round::scene::current_round_motion_clearance(grid.rows),
+            },
+            &crate::round::motion::companion_roam_motion(),
+            crate::round::motion::RoundMotionProjectionOptions {
+                depth_override: snapshot.frame.pet_depth_override,
+            },
+        );
+        let displacement = [
+            motion.motion_top_left_cells.x - motion.motion_origin_top_left_cells.x,
+            motion.motion_top_left_cells.y - motion.motion_origin_top_left_cells.y,
+        ];
+        std::array::from_fn(|axis| {
+            (displacement[axis] * multiplier * grid.cell_extent_points[axis]).clamp(
+                -grid.cell_extent_points[axis] * 0.5,
+                grid.cell_extent_points[axis] * 0.5,
+            )
+        })
+    }
+
+    fn assert_points_close(actual: [f32; 2], expected: [f32; 2]) {
+        for axis in 0..2 {
+            assert!(
+                (actual[axis] - expected[axis]).abs() <= 0.000_01,
+                "axis {axis}: expected {}, got {}",
+                expected[axis],
+                actual[axis]
+            );
+        }
     }
 
     fn classify(mutator: impl FnOnce(&mut CompanionSceneSnapshot)) -> SnapshotChangeSet {
@@ -4188,6 +4271,145 @@ mod tests {
         assert_eq!(
             runtime.commit_prepared(stale),
             Err(PreparedCommitError::StaleBase)
+        );
+    }
+
+    #[test]
+    fn two_pose_semantic_rebase_keeps_exactly_one_foreground_parallax_offset() {
+        let clock = parallax_regression_clock();
+        let mut previous = (*snapshot()).clone();
+        previous.topology.visible_props[0].catalog_id = crate::game::habitat::TOKEN_PEBBLE_25K;
+        previous.topology.visible_props[0].authored_depth = AuthoredDepthSnapshot::Foreground;
+        previous.topology.visible_props[0].presentation_motion = PropPresentationMotion::Static;
+        previous.content.prop_animation_states[0].catalog_id =
+            crate::game::habitat::TOKEN_PEBBLE_25K;
+        previous.content.prop_animation_states[0].motion_phase = Some(0);
+        previous.content.prop_animation_states[0].chest_lid_open = None;
+        previous.frame.prop_instances[0].transition = None;
+        previous.frame = previous
+            .project_presentation_frame(
+                SemanticRevision(0),
+                clock,
+                super::super::input::CompanionPresentationOptions::STANDARD,
+            )
+            .unwrap()
+            .frame;
+        previous.topology.visible_props[0].presentation_motion =
+            PropPresentationMotion::TwoPoseEase {
+                duration_ms: 900,
+                curve: super::super::EaseCurve::SmoothStep,
+            };
+        let expected_parallax = expected_depth_parallax(&previous, clock, 0.045);
+        assert!(
+            expected_parallax != [0.0; 2],
+            "fixture needs nonzero displacement"
+        );
+        assert_points_close(
+            previous.frame.prop_instances[0].motion_offset_points,
+            expected_parallax,
+        );
+        let previous = Arc::new(previous);
+
+        let mut newest = (*previous).clone();
+        newest.content.prop_animation_states[0].motion_phase = Some(1);
+        newest.frame.prop_instances[0].motion_offset_points =
+            [expected_parallax[0], 3.0 + expected_parallax[1]];
+        newest.frame.prop_instances[0].transition = None;
+        let mut runtime = CompanionSceneRuntimeState::with_active(Arc::clone(&previous)).unwrap();
+        commit_snapshot(&mut runtime, Arc::new(newest));
+
+        let rebased = runtime.snapshot();
+        let anchor = rebased.frame.prop_instances[0]
+            .transition
+            .expect("semantic change starts a two-pose transition");
+        assert_eq!(anchor.source_pose, [0.0; 2]);
+        assert_eq!(anchor.target_pose, [0.0, 3.0]);
+        assert_points_close(
+            rebased.frame.prop_instances[0].motion_offset_points,
+            previous.frame.prop_instances[0].motion_offset_points,
+        );
+
+        let projected = rebased
+            .project_presentation_frame(
+                runtime.applied_revisions().semantic,
+                clock,
+                super::super::input::CompanionPresentationOptions::STANDARD,
+            )
+            .unwrap();
+        assert_points_close(
+            projected.frame.prop_instances[0].motion_offset_points,
+            expected_parallax,
+        );
+    }
+
+    #[test]
+    fn tank_semantic_rebase_keeps_parallax_out_of_anchors_and_reduce_motion() {
+        let clock = parallax_regression_clock();
+        let mut previous = (*snapshot()).clone();
+        previous.frame = previous
+            .project_presentation_frame(
+                SemanticRevision(0),
+                clock,
+                super::super::input::CompanionPresentationOptions::STANDARD,
+            )
+            .unwrap()
+            .frame;
+        let expected_parallax = expected_depth_parallax(&previous, clock, 0.030);
+        assert!(
+            expected_parallax != [0.0; 2],
+            "fixture needs nonzero displacement"
+        );
+        assert_points_close(
+            previous.frame.tank_instances[0].cells[0].position_points,
+            [40.0 + expected_parallax[0], 50.0 + expected_parallax[1]],
+        );
+        let previous = Arc::new(previous);
+
+        let semantic_target = [48.0, 60.0];
+        let mut newest = (*previous).clone();
+        newest.content.tank_animation_states[0].cells[0].glyph = '>';
+        newest.frame.tank_instances[0].cells[0] = TankCellFrameSnapshot {
+            source_position_points: semantic_target,
+            position_points: [
+                semantic_target[0] + expected_parallax[0],
+                semantic_target[1] + expected_parallax[1],
+            ],
+            target_position_points: semantic_target,
+        };
+        let mut runtime = CompanionSceneRuntimeState::with_active(Arc::clone(&previous)).unwrap();
+        commit_snapshot(&mut runtime, Arc::new(newest));
+
+        let rebased = runtime.snapshot();
+        let cell = rebased.frame.tank_instances[0].cells[0];
+        assert_eq!(cell.source_position_points, [40.0, 50.0]);
+        assert_eq!(cell.target_position_points, semantic_target);
+        assert_points_close(
+            cell.position_points,
+            previous.frame.tank_instances[0].cells[0].position_points,
+        );
+
+        let projected = rebased
+            .project_presentation_frame(
+                runtime.applied_revisions().semantic,
+                clock,
+                super::super::input::CompanionPresentationOptions::STANDARD,
+            )
+            .unwrap();
+        assert_points_close(
+            projected.frame.tank_instances[0].cells[0].position_points,
+            [40.0 + expected_parallax[0], 50.0 + expected_parallax[1]],
+        );
+
+        let reduced = rebased
+            .project_presentation_frame(
+                runtime.applied_revisions().semantic,
+                clock,
+                super::super::input::CompanionPresentationOptions { reduce_motion: true },
+            )
+            .unwrap();
+        assert_eq!(
+            reduced.frame.tank_instances[0].cells[0].position_points,
+            semantic_target
         );
     }
 

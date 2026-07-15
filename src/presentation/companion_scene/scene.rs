@@ -1221,6 +1221,8 @@ pub struct PropFrameSlot {
     pub origin_points: [f32; 2],
     pub motion_offset_points: [f32; 2],
     pub opacity: f32,
+    pub footprint_points: [f32; 2],
+    pub contact_shadow_strength: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -1301,6 +1303,8 @@ impl SceneFrame {
                     origin_points: [0.0; 2],
                     motion_offset_points: [0.0; 2],
                     opacity: 0.0,
+                    footprint_points: [0.0; 2],
+                    contact_shadow_strength: 0.0,
                 })
                 .collect(),
             tank_slots: (0..MAX_ROUND_TANK_INHABITANTS)
@@ -1984,9 +1988,12 @@ mod tests {
     ) -> super::super::PropFrameSnapshot {
         super::super::PropFrameSnapshot {
             slot,
+            visible: true,
             origin_points,
             motion_offset_points,
             opacity: 1.0,
+            footprint_points: [0.0; 2],
+            contact_shadow_strength: 0.0,
             transition: None,
         }
     }
@@ -2967,6 +2974,110 @@ mod tests {
     }
 
     #[test]
+    fn prop_frame_visibility_footprint_and_shadow_strength_are_frame_checksum_inputs() {
+        let fixture = SceneFixture::valid();
+        let baseline = checksum::checksum_frame(&fixture.template, &fixture.frame).unwrap();
+
+        let mut visible = fixture.frame.clone();
+        visible.prop_slots[0].visible = true;
+        assert_ne!(
+            checksum::checksum_frame(&fixture.template, &visible).unwrap(),
+            baseline
+        );
+
+        let mut footprint = fixture.frame.clone();
+        footprint.prop_slots[0].footprint_points = [12.0, 18.0];
+        assert_ne!(
+            checksum::checksum_frame(&fixture.template, &footprint).unwrap(),
+            baseline
+        );
+
+        let mut shadow = fixture.frame.clone();
+        shadow.prop_slots[0].visible = true;
+        shadow.prop_slots[0].contact_shadow_strength = 0.34;
+        assert_ne!(
+            checksum::checksum_frame(&fixture.template, &shadow).unwrap(),
+            checksum::checksum_frame(&fixture.template, &visible).unwrap()
+        );
+    }
+
+    #[test]
+    fn prop_frame_geometry_and_shadow_changes_stay_frame_only() {
+        let mut initial = snapshot_for(Species::Fuzz, Stage::S3);
+        initial.topology.visible_props = vec![super::super::PropTopologySnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            zone: super::super::PropZoneSnapshot::FloorLeft,
+            authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            presentation_motion: super::super::input::prop_presentation_motion(
+                crate::game::habitat::TOKEN_PEBBLE_25K,
+            ),
+        }];
+        initial.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
+            catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
+            stable_order: 0,
+            kind: super::super::PropAnimationKindSnapshot::Animated,
+            sprite_phase: Some(0),
+            twinkle_active: None,
+            motion_phase: Some(0),
+            chest_lid_open: None,
+            bloom_active: None,
+        }];
+        let mut frame = prop_frame(0, [10.0, 20.0], [0.0; 2]);
+        frame.footprint_points = [10.0, 20.0];
+        initial.frame.prop_instances = vec![frame];
+        let initial = Arc::new(initial);
+
+        let assert_frame_only = |changed: &Arc<super::super::CompanionSceneSnapshot>| {
+            let changes = super::super::runtime::classify_snapshot_changes(&initial, changed);
+            assert!(!changes.requires_generation());
+            assert_eq!(
+                changes.semantic(),
+                super::super::runtime::SemanticChangeMask::NONE
+            );
+            assert!(changes
+                .frame()
+                .contains(super::super::runtime::FrameChangeMask::PROP_TRANSFORMS));
+        };
+
+        let mut hidden = (*initial).clone();
+        hidden.frame.prop_instances[0].visible = false;
+        let hidden = Arc::new(hidden);
+        assert_frame_only(&hidden);
+
+        let mut resized = (*initial).clone();
+        resized.frame.prop_instances[0].footprint_points = [12.0, 22.0];
+        let resized = Arc::new(resized);
+        assert_frame_only(&resized);
+
+        let mut shadowed = (*initial).clone();
+        shadowed.frame.prop_instances[0].contact_shadow_strength = 0.34;
+        let shadowed = Arc::new(shadowed);
+        assert_frame_only(&shadowed);
+
+        let mut built = build_scene_generation_owned(
+            Arc::clone(&initial),
+            generation_key(43),
+            super::super::AppliedRevisions::new(0, 0),
+        )
+        .unwrap();
+        let generation_checksum = built.template().generation_checksum;
+        let content_checksum = built.content_checksum();
+        let changes = super::super::runtime::classify_snapshot_changes(&initial, &shadowed);
+        built
+            .apply_compatible_snapshot(
+                shadowed,
+                changes,
+                super::super::AppliedRevisions::new(0, 0),
+                super::super::AppliedRevisions::new(0, 1),
+            )
+            .unwrap();
+        assert_eq!(built.template().generation_checksum, generation_checksum);
+        assert_eq!(built.content_checksum(), content_checksum);
+        assert_eq!(built.frame().prop_slots[0].contact_shadow_strength, 0.34);
+    }
+
+    #[test]
     fn exact_activity_gauges_and_dim_remain_same_generation_frame_deltas() {
         let initial = Arc::new(snapshot_with_private_frame(0.1, 0.0));
         let mut built = build_scene_generation_owned(
@@ -3604,6 +3715,155 @@ mod tests {
             build_scene_generation(&snapshot, generation_key(1)),
             Err(SceneGenerationError::OverlappingPetRole)
         );
+    }
+
+    #[test]
+    fn prop_and_tank_nodes_keep_authored_z_and_exact_depth_cues() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        let prop_specs = [
+            (
+                crate::game::habitat::TOKEN_PEBBLE_25K,
+                super::super::AuthoredDepthSnapshot::Background,
+            ),
+            (
+                crate::game::habitat::TOKEN_SHELL_100K,
+                super::super::AuthoredDepthSnapshot::BehindPet,
+            ),
+            (
+                crate::game::habitat::TOKEN_SHARD_1M,
+                super::super::AuthoredDepthSnapshot::Foreground,
+            ),
+        ];
+        snapshot.topology.visible_props = prop_specs
+            .iter()
+            .enumerate()
+            .map(
+                |(slot, (catalog_id, authored_depth))| super::super::PropTopologySnapshot {
+                    catalog_id,
+                    stable_order: slot as u8,
+                    zone: super::super::PropZoneSnapshot::FloorMid,
+                    authored_depth: *authored_depth,
+                    presentation_motion: super::super::PropPresentationMotion::Static,
+                },
+            )
+            .collect();
+        snapshot.content.prop_animation_states = prop_specs
+            .iter()
+            .enumerate()
+            .map(
+                |(slot, (catalog_id, _))| super::super::PropAnimationSnapshot {
+                    catalog_id,
+                    stable_order: slot as u8,
+                    kind: super::super::PropAnimationKindSnapshot::Static,
+                    sprite_phase: None,
+                    twinkle_active: None,
+                    motion_phase: None,
+                    chest_lid_open: None,
+                    bloom_active: None,
+                },
+            )
+            .collect();
+        snapshot.frame.prop_instances = (0..prop_specs.len())
+            .map(|slot| prop_frame(slot as u8, [40.0 + slot as f32 * 20.0, 260.0], [0.0; 2]))
+            .collect();
+
+        let tank_spec = crate::game::habitat::TANK_INHABITANT_CATALOG
+            .iter()
+            .find(|spec| spec.id == crate::game::habitat::GLASS_SHRIMP)
+            .unwrap();
+        snapshot.topology.visible_tank_inhabitants = vec![super::super::TankTopologySnapshot {
+            catalog_id: tank_spec.id,
+            stable_order: 0,
+            route: tank_spec.route_family.into(),
+            authored_depth: tank_spec.natural_layer.into(),
+        }];
+        snapshot.content.tank_animation_states = vec![super::super::TankAnimationSnapshot {
+            catalog_id: tank_spec.id,
+            stable_order: 0,
+            route: tank_spec.route_family.into(),
+            visible: true,
+            origin_col: 1,
+            origin_row: 1,
+            side: None,
+            layer: super::super::TankLayerSnapshot::BehindAnchorForegroundHost,
+            sprite_variant: 0,
+            visible_rows: 1,
+            anemone_morph: None,
+            color_srgb8: crate::presentation::tank_life::tank_paint_for(tank_spec.id)
+                .unwrap()
+                .color_srgb8,
+            bold: true,
+            cadence_ms: 4_000,
+            calm: false,
+            cells: vec![
+                super::super::TankCellSnapshot {
+                    col: 1,
+                    row: 1,
+                    glyph: '╭',
+                    layer: super::super::TankLayerSnapshot::Behind,
+                },
+                super::super::TankCellSnapshot {
+                    col: 2,
+                    row: 1,
+                    glyph: '╯',
+                    layer: super::super::TankLayerSnapshot::Foreground,
+                },
+            ],
+        }];
+        snapshot.frame.tank_instances = vec![super::super::TankFrameSnapshot {
+            slot: 0,
+            visible: true,
+            origin_points: [40.0, 120.0],
+            cells: vec![
+                super::super::TankCellFrameSnapshot {
+                    source_position_points: [40.0, 120.0],
+                    position_points: [40.0, 120.0],
+                    target_position_points: [40.0, 120.0],
+                },
+                super::super::TankCellFrameSnapshot {
+                    source_position_points: [48.0, 120.0],
+                    position_points: [48.0, 120.0],
+                    target_position_points: [48.0, 120.0],
+                },
+            ],
+            bounds_points: Some([40.0, 120.0, 16.0, 12.0]),
+            semantic_revision: super::super::SemanticRevision(1),
+            started_at_monotonic_ms: 0,
+            duration_ms: 4_000,
+        }];
+
+        let built = build_scene_generation(&snapshot, generation_key(73)).unwrap();
+        let node = |alias: &str| {
+            built
+                .template
+                .nodes
+                .iter()
+                .find(|node| node.alias.as_str() == alias)
+                .unwrap()
+        };
+        for (slot, ((catalog_id, depth), expected_z)) in
+            prop_specs.iter().zip([-1.60, -1.59, 1.22]).enumerate()
+        {
+            let prop = node(&format!("world.prop.{catalog_id}"));
+            assert_eq!(prop.depth_cue, depth.depth_cue(), "slot {slot}");
+            assert_eq!(prop.depth_cue.scale, 1.0, "slot {slot}");
+            assert_eq!(
+                prop.base_transform.translation[2], expected_z,
+                "slot {slot}"
+            );
+        }
+        let tank_behind = node("world.tank.glass_shrimp.behind");
+        assert_eq!(
+            tank_behind.depth_cue,
+            super::super::AuthoredDepthSnapshot::BehindPet.depth_cue()
+        );
+        assert_eq!(tank_behind.base_transform.translation[2], -1.45);
+        let tank_foreground = node("world.tank.glass_shrimp.foreground");
+        assert_eq!(
+            tank_foreground.depth_cue,
+            super::super::AuthoredDepthSnapshot::Foreground.depth_cue()
+        );
+        assert_eq!(tank_foreground.base_transform.translation[2], 1.35);
     }
 
     #[test]

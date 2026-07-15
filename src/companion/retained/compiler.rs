@@ -2269,9 +2269,9 @@ fn pack_prop_frame(
             value.motion_offset_points[0],
             value.motion_offset_points[1],
             value.opacity,
-            0.0,
-            0.0,
-            0.0,
+            value.footprint_points[0],
+            value.footprint_points[1],
+            value.contact_shadow_strength,
         ],
     }
 }
@@ -2938,25 +2938,7 @@ fn compile_frame_mirrors(
     );
     set_all(
         &mut result.props,
-        std::array::from_fn(|slot| {
-            let value = frame.prop_slots[slot];
-            FrameGpuValue {
-                kind: 1,
-                slot: u32::from(value.slot),
-                flags: u32::from(value.visible),
-                variant: 0,
-                values: [
-                    value.origin_points[0],
-                    value.origin_points[1],
-                    value.motion_offset_points[0],
-                    value.motion_offset_points[1],
-                    value.opacity,
-                    0.0,
-                    0.0,
-                    0.0,
-                ],
-            }
-        }),
+        std::array::from_fn(|slot| pack_prop_frame(frame.prop_slots[slot])),
     );
     set_all(
         &mut result.tank_cells,
@@ -3834,6 +3816,22 @@ mod tests {
     }
 
     #[test]
+    fn prop_frame_pack_uses_existing_width_height_shadow_lanes() {
+        let packed = pack_prop_frame(crate::presentation::companion_scene::scene::PropFrameSlot {
+            slot: 3,
+            visible: true,
+            origin_points: [10.0, 20.0],
+            motion_offset_points: [1.0, 2.0],
+            opacity: 0.8,
+            footprint_points: [12.0, 14.0],
+            contact_shadow_strength: 0.6,
+        });
+
+        assert_eq!(std::mem::size_of::<FrameGpuValue>(), 48);
+        assert_eq!(packed.values, [10.0, 20.0, 1.0, 2.0, 0.8, 12.0, 14.0, 0.6]);
+    }
+
+    #[test]
     fn fixed_family_capacities_are_exact() {
         let content = ContentMirrors::zeroed();
         assert_eq!(content.pet_body.capacity(), 130);
@@ -4533,6 +4531,8 @@ mod tests {
         fixture.frame.prop_slots[2].origin_points = [10.0, 20.0];
         fixture.frame.prop_slots[2].motion_offset_points = [1.0, 2.0];
         fixture.frame.prop_slots[2].opacity = 0.75;
+        fixture.frame.prop_slots[2].footprint_points = [12.0, 14.0];
+        fixture.frame.prop_slots[2].contact_shadow_strength = 0.6;
         fixture.frame.tank_slots[1].visible = true;
         fixture.frame.tank_slots[1].origin_points = [30.0, 40.0];
         fixture.frame.tank_slots[1].cells[3] =
@@ -4579,8 +4579,8 @@ mod tests {
         assert_eq!(frame_globals.dim_amount, 0.35);
         assert_eq!(frame_globals.light_count, 1);
         assert_eq!(
-            compiled.frame.props.as_slice()[2].values[..5],
-            [10.0, 20.0, 1.0, 2.0, 0.75]
+            compiled.frame.props.as_slice()[2].values,
+            [10.0, 20.0, 1.0, 2.0, 0.75, 12.0, 14.0, 0.6]
         );
         let tank = compiled.frame.tank_cells.as_slice()[MAX_TANK_GLYPHS_PER_SLOT + 3];
         assert_eq!(tank.slot, 1);
@@ -4968,6 +4968,8 @@ mod tests {
                 origin_points: [10.0, 20.0],
                 motion_offset_points: [1.0, 2.0],
                 opacity: 0.8,
+                footprint_points: [12.0, 14.0],
+                contact_shadow_strength: 0.6,
             });
         let mut tank = candidate.accepted.frame().frame().tank_slots[1];
         tank.visible = true;
@@ -5349,6 +5351,8 @@ mod tests {
                 origin_points: [1.0; 2],
                 motion_offset_points: [1.0; 2],
                 opacity: 1.0,
+                footprint_points: [0.0; 2],
+                contact_shadow_strength: 0.0,
             });
         frame.to = content.to;
 

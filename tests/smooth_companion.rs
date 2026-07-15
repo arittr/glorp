@@ -274,6 +274,77 @@ fn parity_fixture() -> WatchViewModel {
 }
 
 #[test]
+fn retained_habitat_depth_cues_match_the_smooth_depth_plane_order() {
+    use glorp::game::habitat::HEAVY_SESSION_PLANTER;
+    use glorp::presentation::companion_scene::scene::build_scene_generation;
+    use glorp::presentation::companion_scene::{
+        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+        CompanionSceneSnapshot, DeviceEpoch, LayoutGeneration, ResourceGeneration,
+        SceneGenerationKey,
+    };
+
+    let mut vm = WatchViewModel::fixture_with_habitat_props();
+    vm.habitat.earned_props.push(EarnedHabitatPropView {
+        id: HabitatPropId::new(HEAVY_SESSION_PLANTER),
+        earned_at: time::OffsetDateTime::UNIX_EPOCH,
+        kind: HabitatPropKind::Trophy,
+        display_priority: 148,
+        source: HabitatPropSource::HeavySession,
+    });
+    let rendered = glorp::pet::render::render_pet(
+        &glorp::pet::generation::generate_pet(&vm.pet_render.seed)
+            .with_species(vm.pet_render.generated_species),
+        vm.pet_render.stage,
+        glorp::game::metabolism::Mood::Content,
+        glorp::pet::render::AnimationFrame::default(),
+    );
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+    let now = datetime!(2026-07-08 18:00:00.500 UTC);
+    let snapshot = CompanionSceneSnapshot::project_with_input(
+        &vm,
+        CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(now, 500),
+            CompanionLogicalLayout::round(440.0, 180.0),
+            GRID_COLS,
+            GRID_ROWS,
+            glorp::round::scene::current_round_motion_clearance(GRID_ROWS),
+        ),
+    )
+    .unwrap();
+    let generation = build_scene_generation(
+        &snapshot,
+        SceneGenerationKey {
+            device: DeviceEpoch(1),
+            layout: LayoutGeneration(1),
+            resources: ResourceGeneration(1),
+        },
+    )
+    .unwrap();
+
+    let cue = |catalog_id: &str| {
+        generation
+            .template()
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == format!("world.prop.{catalog_id}"))
+            .unwrap_or_else(|| panic!("missing retained node for {catalog_id}"))
+            .depth_cue
+    };
+    let background = cue(glorp::game::habitat::CODEX_SIGNAL_LAMP);
+    let behind = cue(glorp::game::habitat::TOKEN_PEBBLE_25K);
+    let foreground = cue(HEAVY_SESSION_PLANTER);
+
+    assert_eq!([background.opacity, background.saturation], [0.82, 0.78]);
+    assert_eq!([behind.opacity, behind.saturation], [0.94, 0.90]);
+    assert_eq!([foreground.opacity, foreground.saturation], [1.0, 1.05]);
+    for sample in [background, behind, foreground] {
+        assert_eq!(sample.scale, 1.0);
+        assert_eq!(sample.y_offset_points_up, 0.0);
+    }
+}
+
+#[test]
 fn smooth_depth_resolver_maps_bounds_lifecycle_and_rejects_invalid_inputs() {
     assert_eq!(
         resolve_smooth_depth(-1.0, 1.0).unwrap().scale,
