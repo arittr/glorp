@@ -583,7 +583,9 @@ fn retained_full_cast_composition_matrix() {
                 );
                 if grounded {
                     assert!(
-                        (bounds[3] - (f32::from(ROWS) - 1.0)).abs() < 0.0001,
+                        [15.0, 16.0, 17.0]
+                            .into_iter()
+                            .any(|contact| (bounds[3] - contact).abs() < 0.0001),
                         "{label} slot {} lost its grounded baseline",
                         frame.slot
                     );

@@ -53,6 +53,51 @@ struct CandidateAnchor {
     y: CandidateAxis,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloorDepthLane {
+    Rear,
+    Middle,
+    Near,
+}
+
+impl FloorDepthLane {
+    const fn bottom_offset(self) -> i16 {
+        match self {
+            Self::Rear => -3,
+            Self::Middle => -2,
+            Self::Near => -1,
+        }
+    }
+}
+
+fn stable_floor_lane_variant(catalog_id: &str) -> bool {
+    const OFFSET: u64 = 1_469_598_103_934_665_603;
+    const PRIME: u64 = 1_099_511_628_211;
+    b"prop-floor-lane-v1|"
+        .iter()
+        .copied()
+        .chain(catalog_id.bytes())
+        .fold(OFFSET, |mut hash, byte| {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+            hash
+        })
+        .is_multiple_of(2)
+}
+
+fn floor_lane_order(prop: &PropTopologySnapshot) -> [FloorDepthLane; 3] {
+    use FloorDepthLane::{Middle, Near, Rear};
+    let alternate = stable_floor_lane_variant(prop.catalog_id);
+    match (prop.authored_depth, alternate) {
+        (AuthoredDepthSnapshot::Background, false) => [Rear, Middle, Near],
+        (AuthoredDepthSnapshot::Background, true) => [Middle, Rear, Near],
+        (AuthoredDepthSnapshot::BehindPet, false) => [Middle, Rear, Near],
+        (AuthoredDepthSnapshot::BehindPet, true) => [Rear, Middle, Near],
+        (AuthoredDepthSnapshot::Foreground, false) => [Near, Middle, Rear],
+        (AuthoredDepthSnapshot::Foreground, true) => [Middle, Near, Rear],
+    }
+}
+
 impl CandidateAnchor {
     fn resolve(self, footprint: [i16; 2]) -> [i16; 2] {
         [self.x.resolve(footprint[0]), self.y.resolve(footprint[1])]
@@ -114,20 +159,16 @@ pub(crate) fn resolve_companion_composition(
         } else {
             bottom_reserve_cells
         };
-        let mut candidates = if grounded {
-            grounded_side_lane_anchors(
-                prop.zone,
+        let candidates = if grounded {
+            grounded_candidate_anchors(
+                prop,
+                aperture_columns,
                 candidate_rows,
                 [floor_hud_reserve_local[0], floor_hud_reserve_local[2]],
             )
         } else {
-            Vec::new()
+            candidate_anchors(prop.zone, aperture_columns, candidate_rows)
         };
-        candidates.extend(candidate_anchors(
-            prop.zone,
-            aperture_columns,
-            candidate_rows,
-        ));
         let candidate_hud_reserve = if grounded {
             floor_hud_reserve_cells
         } else {
@@ -283,6 +324,33 @@ fn grounded_side_lane_anchors(
         PropZoneSnapshot::FloorRight => vec![right],
         _ => Vec::new(),
     }
+}
+
+fn grounded_candidate_anchors(
+    prop: &PropTopologySnapshot,
+    columns: u16,
+    rows: u16,
+    floor_hud_columns: [i16; 2],
+) -> Vec<CandidateAnchor> {
+    let mut horizontal = grounded_side_lane_anchors(prop.zone, rows, floor_hud_columns);
+    horizontal.extend(candidate_anchors(prop.zone, columns, rows));
+    let rows = i16::try_from(rows).unwrap_or(i16::MAX);
+
+    floor_lane_order(prop)
+        .into_iter()
+        .flat_map(|lane| {
+            horizontal
+                .iter()
+                .copied()
+                .map(move |candidate| CandidateAnchor {
+                    x: candidate.x,
+                    y: CandidateAxis::End {
+                        extent: rows,
+                        offset: lane.bottom_offset(),
+                    },
+                })
+        })
+        .collect()
 }
 
 fn gauge_inner_radii(input: CompanionCompositionInput<'_>) -> [f32; 2] {
@@ -510,6 +578,21 @@ mod tests {
             .collect()
     }
 
+    fn prop_topology(
+        catalog_id: &'static str,
+        stable_order: u8,
+        zone: PropZoneSnapshot,
+        authored_depth: AuthoredDepthSnapshot,
+    ) -> PropTopologySnapshot {
+        PropTopologySnapshot {
+            catalog_id,
+            stable_order,
+            zone,
+            authored_depth,
+            presentation_motion: PropPresentationMotion::Static,
+        }
+    }
+
     fn resolve_for(
         props: &[PropTopologySnapshot],
         width_points: f32,
@@ -546,6 +629,136 @@ mod tests {
     }
 
     #[test]
+    fn grounded_props_use_rear_middle_and_near_floor_contacts() {
+        let props = [
+            prop_topology(
+                crate::game::habitat::TOKEN_PEBBLE_25K,
+                0,
+                PropZoneSnapshot::FloorLeft,
+                AuthoredDepthSnapshot::Background,
+            ),
+            prop_topology(
+                crate::game::habitat::TOKEN_SHELL_100K,
+                1,
+                PropZoneSnapshot::FloorRight,
+                AuthoredDepthSnapshot::BehindPet,
+            ),
+            prop_topology(
+                crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+                2,
+                PropZoneSnapshot::FloorMid,
+                AuthoredDepthSnapshot::Foreground,
+            ),
+        ];
+
+        let contacts = props
+            .iter()
+            .map(|prop| {
+                let composition = resolve_for(std::slice::from_ref(prop), 360.0, 360.0);
+                let placement = composition.prop_placements[0];
+                assert!(placement.visible);
+                assert!(placement.grounded);
+                placement.bounds_cells[3]
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(contacts, vec![15, 16, 17]);
+    }
+
+    #[test]
+    fn floor_lane_choice_ignores_stable_order_and_surface_shape() {
+        let resolve_contact = |stable_order, width_points, height_points| {
+            let props = [prop_topology(
+                crate::game::habitat::TOKEN_PEBBLE_25K,
+                stable_order,
+                PropZoneSnapshot::FloorLeft,
+                AuthoredDepthSnapshot::BehindPet,
+            )];
+            let placement = resolve_for(&props, width_points, height_points).prop_placements[0];
+            assert!(placement.visible);
+            placement.bounds_cells[3]
+        };
+
+        assert_eq!(resolve_contact(0, 360.0, 360.0), 16);
+        assert_eq!(resolve_contact(7, 360.0, 360.0), 16);
+        assert_eq!(resolve_contact(3, 480.0, 360.0), 16);
+        assert_eq!(resolve_contact(5, 360.0, 480.0), 16);
+    }
+
+    #[test]
+    fn full_cast_grounded_props_do_not_collapse_to_one_floor_contact() {
+        let props = full_prop_topology();
+        let composition = resolve_for(&props, 360.0, 360.0);
+        let contacts = composition
+            .prop_placements
+            .iter()
+            .filter(|placement| placement.visible && placement.grounded)
+            .map(|placement| placement.bounds_cells[3])
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(
+            contacts.len() >= 2,
+            "grounded props collapsed to {contacts:?}"
+        );
+        assert!(contacts
+            .iter()
+            .all(|contact| [15, 16, 17].contains(contact)));
+    }
+
+    #[test]
+    fn non_floor_props_keep_their_authored_attachment_regions() {
+        let props = [
+            prop_topology(
+                crate::game::habitat::TOKEN_LANTERN_10M,
+                0,
+                PropZoneSnapshot::Ceiling,
+                AuthoredDepthSnapshot::Background,
+            ),
+            prop_topology(
+                crate::game::habitat::TOKEN_GEODE_50M,
+                1,
+                PropZoneSnapshot::WallLeft,
+                AuthoredDepthSnapshot::BehindPet,
+            ),
+            prop_topology(
+                crate::game::habitat::TOKEN_SHARD_1M,
+                2,
+                PropZoneSnapshot::WallRight,
+                AuthoredDepthSnapshot::Background,
+            ),
+            prop_topology(
+                crate::game::habitat::TOKEN_FRIENDLY_CLOUD_750K,
+                3,
+                PropZoneSnapshot::AirMid,
+                AuthoredDepthSnapshot::BehindPet,
+            ),
+        ];
+        let placements = props
+            .iter()
+            .map(|prop| {
+                let composition = resolve_for(std::slice::from_ref(prop), 360.0, 360.0);
+                composition.prop_placements[0]
+            })
+            .collect::<Vec<_>>();
+
+        assert!(placements.iter().all(|placement| placement.visible));
+        assert!(placements.iter().all(|placement| !placement.grounded));
+        assert!(placements[0].bounds_cells[1] <= 4, "ceiling prop detached");
+        assert!(
+            placements[1].bounds_cells[0] <= 4,
+            "left-wall prop detached"
+        );
+        assert!(
+            placements[2].bounds_cells[2] >= 38,
+            "right-wall prop detached"
+        );
+        assert!(
+            placements[3].bounds_cells[3] <= 13,
+            "air prop entered floor band"
+        );
+    }
+
+    #[test]
     fn landscape_composition_uses_centered_aperture_columns() {
         let spec =
             crate::game::habitat::catalog_prop_by_str(crate::game::habitat::TOKEN_PEBBLE_25K)
@@ -575,14 +788,14 @@ mod tests {
         assert_eq!(composition.prop_placements.len(), 1);
         let placement = composition.prop_placements[0];
         assert!(placement.visible);
-        assert_eq!(placement.bounds_cells[3], 17);
+        assert_eq!(placement.bounds_cells[3], 16);
     }
 
     #[test]
     fn grounded_props_contact_the_tank_floor_without_changing_tank_reserves() {
-        for catalog_id in [
-            crate::game::habitat::TOKEN_PEBBLE_25K,
-            crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+        for (catalog_id, expected_contact) in [
+            (crate::game::habitat::TOKEN_PEBBLE_25K, 16),
+            (crate::game::habitat::TOKEN_MOSS_TUFT_250K, 17),
         ] {
             let spec = crate::game::habitat::catalog_prop_by_str(catalog_id)
                 .expect("grounded prop catalog entry");
@@ -617,7 +830,7 @@ mod tests {
 
             let placement = composition.prop_placements[0];
             assert!(placement.visible, "{catalog_id}");
-            assert_eq!(placement.bounds_cells[3], 17, "{catalog_id}");
+            assert_eq!(placement.bounds_cells[3], expected_contact, "{catalog_id}");
             assert!(
                 !intersects(placement.bounds_cells, floor_hud_reserve(36, 18)),
                 "{catalog_id}",
@@ -773,7 +986,7 @@ mod tests {
             let composition = resolve_for(&props, width_points, height_points);
             let (expected_hud, expected_floor_hud, expected_hud_route) =
                 if width_points > height_points {
-                    ([11, 10, 32, 17], [15, 10, 29, 15], [11, 10, 21, 7])
+                    ([11, 10, 32, 17], [15, 10, 28, 15], [11, 10, 21, 7])
                 } else {
                     ([9, 10, 35, 17], [13, 10, 31, 15], [9, 10, 26, 7])
                 };
@@ -804,8 +1017,14 @@ mod tests {
                 .filter(|placement| placement.visible)
             {
                 if placement.grounded {
-                    assert!(!intersects(placement.bounds_cells, expected_floor_hud));
-                    assert_eq!(placement.bounds_cells[3], ROWS as i16 - 1);
+                    assert!(
+                        !intersects(placement.bounds_cells, expected_floor_hud),
+                        "{width_points}x{height_points} slot {} bounds {:?} intersected floor HUD {:?}",
+                        placement.slot,
+                        placement.bounds_cells,
+                        expected_floor_hud,
+                    );
+                    assert!([15, 16, 17].contains(&placement.bounds_cells[3]));
                 } else {
                     assert!(!intersects(placement.bounds_cells, expected_hud));
                     assert!(!intersects(placement.bounds_cells, expected_bottom));
