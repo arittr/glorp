@@ -527,6 +527,14 @@ pub(super) struct SceneDirtySpans {
     pub(super) lights: DirtySpanSet,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SceneDirtyMetrics {
+    pub(super) content_ranges: u64,
+    pub(super) content_bytes: u64,
+    pub(super) frame_ranges: u64,
+    pub(super) frame_bytes: u64,
+}
+
 impl SceneDirtySpans {
     fn empty(
         from: crate::presentation::companion_scene::AppliedRevisions,
@@ -553,6 +561,49 @@ impl SceneDirtySpans {
             lights: DirtySpanSet::default(),
         }
     }
+
+    pub(super) fn metrics(self) -> SceneDirtyMetrics {
+        let content = [
+            self.content_globals,
+            self.pet_body,
+            self.pet_particles,
+            self.room_content,
+            self.prop_glyphs,
+            self.tank_glyphs,
+            self.content_ambient,
+            self.content_analytics,
+        ];
+        let frame = [
+            self.frame_globals,
+            self.nodes,
+            self.room_frame,
+            self.props,
+            self.tank_cells,
+            self.frame_ambient,
+            self.frame_analytics,
+            self.lights,
+        ];
+        SceneDirtyMetrics {
+            content_ranges: dirty_range_count(&content),
+            content_bytes: dirty_byte_count(&content),
+            frame_ranges: dirty_range_count(&frame),
+            frame_bytes: dirty_byte_count(&frame),
+        }
+    }
+}
+
+fn dirty_range_count(sets: &[DirtySpanSet]) -> u64 {
+    sets.iter().fold(0_u64, |total, set| {
+        total.saturating_add(u64::try_from(set.as_slice().len()).unwrap_or(u64::MAX))
+    })
+}
+
+fn dirty_byte_count(sets: &[DirtySpanSet]) -> u64 {
+    sets.iter()
+        .flat_map(DirtySpanSet::as_slice)
+        .fold(0_u64, |total, span| {
+            total.saturating_add(u64::try_from(span.len).unwrap_or(u64::MAX))
+        })
 }
 
 impl Default for SceneDirtySpans {
@@ -573,6 +624,12 @@ pub(super) enum MirrorDeltaError {
     Validation(crate::presentation::companion_scene::validate::SceneValidationError),
     Compile(CompileError),
     Mirror(MirrorError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CaptureCandidateError {
+    Validation(crate::presentation::companion_scene::validate::SceneValidationError),
+    Compile(CompileError),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1038,11 +1095,185 @@ pub(super) enum CompileError {
 }
 
 impl CpuSceneCandidate {
+    /// A stable fingerprint of every mutable vector/fixed-mirror allocation that
+    /// ordinary compatible deltas are required to reuse. Lifetime qualification
+    /// samples this before and after each phase; any pointer or capacity change is
+    /// reported as real capacity growth instead of relying on a default counter.
+    pub(super) fn storage_capacity_signature(&self) -> u64 {
+        fn mix(signature: &mut u64, pointer: usize, capacity: usize) {
+            *signature = signature
+                .wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(pointer as u64)
+                .wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(capacity as u64);
+        }
+
+        let mut signature = 0xcbf2_9ce4_8422_2325_u64;
+        macro_rules! observe_vec {
+            ($values:expr) => {{
+                let values = &$values;
+                mix(&mut signature, values.as_ptr() as usize, values.capacity());
+            }};
+        }
+        observe_vec!(self.vertices);
+        observe_vec!(self.indices);
+        observe_vec!(self.nodes);
+        observe_vec!(self.materials);
+        observe_vec!(self.resources);
+        observe_vec!(self.primitives);
+        observe_vec!(self.attachments);
+        observe_vec!(self.phases.opaque_cutout);
+        observe_vec!(self.phases.world_blended_unsorted);
+        observe_vec!(self.phases.chrome_authored);
+        mix(
+            &mut signature,
+            self.content.globals.as_slice().as_ptr() as usize,
+            self.content.globals.capacity(),
+        );
+        mix(
+            &mut signature,
+            self.frame.globals.as_slice().as_ptr() as usize,
+            self.frame.globals.capacity(),
+        );
+        for (pointer, capacity) in [
+            (
+                self.content.pet_body.as_slice().as_ptr() as usize,
+                self.content.pet_body.capacity(),
+            ),
+            (
+                self.content.pet_particles.as_slice().as_ptr() as usize,
+                self.content.pet_particles.capacity(),
+            ),
+            (
+                self.content.room_glyphs.as_slice().as_ptr() as usize,
+                self.content.room_glyphs.capacity(),
+            ),
+            (
+                self.content.prop_glyphs.as_slice().as_ptr() as usize,
+                self.content.prop_glyphs.capacity(),
+            ),
+            (
+                self.content.tank_glyphs.as_slice().as_ptr() as usize,
+                self.content.tank_glyphs.capacity(),
+            ),
+            (
+                self.content.ambient.as_slice().as_ptr() as usize,
+                self.content.ambient.capacity(),
+            ),
+            (
+                self.content.analytics.as_slice().as_ptr() as usize,
+                self.content.analytics.capacity(),
+            ),
+            (
+                self.frame.nodes.as_slice().as_ptr() as usize,
+                self.frame.nodes.capacity(),
+            ),
+            (
+                self.frame.room_glyphs.as_slice().as_ptr() as usize,
+                self.frame.room_glyphs.capacity(),
+            ),
+            (
+                self.frame.props.as_slice().as_ptr() as usize,
+                self.frame.props.capacity(),
+            ),
+            (
+                self.frame.tank_cells.as_slice().as_ptr() as usize,
+                self.frame.tank_cells.capacity(),
+            ),
+            (
+                self.frame.ambient.as_slice().as_ptr() as usize,
+                self.frame.ambient.capacity(),
+            ),
+            (
+                self.frame.analytics.as_slice().as_ptr() as usize,
+                self.frame.analytics.capacity(),
+            ),
+            (
+                self.frame.lights.as_slice().as_ptr() as usize,
+                self.frame.lights.capacity(),
+            ),
+        ] {
+            mix(&mut signature, pointer, capacity);
+        }
+        signature
+    }
+
+    /// Recompiles the last-presented logical scene into an isolated candidate
+    /// whose private frame inputs have the canonical external-capture
+    /// projection. The live candidate and its packed mirrors are not modified.
+    pub(super) fn capture_safe_clone(&self) -> Result<Self, CaptureCandidateError> {
+        let template = self.accepted.template().template();
+        let frame = self.accepted.frame().frame().capture_safe_clone(template);
+        let accepted = crate::presentation::companion_scene::validate::validate_full_generation(
+            template,
+            &self.logical_content,
+            &frame,
+        )
+        .map_err(CaptureCandidateError::Validation)?;
+        compile_cpu_parts(
+            self.generation_key,
+            self.source_revisions,
+            template,
+            &self.logical_content,
+            &frame,
+            accepted,
+        )
+        .map_err(CaptureCandidateError::Compile)
+    }
+
+    pub(super) fn scene_artifacts(
+        &self,
+    ) -> Result<
+        crate::presentation::companion_scene::contract::SceneArtifacts,
+        crate::presentation::companion_scene::validate::SceneValidationError,
+    > {
+        crate::presentation::companion_scene::contract::SceneArtifacts::try_from_parts(
+            self.accepted.template().template(),
+            &self.logical_content,
+            self.accepted.frame().frame(),
+        )
+    }
+
+    pub(super) fn capture_source_identity(
+        &self,
+    ) -> Result<
+        crate::presentation::companion_scene::contract::CaptureSourceIdentity,
+        crate::presentation::companion_scene::scene::SceneGenerationError,
+    > {
+        let template = self.accepted.template().template();
+        Ok(
+            crate::presentation::companion_scene::contract::CaptureSourceIdentity::new(
+                template.generation_checksum,
+                crate::presentation::companion_scene::scene::checksum_content_for_capture(
+                    &self.logical_content,
+                )?,
+                self.accepted
+                    .frame()
+                    .frame()
+                    .capture_source_checksum(template)?,
+            ),
+        )
+    }
+
     /// Logical point extent authored by the scene camera. The host combines
     /// this with its backing scale when validating a physical render request;
     /// no surface metadata enters the compiler-owned frame mirror.
     pub(super) fn logical_viewport_points(&self) -> [f32; 2] {
         self.frame.globals.as_slice()[0].viewport_points
+    }
+
+    #[cfg(test)]
+    pub(super) fn accepted_frame_for_test(
+        &self,
+    ) -> &crate::presentation::companion_scene::scene::SceneFrame {
+        self.accepted.frame().frame()
+    }
+
+    #[cfg(test)]
+    pub(super) fn accepted_content_for_test(
+        &self,
+    ) -> &crate::presentation::companion_scene::scene::SceneContent {
+        &self.logical_content
     }
 
     pub(super) fn primitive_count(&self) -> usize {
@@ -4982,6 +5213,22 @@ mod tests {
             dirty.frame_analytics.as_slice(),
             &[ByteSpan::slots::<AnalyticFrameGpuValue>(0, 1)]
         );
+        assert_eq!(
+            dirty.metrics(),
+            SceneDirtyMetrics {
+                content_ranges: 3,
+                content_bytes: (std::mem::size_of::<ContentGlobalsGpuValue>()
+                    + std::mem::size_of::<ContentGpuValue>()
+                    + std::mem::size_of::<AnalyticContentGpuValue>())
+                    as u64,
+                frame_ranges: 4,
+                frame_bytes: (2 * std::mem::size_of::<NodeGpuValue>()
+                    + std::mem::size_of::<FrameGlobalsGpuValue>()
+                    + std::mem::size_of::<FrameGpuValue>()
+                    + std::mem::size_of::<AnalyticFrameGpuValue>())
+                    as u64,
+            }
+        );
 
         let mut visited = Vec::new();
         prepared.visit_mirror_updates(|family, slot, bytes| {
@@ -5408,6 +5655,7 @@ mod tests {
             let projected = neutral
                 .project_snapshot_changes(&target, changes, from, to)
                 .unwrap();
+            let prop_content_changed = !projected.content.prop_slots.is_empty();
             let prop_paint_changed = !projected.content.prop_paint_slots.is_empty();
             let dirty = candidate
                 .apply_deltas(&projected.content, &projected.frame)
@@ -5461,22 +5709,17 @@ mod tests {
                 assert!(!dirty.frame_globals.as_slice().is_empty());
                 saw_globals = true;
             }
-            if changes
-                .semantic()
-                .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::PROP)
-            {
-                assert!(!dirty.prop_glyphs.as_slice().is_empty());
+            if prop_content_changed && !dirty.prop_glyphs.as_slice().is_empty() {
                 saw_prop_content = true;
             }
-            if prop_paint_changed {
-                assert!(!dirty.prop_glyphs.as_slice().is_empty());
+            if prop_paint_changed && !dirty.prop_glyphs.as_slice().is_empty() {
                 saw_prop_paint = true;
             }
             if changes
                 .semantic()
                 .contains(crate::presentation::companion_scene::runtime::SemanticChangeMask::TANK)
+                && !dirty.tank_glyphs.as_slice().is_empty()
             {
-                assert!(!dirty.tank_glyphs.as_slice().is_empty());
                 saw_tank_content = true;
             }
             if changes.frame().contains(

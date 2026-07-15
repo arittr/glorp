@@ -15,6 +15,7 @@ use crate::game::evolution::Stage;
 use crate::game::metabolism::Mood;
 use crate::pet::generation::Species;
 use crate::presentation::privacy::PrivacyProjection;
+use std::ops::{Deref, DerefMut};
 
 pub const COMPANION_SCENE_SCHEMA_VERSION: u16 = 2;
 pub const COMPANION_RENDERER_SCHEMA_VERSION: u16 = 2;
@@ -199,9 +200,49 @@ impl CompanionSceneProjectionInput {
 pub struct CompanionSceneSnapshot {
     pub schema_version: u16,
     pub privacy: PrivacyProjection,
-    pub topology: TopologySnapshot,
-    pub content: ContentSnapshot,
+    /// Immutable semantic domains. Presentation ticks clone these `Arc`s, not
+    /// pet art, cast inventories, room content, or topology.
+    pub topology: SharedSemanticSnapshot<TopologySnapshot>,
+    pub content: SharedSemanticSnapshot<ContentSnapshot>,
     pub frame: FrameSnapshot,
+}
+
+/// Cheaply cloned semantic storage for presentation ticks. Mutation remains
+/// available to semantic producers and fixtures through copy-on-write, while
+/// ordinary frame snapshots share the same immutable allocation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(transparent)]
+pub struct SharedSemanticSnapshot<T>(std::sync::Arc<T>);
+
+impl<T> SharedSemanticSnapshot<T> {
+    pub fn new(value: T) -> Self {
+        Self(std::sync::Arc::new(value))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T> From<T> for SharedSemanticSnapshot<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<T> Deref for SharedSemanticSnapshot<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Clone> DerefMut for SharedSemanticSnapshot<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -237,12 +278,41 @@ pub struct RoomTopologySnapshot {
     pub species_dialect: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PropTopologySnapshot {
     pub catalog_id: &'static str,
     pub stable_order: u8,
     pub zone: PropZoneSnapshot,
     pub authored_depth: AuthoredDepthSnapshot,
+    pub presentation_motion: PropPresentationMotion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PropPresentationMotion {
+    Static,
+    TwoPoseEase {
+        duration_ms: u16,
+        curve: EaseCurve,
+    },
+    Sway {
+        amplitude_points: f32,
+        period_ms: u32,
+    },
+    Hover {
+        amplitude_points: f32,
+        period_ms: u32,
+    },
+    TwinkleFade {
+        attack_ms: u16,
+        release_ms: u16,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EaseCurve {
+    SmoothStep,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -310,7 +380,6 @@ pub struct PropAnimationSnapshot {
     pub motion_phase: Option<u8>,
     pub chest_lid_open: Option<bool>,
     pub bloom_active: Option<bool>,
-    pub origin_points: [f32; 2],
 }
 
 impl PropAnimationSnapshot {
@@ -334,7 +403,6 @@ pub struct TankAnimationSnapshot {
     pub visible: bool,
     pub origin_col: u16,
     pub origin_row: u16,
-    pub origin_points: [f32; 2],
     pub side: Option<TankSideSnapshot>,
     pub layer: TankLayerSnapshot,
     pub sprite_variant: u8,
@@ -345,8 +413,6 @@ pub struct TankAnimationSnapshot {
     pub cadence_ms: u16,
     pub calm: bool,
     pub cells: Vec<TankCellSnapshot>,
-    pub bounds: Option<TankBoundsSnapshot>,
-    pub bounds_points: Option<[f32; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -355,7 +421,6 @@ pub struct TankCellSnapshot {
     pub row: u16,
     pub glyph: char,
     pub layer: TankLayerSnapshot,
-    pub position_points: [f32; 2],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -456,7 +521,13 @@ pub struct FrameSnapshot {
     #[serde(skip)]
     pub dim_amount: f32,
     pub room_glyphs: Vec<RoomGlyphFrameSnapshot>,
+    pub prop_instances: Vec<PropFrameSnapshot>,
+    pub tank_instances: Vec<TankFrameSnapshot>,
     pub ambient_instances: Vec<AmbientFrameSnapshot>,
+    #[serde(skip)]
+    pub(crate) pet_motion_input: crate::round::motion::CompanionMotionInput,
+    #[serde(skip)]
+    pub(crate) pet_depth_override: Option<f32>,
 }
 
 impl std::fmt::Debug for FrameSnapshot {
@@ -480,6 +551,8 @@ impl std::fmt::Debug for FrameSnapshot {
             .field("dimmed", &self.dimmed)
             .field("dim_amount", &"<redacted>")
             .field("room_glyphs", &self.room_glyphs)
+            .field("prop_instances", &self.prop_instances)
+            .field("tank_instances", &self.tank_instances)
             .field("ambient_instances", &self.ambient_instances)
             .finish()
     }
@@ -518,6 +591,54 @@ pub struct RoomGlyphFrameSnapshot {
     pub grid_cell: [u16; 2],
     pub position_points: [f32; 2],
     pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct PropFrameSnapshot {
+    pub slot: u8,
+    pub origin_points: [f32; 2],
+    pub motion_offset_points: [f32; 2],
+    pub opacity: f32,
+    pub transition: Option<PropTransitionAnchor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct PropTransitionAnchor {
+    pub source_pose: [f32; 2],
+    pub target_pose: [f32; 2],
+    pub source_opacity: f32,
+    pub target_opacity: f32,
+    pub semantic_revision: SemanticRevision,
+    pub started_at_monotonic_ms: u64,
+    pub duration_ms: u16,
+    pub curve: EaseCurve,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct TankFrameSnapshot {
+    pub slot: u8,
+    pub visible: bool,
+    pub origin_points: [f32; 2],
+    pub cells: Vec<TankCellFrameSnapshot>,
+    pub bounds_points: Option<[f32; 4]>,
+    pub semantic_revision: SemanticRevision,
+    pub started_at_monotonic_ms: u64,
+    pub duration_ms: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct TankCellFrameSnapshot {
+    pub source_position_points: [f32; 2],
+    pub position_points: [f32; 2],
+    pub target_position_points: [f32; 2],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompanionFrameProjection {
+    pub(crate) semantic_base: SemanticRevision,
+    pub(crate) clock: CompanionProjectionClock,
+    pub(crate) options: input::CompanionPresentationOptions,
+    pub(crate) frame: FrameSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]

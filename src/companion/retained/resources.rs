@@ -2255,6 +2255,20 @@ mod repertoire_tests {
     }
 
     #[test]
+    fn manifest_contains_the_direct_scene_authored_repertoire() {
+        let manifest = GlyphRepertoireManifest::for_fixture_pet();
+        for glyph in
+            crate::presentation::companion_scene::scene::AuthoredGlyph::declared_repertoire()
+        {
+            let sequence = glyph.to_string();
+            assert!(
+                manifest.contains_sequence(&sequence),
+                "retained atlas is missing direct-scene glyph {sequence:?}"
+            );
+        }
+    }
+
+    #[test]
     fn full_animation_strip_has_no_post_activation_atlas_churn() {
         let manifest = GlyphRepertoireManifest::for_fixture_pet();
         let mut cache = TestResourceCache::activate(manifest);

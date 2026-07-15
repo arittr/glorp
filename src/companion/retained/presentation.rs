@@ -71,6 +71,7 @@ pub(crate) enum RetainedFailureCategory {
     RasterWorkerUnavailable,
     #[allow(dead_code)] // Produced by the Task 12 host path once Task 14 routes it live.
     SceneCandidateEncode,
+    PresentationStalled,
     UnsupportedRaster,
     SurfaceLost,
     SurfaceValidation,
@@ -109,6 +110,7 @@ impl RetainedFailureCategory {
             Self::FontUnavailable => "retained-font-unavailable",
             Self::RasterWorkerUnavailable => "retained-raster-worker-unavailable",
             Self::SceneCandidateEncode => "retained-scene-candidate-encode",
+            Self::PresentationStalled => "retained-presentation-stalled",
             Self::UnsupportedRaster => "retained-unsupported-raster",
             Self::SurfaceLost => "retained-surface-lost",
             Self::SurfaceValidation => "retained-surface-validation",
@@ -266,7 +268,6 @@ impl GpuErrorMailbox {
     /// Drains queued callbacks and returns only the latest fault emitted by the
     /// requested device generation. Late callbacks from retired devices are
     /// discarded so they cannot poison a successor activation.
-    #[allow(dead_code)] // Device-correlated drain is called by the dormant Task 12 host path.
     pub(super) fn drain_for(
         &self,
         device: crate::presentation::companion_scene::DeviceEpoch,

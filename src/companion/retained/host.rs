@@ -11,6 +11,798 @@ use objc2_quartz_core::CAMetalLayer;
 
 use super::*;
 
+/// Main-thread timer callback gate. AppKit may run a nested tracking loop while a
+/// callback is active; this gate drops the nested tick instead of allowing the
+/// retained host state machine to be entered recursively.
+#[derive(Debug, Default)]
+pub(in crate::companion) struct NonReentrantTickGate {
+    active: std::cell::Cell<bool>,
+}
+
+impl NonReentrantTickGate {
+    pub(in crate::companion) fn enter(&self) -> Option<NonReentrantTickGuard<'_>> {
+        if self.active.replace(true) {
+            None
+        } else {
+            Some(NonReentrantTickGuard { gate: self })
+        }
+    }
+}
+
+pub(in crate::companion) struct NonReentrantTickGuard<'a> {
+    gate: &'a NonReentrantTickGate,
+}
+
+impl Drop for NonReentrantTickGuard<'_> {
+    fn drop(&mut self) {
+        self.gate.active.set(false);
+    }
+}
+
+#[cfg(feature = "dev-preview")]
+const NO_NATIVE_INTERACTIONS: &[&str] = &[];
+#[cfg(feature = "dev-preview")]
+const NATIVE_RESIZE_INTERACTIONS: &[&str] = &[
+    "AppKit live-resize/fullscreen events",
+    "physical display scale migration",
+];
+#[cfg(feature = "dev-preview")]
+const NATIVE_TRACKING_INTERACTIONS: &[&str] = &[
+    "AppKit menu tracking loop",
+    "AppKit live-resize tracking loop",
+];
+#[cfg(feature = "dev-preview")]
+const NATIVE_SURFACE_INTERACTIONS: &[&str] = &[
+    "real CAMetalLayer acquisition result",
+    "real wgpu device callback",
+];
+
+/// Deterministic model of the host-owned lifecycle boundary. It consumes the
+/// same typed frame dispositions/categories as the surface host, but never
+/// claims to synthesize AppKit gestures or a real GPU fault. Those native
+/// interactions are named explicitly in the report for manual Task10 coverage.
+#[cfg(feature = "dev-preview")]
+struct ReviewSceneHostHarness {
+    phase: ReviewSceneHostPhase,
+    physical_extent: [u32; 2],
+    backing_scale: f64,
+    surface_epoch: u64,
+    active_generation: Option<u64>,
+    candidate_generation: Option<u64>,
+    hidden_semantic_pending: bool,
+    counters: crate::commands::companion_mode::ReviewSceneSoakCounters,
+}
+
+#[cfg(feature = "dev-preview")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewSceneHostPhase {
+    Idle,
+    Preparing,
+    Ready,
+    Activating,
+    Active,
+    Hidden,
+    Shutdown,
+}
+
+#[cfg(feature = "dev-preview")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeterministicSurfaceOutcome {
+    Presented,
+    Outdated,
+    Timeout,
+    Occluded,
+    Lost,
+    Validation,
+}
+
+#[cfg(feature = "dev-preview")]
+impl ReviewSceneHostHarness {
+    fn new() -> Self {
+        Self {
+            phase: ReviewSceneHostPhase::Idle,
+            physical_extent: [360, 360],
+            backing_scale: 1.0,
+            surface_epoch: 1,
+            active_generation: None,
+            candidate_generation: None,
+            hidden_semantic_pending: false,
+            counters: crate::commands::companion_mode::ReviewSceneSoakCounters::default(),
+        }
+    }
+
+    fn begin_preparing(&mut self, generation: u64) {
+        self.phase = ReviewSceneHostPhase::Preparing;
+        self.candidate_generation = Some(generation);
+    }
+
+    fn finish_preparing(&mut self) {
+        assert_eq!(self.phase, ReviewSceneHostPhase::Preparing);
+        self.phase = ReviewSceneHostPhase::Ready;
+    }
+
+    fn begin_activation(&mut self) {
+        assert_eq!(self.phase, ReviewSceneHostPhase::Ready);
+        self.phase = ReviewSceneHostPhase::Activating;
+    }
+
+    fn resize(&mut self, logical: u32, scale: f64) {
+        self.counters.resize_requests = self.counters.resize_requests.saturating_add(1);
+        let extent = [
+            physical_dimension(f64::from(logical), scale),
+            physical_dimension(f64::from(logical), scale),
+        ];
+        if extent != self.physical_extent || scale.to_bits() != self.backing_scale.to_bits() {
+            self.physical_extent = extent;
+            self.backing_scale = scale;
+            self.surface_epoch = self.surface_epoch.saturating_add(1);
+            self.counters.surface_reconfigurations =
+                self.counters.surface_reconfigurations.saturating_add(1);
+        }
+    }
+
+    fn activate_with_surface(&mut self, outcome: DeterministicSurfaceOutcome) -> FrameDisposition {
+        assert_eq!(self.phase, ReviewSceneHostPhase::Activating);
+        let mut progress = FrameProgress::new(0, self.candidate_generation.unwrap_or_default());
+        progress
+            .mark(FrameMilestone::Prepared)
+            .expect("activation begins with a prepared candidate");
+        match outcome {
+            DeterministicSurfaceOutcome::Presented => {
+                progress
+                    .mark(FrameMilestone::Encoded)
+                    .expect("present encodes after prepare");
+                progress
+                    .mark(FrameMilestone::Submitted)
+                    .expect("present submits after encode");
+                progress
+                    .finish(FrameDisposition::SurfacePresentCalled)
+                    .expect("first present terminates exactly once");
+                self.active_generation = self.candidate_generation.take();
+                self.phase = ReviewSceneHostPhase::Active;
+                self.counters.presents = self.counters.presents.saturating_add(1);
+            }
+            DeterministicSurfaceOutcome::Outdated => {
+                skip(&mut progress, SkipReason::Outdated);
+                self.phase = ReviewSceneHostPhase::Ready;
+                self.surface_epoch = self.surface_epoch.saturating_add(1);
+                self.counters.surface_reconfigurations =
+                    self.counters.surface_reconfigurations.saturating_add(1);
+                self.counters.skips = self.counters.skips.saturating_add(1);
+            }
+            DeterministicSurfaceOutcome::Timeout => {
+                skip(&mut progress, SkipReason::Timeout);
+                self.phase = ReviewSceneHostPhase::Ready;
+                self.counters.skips = self.counters.skips.saturating_add(1);
+            }
+            DeterministicSurfaceOutcome::Occluded => {
+                skip(&mut progress, SkipReason::Occluded);
+                self.phase = ReviewSceneHostPhase::Ready;
+                self.counters.skips = self.counters.skips.saturating_add(1);
+            }
+            DeterministicSurfaceOutcome::Lost => {
+                fail(&mut progress, RetainedFailureCategory::SurfaceLost);
+                self.phase = ReviewSceneHostPhase::Idle;
+                self.candidate_generation = None;
+                self.counters.fallbacks = self.counters.fallbacks.saturating_add(1);
+            }
+            DeterministicSurfaceOutcome::Validation => {
+                fail(&mut progress, RetainedFailureCategory::SurfaceValidation);
+                self.phase = ReviewSceneHostPhase::Idle;
+                self.candidate_generation = None;
+                self.counters.fallbacks = self.counters.fallbacks.saturating_add(1);
+            }
+        }
+        progress
+            .disposition()
+            .expect("every deterministic acquisition is terminal")
+    }
+
+    fn inject_device_failure(&mut self, category: RetainedFailureCategory) {
+        assert!(matches!(
+            category,
+            RetainedFailureCategory::DeviceUnavailable
+                | RetainedFailureCategory::DeviceValidation
+                | RetainedFailureCategory::DeviceOutOfMemory
+        ));
+        let mailbox = GpuErrorMailbox::new();
+        mailbox
+            .sender_for(crate::presentation::companion_scene::DeviceEpoch(1))
+            .send(category)
+            .expect("deterministic device fault mailbox remains connected");
+        assert_eq!(mailbox.drain(), Some(category));
+        self.phase = ReviewSceneHostPhase::Idle;
+        self.candidate_generation = None;
+        self.active_generation = None;
+        self.counters.fallbacks = self.counters.fallbacks.saturating_add(1);
+    }
+
+    fn capture(&mut self) -> Option<u64> {
+        if self.phase == ReviewSceneHostPhase::Activating {
+            self.counters.capture_deferred = self.counters.capture_deferred.saturating_add(1);
+            None
+        } else {
+            let generation = self.active_generation;
+            if generation.is_some() {
+                self.counters.capture_bound = self.counters.capture_bound.saturating_add(1);
+            } else {
+                self.counters.capture_deferred = self.counters.capture_deferred.saturating_add(1);
+            }
+            generation
+        }
+    }
+
+    fn hide(&mut self) {
+        assert_eq!(self.phase, ReviewSceneHostPhase::Active);
+        self.phase = ReviewSceneHostPhase::Hidden;
+    }
+
+    fn coalesce_hidden_semantic_change(&mut self) {
+        assert_eq!(self.phase, ReviewSceneHostPhase::Hidden);
+        self.hidden_semantic_pending = true;
+        self.counters.hidden_updates_coalesced =
+            self.counters.hidden_updates_coalesced.saturating_add(1);
+    }
+
+    fn reveal(&mut self) {
+        assert_eq!(self.phase, ReviewSceneHostPhase::Hidden);
+        self.hidden_semantic_pending = false;
+        self.phase = ReviewSceneHostPhase::Active;
+        self.counters.reveals = self.counters.reveals.saturating_add(1);
+    }
+
+    fn shutdown(&mut self) {
+        if self.phase == ReviewSceneHostPhase::Preparing {
+            self.counters.worker_cancel_requests =
+                self.counters.worker_cancel_requests.saturating_add(1);
+        }
+        self.phase = ReviewSceneHostPhase::Shutdown;
+        self.candidate_generation = None;
+        self.counters.shutdowns = self.counters.shutdowns.saturating_add(1);
+    }
+
+    fn run_virtual_common_mode_tracking(&mut self, duration_ms: u64, interval_ms: u64) {
+        assert!(interval_ms > 0);
+        while self.counters.virtual_elapsed_ms < duration_ms {
+            self.counters.ticks_attempted = self.counters.ticks_attempted.saturating_add(1);
+            self.counters.ticks_completed = self.counters.ticks_completed.saturating_add(1);
+            self.counters.virtual_elapsed_ms = self
+                .counters
+                .virtual_elapsed_ms
+                .saturating_add(interval_ms)
+                .min(duration_ms);
+        }
+    }
+}
+
+#[cfg(feature = "dev-preview")]
+struct SoakObservation {
+    expected: &'static str,
+    observed: &'static str,
+    category: Option<RetainedFailureCategory>,
+    counters: crate::commands::companion_mode::ReviewSceneSoakCounters,
+    native_interactions_deferred: &'static [&'static str],
+}
+
+#[cfg(feature = "dev-preview")]
+pub(crate) fn review_scene_soak_report(
+    scenario: crate::commands::companion_mode::ReviewSceneSoakScenario,
+) -> crate::commands::companion_mode::ReviewSceneSoakReport {
+    use crate::commands::companion_mode::ReviewSceneSoakScenario as Scenario;
+
+    let mut host = ReviewSceneHostHarness::new();
+    let observation = match scenario {
+        Scenario::ResizePreparing => {
+            host.begin_preparing(1);
+            host.resize(480, 1.0);
+            SoakObservation {
+                expected: "preparing-retained-after-resize",
+                observed: if host.phase == ReviewSceneHostPhase::Preparing
+                    && host.candidate_generation == Some(1)
+                {
+                    "preparing-retained-after-resize"
+                } else {
+                    "preparing-resize-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_RESIZE_INTERACTIONS,
+            }
+        }
+        Scenario::ResizeReady => {
+            host.begin_preparing(1);
+            host.finish_preparing();
+            host.resize(480, 1.0);
+            SoakObservation {
+                expected: "ready-retained-for-rebound-surface",
+                observed: if host.phase == ReviewSceneHostPhase::Ready
+                    && host.candidate_generation == Some(1)
+                {
+                    "ready-retained-for-rebound-surface"
+                } else {
+                    "ready-resize-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_RESIZE_INTERACTIONS,
+            }
+        }
+        Scenario::ResizeActivating => {
+            host.begin_preparing(1);
+            host.finish_preparing();
+            host.begin_activation();
+            host.resize(720, 1.0);
+            let disposition = host.activate_with_surface(DeterministicSurfaceOutcome::Outdated);
+            SoakObservation {
+                expected: "activation-deferred-after-resize",
+                observed: if disposition == FrameDisposition::Skipped(SkipReason::Outdated)
+                    && host.phase == ReviewSceneHostPhase::Ready
+                {
+                    "activation-deferred-after-resize"
+                } else {
+                    "activation-resize-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_RESIZE_INTERACTIONS,
+            }
+        }
+        Scenario::ResizeStorm => {
+            for logical in [260, 360, 480, 720] {
+                host.resize(logical, 1.0);
+            }
+            SoakObservation {
+                expected: "resize-storm-260-360-480-720",
+                observed: if host.physical_extent == [720, 720]
+                    && host.counters.resize_requests == 4
+                    && host.counters.surface_reconfigurations == 4
+                {
+                    "resize-storm-260-360-480-720"
+                } else {
+                    "resize-storm-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_RESIZE_INTERACTIONS,
+            }
+        }
+        Scenario::BackingScale => {
+            host.resize(360, 1.0);
+            host.resize(360, 2.0);
+            host.resize(360, 1.0);
+            SoakObservation {
+                expected: "backing-scale-1x-2x-1x",
+                observed: if host.physical_extent == [360, 360]
+                    && host.backing_scale == 1.0
+                    && host.counters.surface_reconfigurations == 2
+                {
+                    "backing-scale-1x-2x-1x"
+                } else {
+                    "backing-scale-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_RESIZE_INTERACTIONS,
+            }
+        }
+        Scenario::HiddenSemanticReveal => {
+            host.active_generation = Some(1);
+            host.phase = ReviewSceneHostPhase::Active;
+            host.hide();
+            host.coalesce_hidden_semantic_change();
+            host.coalesce_hidden_semantic_change();
+            host.reveal();
+            SoakObservation {
+                expected: "latest-hidden-semantic-revealed-once",
+                observed: if host.phase == ReviewSceneHostPhase::Active
+                    && !host.hidden_semantic_pending
+                    && host.counters.hidden_updates_coalesced == 2
+                    && host.counters.reveals == 1
+                {
+                    "latest-hidden-semantic-revealed-once"
+                } else {
+                    "hidden-reveal-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NO_NATIVE_INTERACTIONS,
+            }
+        }
+        Scenario::CaptureSwap => {
+            host.active_generation = Some(1);
+            host.phase = ReviewSceneHostPhase::Active;
+            let before = host.capture();
+            host.begin_preparing(2);
+            host.finish_preparing();
+            host.begin_activation();
+            let during = host.capture();
+            let first_present = host.activate_with_surface(DeterministicSurfaceOutcome::Presented);
+            let after = host.capture();
+            SoakObservation {
+                expected: "capture-bound-before-deferred-during-bound-after",
+                observed: if before == Some(1)
+                    && during.is_none()
+                    && first_present == FrameDisposition::SurfacePresentCalled
+                    && after == Some(2)
+                {
+                    "capture-bound-before-deferred-during-bound-after"
+                } else {
+                    "capture-swap-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NO_NATIVE_INTERACTIONS,
+            }
+        }
+        Scenario::ShutdownWorker => {
+            host.begin_preparing(1);
+            host.shutdown();
+            SoakObservation {
+                expected: "worker-cancel-requested-before-shutdown",
+                observed: if host.phase == ReviewSceneHostPhase::Shutdown
+                    && host.counters.worker_cancel_requests == 1
+                    && host.candidate_generation.is_none()
+                {
+                    "worker-cancel-requested-before-shutdown"
+                } else {
+                    "shutdown-worker-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NO_NATIVE_INTERACTIONS,
+            }
+        }
+        Scenario::ShutdownActivation => {
+            host.begin_preparing(1);
+            host.finish_preparing();
+            host.begin_activation();
+            host.shutdown();
+            SoakObservation {
+                expected: "activation-dropped-before-shutdown",
+                observed: if host.phase == ReviewSceneHostPhase::Shutdown
+                    && host.candidate_generation.is_none()
+                    && host.counters.shutdowns == 1
+                {
+                    "activation-dropped-before-shutdown"
+                } else {
+                    "shutdown-activation-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NO_NATIVE_INTERACTIONS,
+            }
+        }
+        Scenario::TrackingRunLoop => {
+            // Virtual tracking time exceeds the two-minute review watchdog. The
+            // production timer is registered in NSRunLoopCommonModes; Task10 must
+            // still perform the actual menu/live-resize gesture.
+            const WATCHDOG_MS: u64 = 120_000;
+            let tracking_elapsed_ms = WATCHDOG_MS + 1_000;
+            host.run_virtual_common_mode_tracking(tracking_elapsed_ms, 250);
+            SoakObservation {
+                expected: "common-mode-cadence-beyond-watchdog",
+                observed: if host.counters.virtual_elapsed_ms > WATCHDOG_MS
+                    && host.counters.ticks_completed > 0
+                {
+                    "common-mode-cadence-beyond-watchdog"
+                } else {
+                    "tracking-run-loop-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_TRACKING_INTERACTIONS,
+            }
+        }
+        Scenario::SlowTick => {
+            let gate = NonReentrantTickGate::default();
+            host.counters.ticks_attempted = host.counters.ticks_attempted.saturating_add(1);
+            let first = gate.enter();
+            if first.is_some() {
+                host.counters.ticks_completed = host.counters.ticks_completed.saturating_add(1);
+            }
+            host.counters.ticks_attempted = host.counters.ticks_attempted.saturating_add(1);
+            if gate.enter().is_none() {
+                host.counters.ticks_suppressed = host.counters.ticks_suppressed.saturating_add(1);
+            }
+            drop(first);
+            host.counters.ticks_attempted = host.counters.ticks_attempted.saturating_add(1);
+            if gate.enter().is_some() {
+                host.counters.ticks_completed = host.counters.ticks_completed.saturating_add(1);
+            }
+            SoakObservation {
+                expected: "nested-slow-tick-suppressed-next-tick-runs",
+                observed: if host.counters.ticks_attempted == 3
+                    && host.counters.ticks_completed == 2
+                    && host.counters.ticks_suppressed == 1
+                {
+                    "nested-slow-tick-suppressed-next-tick-runs"
+                } else {
+                    "slow-tick-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NO_NATIVE_INTERACTIONS,
+            }
+        }
+        Scenario::SurfaceOutdated | Scenario::SurfaceTimeout | Scenario::SurfaceOccluded => {
+            host.begin_preparing(1);
+            host.finish_preparing();
+            host.begin_activation();
+            let (surface, reason, expected) = match scenario {
+                Scenario::SurfaceOutdated => (
+                    DeterministicSurfaceOutcome::Outdated,
+                    SkipReason::Outdated,
+                    "skip-outdated-retry-later",
+                ),
+                Scenario::SurfaceTimeout => (
+                    DeterministicSurfaceOutcome::Timeout,
+                    SkipReason::Timeout,
+                    "skip-timeout-retry-later",
+                ),
+                Scenario::SurfaceOccluded => (
+                    DeterministicSurfaceOutcome::Occluded,
+                    SkipReason::Occluded,
+                    "skip-occluded-retry-later",
+                ),
+                _ => unreachable!(),
+            };
+            let disposition = host.activate_with_surface(surface);
+            SoakObservation {
+                expected,
+                observed: if disposition == FrameDisposition::Skipped(reason)
+                    && host.phase == ReviewSceneHostPhase::Ready
+                    && host.counters.fallbacks == 0
+                {
+                    expected
+                } else {
+                    "surface-skip-mismatch"
+                },
+                category: None,
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_SURFACE_INTERACTIONS,
+            }
+        }
+        Scenario::SurfaceLost | Scenario::SurfaceValidation => {
+            host.begin_preparing(1);
+            host.finish_preparing();
+            host.begin_activation();
+            let (surface, category, expected) = match scenario {
+                Scenario::SurfaceLost => (
+                    DeterministicSurfaceOutcome::Lost,
+                    RetainedFailureCategory::SurfaceLost,
+                    "fallback-surface-lost",
+                ),
+                Scenario::SurfaceValidation => (
+                    DeterministicSurfaceOutcome::Validation,
+                    RetainedFailureCategory::SurfaceValidation,
+                    "fallback-surface-validation",
+                ),
+                _ => unreachable!(),
+            };
+            let disposition = host.activate_with_surface(surface);
+            SoakObservation {
+                expected,
+                observed: if disposition == FrameDisposition::Failed(category)
+                    && host.counters.fallbacks == 1
+                {
+                    expected
+                } else {
+                    "surface-failure-mismatch"
+                },
+                category: Some(category),
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_SURFACE_INTERACTIONS,
+            }
+        }
+        Scenario::DeviceLoss | Scenario::DeviceValidation | Scenario::DeviceOutOfMemory => {
+            let (category, expected) = match scenario {
+                Scenario::DeviceLoss => (
+                    RetainedFailureCategory::DeviceUnavailable,
+                    "fallback-device-lost",
+                ),
+                Scenario::DeviceValidation => (
+                    RetainedFailureCategory::DeviceValidation,
+                    "fallback-device-validation",
+                ),
+                Scenario::DeviceOutOfMemory => (
+                    RetainedFailureCategory::DeviceOutOfMemory,
+                    "fallback-device-out-of-memory",
+                ),
+                _ => unreachable!(),
+            };
+            host.active_generation = Some(1);
+            host.phase = ReviewSceneHostPhase::Active;
+            host.inject_device_failure(category);
+            SoakObservation {
+                expected,
+                observed: if host.active_generation.is_none()
+                    && host.counters.fallbacks == 1
+                    && host.phase == ReviewSceneHostPhase::Idle
+                {
+                    expected
+                } else {
+                    "device-failure-mismatch"
+                },
+                category: Some(category),
+                counters: host.counters,
+                native_interactions_deferred: NATIVE_SURFACE_INTERACTIONS,
+            }
+        }
+    };
+    crate::commands::companion_mode::ReviewSceneSoakReport {
+        schema_version: 1,
+        scenario: scenario.as_str(),
+        execution_mode: "deterministic-host-harness",
+        expected_outcome: observation.expected,
+        observed_outcome: observation.observed,
+        sanitized_category: observation.category.map(RetainedFailureCategory::category),
+        counters: observation.counters,
+        native_interactions_deferred: observation.native_interactions_deferred,
+        passed: observation.expected == observation.observed,
+    }
+}
+
+#[cfg(feature = "dev-preview")]
+pub(crate) fn run_review_scene_soak(
+    scenario: crate::commands::companion_mode::ReviewSceneSoakScenario,
+    writer: &mut dyn std::io::Write,
+) -> crate::error::Result<()> {
+    let report = review_scene_soak_report(scenario);
+    serde_json::to_writer_pretty(&mut *writer, &report)?;
+    writeln!(writer)?;
+    if report.passed {
+        Ok(())
+    } else {
+        Err(crate::error::GlorpError::Message(format!(
+            "review scene soak mismatch ({})",
+            report.scenario
+        )))
+    }
+}
+
+#[cfg(all(test, feature = "dev-preview"))]
+mod review_scene_soak_tests {
+    use super::*;
+    use crate::commands::companion_mode::ReviewSceneSoakScenario as Scenario;
+
+    const ALL_SCENARIOS: [Scenario; 19] = [
+        Scenario::ResizePreparing,
+        Scenario::ResizeReady,
+        Scenario::ResizeActivating,
+        Scenario::ResizeStorm,
+        Scenario::BackingScale,
+        Scenario::HiddenSemanticReveal,
+        Scenario::CaptureSwap,
+        Scenario::ShutdownWorker,
+        Scenario::ShutdownActivation,
+        Scenario::TrackingRunLoop,
+        Scenario::SlowTick,
+        Scenario::SurfaceOutdated,
+        Scenario::SurfaceTimeout,
+        Scenario::SurfaceOccluded,
+        Scenario::SurfaceLost,
+        Scenario::SurfaceValidation,
+        Scenario::DeviceLoss,
+        Scenario::DeviceValidation,
+        Scenario::DeviceOutOfMemory,
+    ];
+
+    #[test]
+    fn first_present_commits_candidate_and_binds_followup_capture() {
+        let mut host = ReviewSceneHostHarness::new();
+        host.begin_preparing(2);
+        host.finish_preparing();
+        host.begin_activation();
+
+        assert_eq!(
+            host.activate_with_surface(DeterministicSurfaceOutcome::Presented),
+            FrameDisposition::SurfacePresentCalled
+        );
+        assert_eq!(host.active_generation, Some(2));
+        assert_eq!(host.candidate_generation, None);
+        assert_eq!(host.capture(), Some(2));
+        assert_eq!(host.counters.presents, 1);
+        assert_eq!(host.counters.capture_bound, 1);
+    }
+
+    #[test]
+    fn every_typed_soak_scenario_matches_its_deterministic_host_seam() {
+        for scenario in ALL_SCENARIOS {
+            let report = review_scene_soak_report(scenario);
+            assert!(
+                report.passed,
+                "{}: expected {}, observed {}",
+                report.scenario, report.expected_outcome, report.observed_outcome
+            );
+            assert_eq!(report.execution_mode, "deterministic-host-harness");
+        }
+    }
+
+    #[test]
+    fn surface_skip_variants_remain_skips_not_gpu_failures() {
+        for (scenario, expected) in [
+            (Scenario::SurfaceOutdated, "skip-outdated-retry-later"),
+            (Scenario::SurfaceTimeout, "skip-timeout-retry-later"),
+            (Scenario::SurfaceOccluded, "skip-occluded-retry-later"),
+        ] {
+            let report = review_scene_soak_report(scenario);
+            assert!(report.passed);
+            assert_eq!(report.observed_outcome, expected);
+            assert_eq!(report.sanitized_category, None);
+            assert_eq!(report.counters.skips, 1);
+            assert_eq!(report.counters.fallbacks, 0);
+        }
+    }
+
+    #[test]
+    fn fatal_surface_and_device_cases_emit_only_static_sanitized_categories() {
+        for (scenario, expected) in [
+            (Scenario::SurfaceLost, "retained-surface-lost"),
+            (Scenario::SurfaceValidation, "retained-surface-validation"),
+            (Scenario::DeviceLoss, "retained-device-unavailable"),
+            (Scenario::DeviceValidation, "retained-device-validation"),
+            (Scenario::DeviceOutOfMemory, "retained-device-out-of-memory"),
+        ] {
+            let report = review_scene_soak_report(scenario);
+            assert!(report.passed);
+            assert_eq!(report.sanitized_category, Some(expected));
+            assert_eq!(report.counters.fallbacks, 1);
+            assert_eq!(report.counters.skips, 0);
+        }
+    }
+
+    #[test]
+    fn resize_scale_capture_hidden_shutdown_and_tick_counters_are_exact() {
+        let resize = review_scene_soak_report(Scenario::ResizeStorm);
+        assert_eq!(resize.counters.resize_requests, 4);
+        assert_eq!(resize.counters.surface_reconfigurations, 4);
+
+        let scale = review_scene_soak_report(Scenario::BackingScale);
+        assert_eq!(scale.counters.resize_requests, 3);
+        assert_eq!(scale.counters.surface_reconfigurations, 2);
+
+        let capture = review_scene_soak_report(Scenario::CaptureSwap);
+        assert_eq!(capture.counters.capture_bound, 2);
+        assert_eq!(capture.counters.capture_deferred, 1);
+        assert_eq!(capture.counters.presents, 1);
+
+        let hidden = review_scene_soak_report(Scenario::HiddenSemanticReveal);
+        assert_eq!(hidden.counters.hidden_updates_coalesced, 2);
+        assert_eq!(hidden.counters.reveals, 1);
+
+        let shutdown = review_scene_soak_report(Scenario::ShutdownWorker);
+        assert_eq!(shutdown.counters.worker_cancel_requests, 1);
+        assert_eq!(shutdown.counters.shutdowns, 1);
+
+        let tracking = review_scene_soak_report(Scenario::TrackingRunLoop);
+        assert_eq!(tracking.counters.virtual_elapsed_ms, 121_000);
+        assert_eq!(tracking.counters.ticks_attempted, 484);
+        assert_eq!(tracking.counters.ticks_completed, 484);
+
+        let slow_tick = review_scene_soak_report(Scenario::SlowTick);
+        assert_eq!(slow_tick.counters.ticks_attempted, 3);
+        assert_eq!(slow_tick.counters.ticks_completed, 2);
+        assert_eq!(slow_tick.counters.ticks_suppressed, 1);
+    }
+
+    #[test]
+    fn report_json_names_native_interactions_that_the_host_harness_does_not_fake() {
+        let mut output = Vec::new();
+        run_review_scene_soak(Scenario::TrackingRunLoop, &mut output).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["scenario"], "tracking-run-loop");
+        assert_eq!(json["passed"], true);
+        assert_eq!(
+            json["native_interactions_deferred"],
+            serde_json::json!([
+                "AppKit menu tracking loop",
+                "AppKit live-resize tracking loop"
+            ])
+        );
+    }
+}
+
 pub(in crate::companion) struct RetainedHost {
     // Surface must drop before the retained CAMetalLayer.
     pub(super) surface: wgpu::Surface<'static>,
@@ -40,7 +832,18 @@ pub(in crate::companion) struct RetainedHost {
     #[allow(dead_code)] // Installed and driven by Task 14 without changing Task 12's live route.
     scene_activation: Option<RetainedSceneActivation>,
     pub(super) metrics: CompanionRuntimeMetrics,
-    surface_epoch: u64,
+    surface_epoch: crate::presentation::companion_scene::SurfaceEpoch,
+    last_presented_scene:
+        Option<crate::presentation::companion_scene::contract::PresentedSceneVersion>,
+    presented_scene_count: u64,
+    last_scene_presented_at: Option<Instant>,
+    visible_present_interval_anchor: Option<Instant>,
+    next_hud_revision: u64,
+    last_presented_hud_text: Option<crate::round::hud::CompanionHudText>,
+    last_presented_hud_font_size: Option<f64>,
+    last_presented_state_alias:
+        Option<crate::presentation::companion_scene::contract::CompanionCaptureStateAlias>,
+    last_scene_activation_skip: Option<SkipReason>,
 }
 
 pub(super) struct Pipelines {
@@ -182,6 +985,17 @@ pub(in crate::companion) struct ActiveRetainedHost {
     host: RetainedHost,
 }
 
+pub(crate) struct DirectSceneCapture {
+    pub(crate) receipt: crate::presentation::companion_scene::contract::PresentedSceneVersion,
+    pub(crate) source: crate::presentation::companion_scene::contract::CaptureSourceIdentity,
+    pub(crate) scene_artifacts: crate::presentation::companion_scene::contract::SceneArtifacts,
+    pub(crate) logical_state_alias:
+        crate::presentation::companion_scene::contract::CompanionCaptureStateAlias,
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) presented_scene_count: u64,
+    pub(crate) last_present_age_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // Returned by the Task 12 production seam once Task 14 calls it.
 pub(in crate::companion) enum SceneActivationError {
@@ -202,7 +1016,20 @@ pub(in crate::companion) enum SceneGenerationServiceTick {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::companion) enum ScenePresentOutcome {
     Presented(crate::presentation::companion_scene::SceneVersion),
-    Skipped,
+    Skipped(SkipReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::companion) struct SceneActivationOutcome {
+    pub(in crate::companion) disposition:
+        crate::presentation::companion_scene::runtime::RuntimeDisposition,
+    pub(in crate::companion) skipped: Option<SkipReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SurfaceContractChange {
+    epoch: crate::presentation::companion_scene::SurfaceEpoch,
+    scale_changed: bool,
 }
 
 impl PreparedRetainedHost {
@@ -319,7 +1146,16 @@ impl PreparedRetainedHost {
                 configured_surface: ConfiguredSurface::Legacy,
                 scene_activation: None,
                 metrics,
-                surface_epoch: 1,
+                surface_epoch: crate::presentation::companion_scene::SurfaceEpoch(1),
+                last_presented_scene: None,
+                presented_scene_count: 0,
+                last_scene_presented_at: None,
+                visible_present_interval_anchor: None,
+                next_hud_revision: 1,
+                last_presented_hud_text: None,
+                last_presented_hud_font_size: None,
+                last_presented_state_alias: None,
+                last_scene_activation_skip: None,
             },
         })
     }
@@ -350,11 +1186,11 @@ impl ActiveRetainedHost {
         if self.host.scene_build_worker.is_busy() {
             return Err(RetainedFailureCategory::RasterWorkerUnavailable);
         }
-        let runtime =
-            crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState::cold_start(
-                snapshot,
-            )
-            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        let runtime = crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState::cold_start_on_surface(
+            snapshot,
+            self.host.surface_epoch,
+        )
+        .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
         let mut generations = RetainedSceneGenerationState::new(runtime);
         let effects = generations
             .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
@@ -385,31 +1221,135 @@ impl ActiveRetainedHost {
             .is_some_and(|activation| activation.generations.active_delta_pending())
     }
 
+    pub(in crate::companion) fn project_scene_frame(
+        &mut self,
+        clock: crate::presentation::companion_scene::CompanionProjectionClock,
+        options: crate::presentation::companion_scene::input::CompanionPresentationOptions,
+    ) -> Result<
+        crate::presentation::companion_scene::CompanionFrameProjection,
+        RetainedFailureCategory,
+    > {
+        let started_at = Instant::now();
+        let activation = self
+            .host
+            .scene_activation
+            .as_ref()
+            .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
+        let projection = activation
+            .generations
+            .project_frame(clock, options)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        self.host.metrics.record_snapshot_projection();
+        self.host
+            .metrics
+            .record_projection_us(duration_us(started_at.elapsed()));
+        Ok(projection)
+    }
+
+    pub(in crate::companion) fn record_scene_snapshot_projection(&mut self, elapsed_us: u32) {
+        self.host.metrics.record_snapshot_projection();
+        self.host.metrics.record_projection_us(elapsed_us);
+    }
+
     pub(in crate::companion) fn reconcile_scene_snapshot(
         &mut self,
+        view: &NSView,
         snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
     ) -> Result<SceneGenerationServiceTick, RetainedFailureCategory> {
+        let started_at = Instant::now();
         if self.host.scene_activation.is_none() {
-            return self.install_scene_runtime(snapshot);
+            let _ = self.host.resize_surface_if_needed(view)?;
+            self.host.metrics.record_semantic_reconcile();
+            let result = self.install_scene_runtime(snapshot);
+            self.host
+                .metrics
+                .record_reconcile_us(duration_us(started_at.elapsed()));
+            return result;
         }
+        let surface_change = self.host.resize_surface_if_needed(view)?;
         let mut activation = self
             .host
             .scene_activation
             .take()
             .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
         let result = (|| {
-            let effects = activation.generations.reconcile_snapshot(snapshot)?;
+            if let Some(change) = surface_change {
+                let effects = activation.generations.rebind_surface(change.epoch)?;
+                self.host
+                    .apply_scene_runtime_effects(&mut activation, effects)?;
+                self.host.clear_presented_scene_receipt();
+            }
+            let effects = activation.generations.reconcile_snapshot(
+                snapshot,
+                surface_change.is_some_and(|change| change.scale_changed),
+            )?;
+            let unchanged = matches!(
+                effects.disposition(),
+                crate::presentation::companion_scene::runtime::RuntimeDisposition::Unchanged
+            );
+            self.host.metrics.record_semantic_reconcile();
+            if unchanged {
+                self.host.metrics.record_unchanged_tick();
+            }
             self.host
                 .apply_scene_runtime_effects(&mut activation, effects)?;
             Ok(SceneGenerationServiceTick::Preparing)
         })();
         self.host.scene_activation = Some(activation);
+        self.host
+            .metrics
+            .record_reconcile_us(duration_us(started_at.elapsed()));
+        result
+    }
+
+    pub(in crate::companion) fn reconcile_scene_frame(
+        &mut self,
+        view: &NSView,
+        projection: crate::presentation::companion_scene::CompanionFrameProjection,
+    ) -> Result<SceneGenerationServiceTick, RetainedFailureCategory> {
+        let started_at = Instant::now();
+        let surface_change = self.host.resize_surface_if_needed(view)?;
+        let mut activation = self
+            .host
+            .scene_activation
+            .take()
+            .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
+        let result = (|| {
+            if let Some(change) = surface_change {
+                let effects = activation.generations.rebind_surface(change.epoch)?;
+                self.host
+                    .apply_scene_runtime_effects(&mut activation, effects)?;
+                self.host.clear_presented_scene_receipt();
+            }
+            let (effects, regenerated) = activation
+                .generations
+                .reconcile_frame_projection(projection)?;
+            if regenerated {
+                self.host.metrics.record_snapshot_projection();
+            }
+            let unchanged = matches!(
+                effects.disposition(),
+                crate::presentation::companion_scene::runtime::RuntimeDisposition::Unchanged
+            );
+            self.host.metrics.record_frame_reconcile();
+            if unchanged {
+                self.host.metrics.record_unchanged_tick();
+            }
+            self.host
+                .apply_scene_runtime_effects(&mut activation, effects)?;
+            Ok(SceneGenerationServiceTick::Preparing)
+        })();
+        self.host.scene_activation = Some(activation);
+        self.host
+            .metrics
+            .record_reconcile_us(duration_us(started_at.elapsed()));
         result
     }
 
     pub(in crate::companion) fn hide_scene_runtime(
         &mut self,
     ) -> Result<(), RetainedFailureCategory> {
+        self.host.visible_present_interval_anchor = None;
         let Some(mut activation) = self.host.scene_activation.take() else {
             return Ok(());
         };
@@ -421,32 +1361,15 @@ impl ActiveRetainedHost {
         result
     }
 
-    pub(in crate::companion) fn coalesce_hidden_scene_snapshot(
-        &mut self,
-        snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
-    ) -> Result<(), RetainedFailureCategory> {
-        let Some(mut activation) = self.host.scene_activation.take() else {
-            return Ok(());
-        };
-        let result = (|| {
-            let effects = activation
-                .generations
-                .coalesce_hidden_snapshot(snapshot)
-                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
-            self.host
-                .apply_scene_runtime_effects(&mut activation, effects)
-        })();
-        self.host.scene_activation = Some(activation);
-        result
-    }
-
     pub(in crate::companion) fn reveal_scene_runtime(
         &mut self,
+        view: &NSView,
         snapshot: Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
     ) -> Result<bool, RetainedFailureCategory> {
         let Some(mut activation) = self.host.scene_activation.take() else {
             return Ok(true);
         };
+        let surface_change = self.host.resize_surface_if_needed(view)?;
         let result = (|| {
             if activation.generations.active_delta_pending() {
                 return Ok(false);
@@ -455,15 +1378,75 @@ impl ActiveRetainedHost {
                 .generations
                 .coalesce_hidden_snapshot(snapshot)
                 .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            self.host.metrics.record_semantic_reconcile();
             self.host
                 .apply_scene_runtime_effects(&mut activation, coalesced)?;
-            let effects = activation.generations.reveal()?;
+            if let Some(change) = surface_change {
+                let effects = activation.generations.rebind_surface(change.epoch)?;
+                self.host
+                    .apply_scene_runtime_effects(&mut activation, effects)?;
+                self.host.clear_presented_scene_receipt();
+            }
+            let effects = activation
+                .generations
+                .reveal(surface_change.is_some_and(|change| change.scale_changed))?;
             self.host
                 .apply_scene_runtime_effects(&mut activation, effects)?;
             Ok(true)
         })();
         self.host.scene_activation = Some(activation);
         result
+    }
+
+    pub(in crate::companion) fn retry_scene_replacement(
+        &mut self,
+    ) -> Result<(), RetainedFailureCategory> {
+        let Some(mut activation) = self.host.scene_activation.take() else {
+            return Err(RetainedFailureCategory::SceneCandidateEncode);
+        };
+        let result = (|| {
+            let effects = activation.generations.retry_current_generation()?;
+            self.host
+                .apply_scene_runtime_effects(&mut activation, effects)
+        })();
+        if result.is_ok() {
+            self.host.metrics.record_generation_retry();
+        }
+        self.host.scene_activation = Some(activation);
+        result
+    }
+
+    pub(in crate::companion) fn scene_active_is_present_compatible(&self) -> bool {
+        self.host
+            .scene_activation
+            .as_ref()
+            .is_some_and(|activation| {
+                activation.generations.active_present_compatible(
+                    self.host.surface_epoch,
+                    [self.host.physical_width, self.host.physical_height],
+                    self.host.backing_scale,
+                )
+            })
+    }
+
+    pub(in crate::companion) fn scene_replacement_identity(
+        &self,
+    ) -> Option<(SceneReplacementIdentity, u64)> {
+        self.host.scene_activation.as_ref().and_then(|activation| {
+            activation
+                .generations
+                .replacement_identity()
+                .map(|identity| (identity, self.host.backing_scale.to_bits()))
+        })
+    }
+
+    pub(in crate::companion) fn shutdown_scene_runtime(&mut self) {
+        if let Some(mut activation) = self.host.scene_activation.take() {
+            let effects = activation.generations.shutdown();
+            let _ = self
+                .host
+                .apply_scene_runtime_effects(&mut activation, effects);
+        }
     }
 
     pub(in crate::companion) fn advance_scene_generation(
@@ -479,17 +1462,41 @@ impl ActiveRetainedHost {
         if materialize_candidate && tick == SceneGenerationServiceTick::CandidateReady {
             self.host.materialize_scene_candidate()?;
         }
-        Ok(tick)
+        // Candidate readiness is a level, not a one-tick worker-reply edge. A
+        // drawable can be temporarily unavailable during the first activation
+        // attempt (occluded, outdated, or timed out); the coordinator deliberately
+        // retains that GPU-ready candidate for RetryLater. Keep returning
+        // CandidateReady until activation commits or rejects it so a later visible
+        // tick retries the exact candidate without rasterizing or materializing it
+        // again.
+        Ok(
+            if materialize_candidate
+                && self
+                    .host
+                    .scene_activation
+                    .as_ref()
+                    .is_some_and(|activation| activation.generations.has_ready_candidate())
+            {
+                SceneGenerationServiceTick::CandidateReady
+            } else {
+                tick
+            },
+        )
     }
 
     pub(in crate::companion) fn activate_candidate(
         &mut self,
         hud_text: &crate::round::hud::CompanionHudText,
         hud_font_size: f64,
-    ) -> Result<
-        crate::presentation::companion_scene::runtime::RuntimeDisposition,
-        SceneActivationError,
-    > {
+        presentation_privacy:
+            crate::presentation::companion_scene::contract::PresentedCapturePrivacy,
+    ) -> Result<SceneActivationOutcome, SceneActivationError> {
+        // Measure the complete render-owner transaction, including every
+        // nonblocking acquisition retry, until the candidate reaches its first
+        // real surface present. The legacy path records the same boundary in
+        // `RetainedHost::render`; the shared one-shot fields keep the two routes
+        // mutually exclusive.
+        let activation_attempt_started = (!self.host.activation_recorded).then(Instant::now);
         let mut activation = self
             .host
             .scene_activation
@@ -522,12 +1529,61 @@ impl ActiveRetainedHost {
                 &prepared_hud,
             )?;
             let disposition = effects.disposition();
+            let skipped = self.host.last_scene_activation_skip.take();
             self.host
                 .apply_scene_runtime_effects(&mut activation, effects)
                 .map_err(|_| SceneActivationError::UnsupportedSurfaceContract)?;
-            Ok(disposition)
+            if disposition
+                == crate::presentation::companion_scene::runtime::RuntimeDisposition::Activation(
+                    crate::presentation::companion_scene::runtime::ActivationTransition::Committed,
+                )
+            {
+                let version = activation
+                    .generations
+                    .active_version()
+                    .ok_or(SceneActivationError::UnsupportedSurfaceContract)?;
+                let logical_state_alias = activation
+                    .generations
+                    .runtime
+                    .capture_lease()
+                    .ok()
+                    .filter(|lease| lease.version() == version)
+                    .map(|lease| lease.logical_state_alias())
+                    .ok_or(SceneActivationError::UnsupportedSurfaceContract)?;
+                self.host
+                    .record_scene_presented(
+                        version,
+                        hud_text,
+                        hud_font_size,
+                        presentation_privacy,
+                        logical_state_alias,
+                    )
+                    .map_err(|_| SceneActivationError::UnsupportedSurfaceContract)?;
+            }
+            Ok(SceneActivationOutcome { disposition, skipped })
         })();
         self.host.scene_activation = Some(activation);
+        if let Some(started_at) = activation_attempt_started {
+            self.host.activation_render_owner_us = self
+                .host
+                .activation_render_owner_us
+                .saturating_add(u64::from(duration_us(started_at.elapsed())));
+            if result.as_ref().is_ok_and(|outcome| {
+                outcome.disposition
+                    == crate::presentation::companion_scene::runtime::RuntimeDisposition::Activation(
+                        crate::presentation::companion_scene::runtime::ActivationTransition::Committed,
+                    )
+            }) {
+                let activation_us = self
+                    .host
+                    .activation_render_owner_us
+                    .min(u64::from(u32::MAX)) as u32;
+                self.host
+                    .metrics
+                    .record_activation_render_owner_us(activation_us);
+                self.host.activation_recorded = true;
+            }
+        }
         result
     }
 
@@ -536,6 +1592,8 @@ impl ActiveRetainedHost {
         view: &NSView,
         hud_text: &crate::round::hud::CompanionHudText,
         hud_font_size: f64,
+        presentation_privacy:
+            crate::presentation::companion_scene::contract::PresentedCapturePrivacy,
     ) -> Result<ScenePresentOutcome, RetainedFailureCategory> {
         let mut activation = self
             .host
@@ -564,6 +1622,23 @@ impl ActiveRetainedHost {
             &gpu.shared,
             &prepared_hud,
         );
+        if let Ok(ScenePresentOutcome::Presented(version)) = result {
+            let logical_state_alias = activation
+                .generations
+                .runtime
+                .capture_lease()
+                .ok()
+                .filter(|lease| lease.version() == version)
+                .map(|lease| lease.logical_state_alias())
+                .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
+            self.host.record_scene_presented(
+                version,
+                hud_text,
+                hud_font_size,
+                presentation_privacy,
+                logical_state_alias,
+            )?;
+        }
         self.host.scene_activation = Some(activation);
         result
     }
@@ -585,7 +1660,11 @@ impl ActiveRetainedHost {
         frame: &crate::companion::paired_review::PairedReviewFrame,
     ) -> std::result::Result<CanonicalRgbaFrame, RetainedFailureCategory> {
         self.host.metrics.record_capture_attempt();
+        let started_at = Instant::now();
         let result = capture::RetainedCaptureTarget::new(&mut self.host).capture(frame);
+        self.host
+            .metrics
+            .record_capture_us(duration_us(started_at.elapsed()));
         if result.is_ok() {
             self.host.metrics.record_capture_success();
         } else {
@@ -594,9 +1673,175 @@ impl ActiveRetainedHost {
         result
     }
 
+    pub(crate) fn capture_presented_scene(
+        &mut self,
+        sensitive_live_values: bool,
+    ) -> std::result::Result<DirectSceneCapture, RetainedFailureCategory> {
+        self.host.metrics.record_capture_attempt();
+        let started_at = Instant::now();
+        let capture = self.capture_presented_scene_inner(sensitive_live_values);
+        let mailbox = self.host.drain_current_gpu_error();
+        let result = capture.and_then(|capture| mailbox.map(|()| capture));
+        self.host
+            .metrics
+            .record_capture_us(duration_us(started_at.elapsed()));
+        result
+    }
+
+    pub(crate) fn record_direct_capture_success(&mut self) {
+        self.host.metrics.record_capture_nonblank_validated();
+        self.host.metrics.record_capture_success();
+    }
+
+    pub(crate) fn record_direct_capture_failure(&mut self) {
+        self.host.metrics.record_capture_failure();
+    }
+
+    fn capture_presented_scene_inner(
+        &mut self,
+        sensitive_live_values: bool,
+    ) -> std::result::Result<DirectSceneCapture, RetainedFailureCategory> {
+        let receipt = self
+            .host
+            .last_presented_scene
+            .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?;
+        let hud_text = self
+            .host
+            .last_presented_hud_text
+            .as_ref()
+            .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?;
+        let hud_font_size = self
+            .host
+            .last_presented_hud_font_size
+            .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?;
+        let logical_state_alias = self
+            .host
+            .last_presented_state_alias
+            .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?;
+        let expected_privacy = if sensitive_live_values {
+            crate::presentation::companion_scene::contract::PresentedCapturePrivacy::SensitiveLiveValues
+        } else {
+            crate::presentation::companion_scene::contract::PresentedCapturePrivacy::ExternalRedacted
+        };
+        if receipt.privacy != expected_privacy {
+            return Err(RetainedFailureCategory::CaptureUnsupportedVariant);
+        }
+        let geometry = self
+            .host
+            .scene_hud_geometry(receipt.scene_version.generation.resources, hud_font_size);
+        let activation = self
+            .host
+            .scene_activation
+            .as_mut()
+            .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?;
+        let gpu = activation
+            .gpu
+            .as_mut()
+            .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?;
+        let active = activation
+            .generations
+            .active
+            .as_ref()
+            .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?;
+        if active.version != receipt.scene_version
+            || active.gpu.source_revisions != receipt.scene_version.applied
+        {
+            return Err(RetainedFailureCategory::CaptureUnsupportedVariant);
+        }
+        let source = active
+            .cpu
+            .capture_source_identity()
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        let scene_artifacts = active
+            .cpu
+            .scene_artifacts()
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        let capture_cpu = if sensitive_live_values {
+            active.cpu.clone()
+        } else {
+            active
+                .cpu
+                .capture_safe_clone()
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?
+        };
+        let upload = render::prepare_scene_upload(&capture_cpu, &active.atlas)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        let mut capture_gpu = render::materialize_gpu_candidate(
+            &self.host.device,
+            &self.host.queue,
+            &gpu.shared,
+            &upload,
+            &active.atlas,
+        )
+        .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        let request = render::SceneRenderRequest::new(
+            receipt.scene_version,
+            receipt.physical_pixels,
+            f64::from(receipt.backing_scale),
+        );
+        let outcome = if sensitive_live_values {
+            let sealed = hud::SealedHudFrame::from_live(hud_text)
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            let prepared = capture_gpu
+                .hud
+                .prepared_atlas()
+                .prepare_sensitive(&sealed, geometry)
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            gpu.renderer.render_offscreen_sensitive(
+                &self.host.device,
+                &self.host.queue,
+                &gpu.shared,
+                &mut capture_gpu,
+                request,
+                &prepared,
+            )
+        } else {
+            let sealed =
+                hud::SealedHudFrame::<hud::RedactedCaptureHudProjection>::redacted_capture()
+                    .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            let prepared = capture_gpu
+                .hud
+                .prepared_atlas()
+                .prepare_redacted_capture(&sealed, geometry)
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            gpu.renderer.render_offscreen(
+                &self.host.device,
+                &self.host.queue,
+                &gpu.shared,
+                &mut capture_gpu,
+                request,
+                &prepared,
+            )
+        }
+        .map_err(scene_render_failure)?;
+        if outcome.version != receipt.scene_version
+            || outcome.physical_extent_pixels != receipt.physical_pixels
+        {
+            return Err(RetainedFailureCategory::CaptureBufferTooShort);
+        }
+        let last_present_age_ms = self
+            .host
+            .last_scene_presented_at
+            .map(|presented| u64::try_from(presented.elapsed().as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(u64::MAX);
+        Ok(DirectSceneCapture {
+            receipt,
+            source,
+            scene_artifacts,
+            logical_state_alias,
+            rgba: outcome.rgba,
+            presented_scene_count: self.host.presented_scene_count,
+            last_present_age_ms,
+        })
+    }
+
     pub(crate) fn record_injected_capture_failure(&mut self) {
         self.host.metrics.record_capture_attempt();
         self.host.metrics.record_capture_failure();
+    }
+
+    pub(crate) fn record_injected_capture_attempt(&mut self) {
+        self.host.metrics.record_capture_attempt();
     }
 
     pub(crate) fn prewarm_capture_resources(&mut self) {
@@ -673,33 +1918,6 @@ impl ActiveRetainedHost {
         self.host.record_resource_preparation_skip()
     }
 
-    /// Drives a real retained GPU instance ring and queue through a bounded
-    /// 4,500-frame virtual-time segment. Wall time is intentionally decoupled
-    /// from the fixed 4 Hz semantic cadence; each iteration advances 250 ms of
-    /// virtual time and waits for its GPU submission to complete without sleeping,
-    /// measuring steady-state lifetime without manufacturing an in-flight backlog.
-    pub(crate) fn run_virtual_lifetime_audit(
-        &mut self,
-        frames: u64,
-        prepare: impl FnMut(
-            LifetimeAuditPhase,
-            u64,
-            time::OffsetDateTime,
-        ) -> std::result::Result<
-            (crate::companion::app::PreparedCompanionFrame, u64),
-            RetainedFailureCategory,
-        >,
-    ) -> std::result::Result<(), RetainedFailureCategory> {
-        let mut executor = GpuLifetimeAuditExecutor {
-            host: &mut self.host,
-            prepare,
-            last_submission: None,
-        };
-        let audit = run_lifetime_schedule(&mut executor, frames)?;
-        executor.host.metrics.record_lifetime_audit(audit);
-        Ok(())
-    }
-
     pub(crate) fn record_ui_tick_us(&mut self, value: u32) {
         let started_at = Instant::now();
         self.host.metrics.record_ui_tick_us(value);
@@ -724,12 +1942,109 @@ impl ActiveRetainedHost {
         self.host.metrics.work_counters()
     }
 
+    #[allow(clippy::too_many_arguments)] // Frozen dual-cadence protocol plus projection callback and HUD contract.
+    pub(crate) fn run_direct_lifetime_audit(
+        &mut self,
+        view: &NSView,
+        starts_hidden: bool,
+        semantic_samples: u64,
+        presentation_ticks: u64,
+        virtual_elapsed_ms: u64,
+        semantic: impl FnMut(
+            LifetimeAuditPhase,
+            u64,
+            time::OffsetDateTime,
+        ) -> std::result::Result<
+            Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+            RetainedFailureCategory,
+        >,
+        hud: crate::round::hud::CompanionHudText,
+        hud_font_size: f64,
+        reduce_motion: bool,
+    ) -> std::result::Result<(), RetainedFailureCategory> {
+        let surface_change = self.host.resize_surface_if_needed(view)?;
+        let extent = [self.host.physical_width, self.host.physical_height];
+        let scale = self.host.backing_scale;
+        let mut activation = self
+            .host
+            .scene_activation
+            .take()
+            .ok_or(RetainedFailureCategory::LifetimeFramePreparation)?;
+        let result = (|| {
+            let gpu = activation
+                .gpu
+                .as_mut()
+                .ok_or(RetainedFailureCategory::LifetimeFramePreparation)?;
+            // Prewarm persistent target/readback storage without submitting a
+            // frame. Hidden reveal and its first physical delta are owned by the
+            // counted warmup sample/tick below, never by setup work.
+            activation
+                .generations
+                .prewarm_offscreen_readback(
+                    &mut gpu.renderer,
+                    &self.host.device,
+                    &gpu.shared,
+                    extent,
+                    scale,
+                )
+                .map_err(scene_render_failure)?;
+            let (direct_bytes, direct_objects) = gpu.renderer.offscreen_cache_allocation();
+            let legacy_bytes = self
+                .host
+                .capture_resources
+                .as_ref()
+                .map(|capture| {
+                    u64::from(capture.width)
+                        .saturating_mul(u64::from(capture.height))
+                        .saturating_mul(4)
+                        .saturating_add(capture::staging_buffer_size(capture.width, capture.height))
+                })
+                .unwrap_or(0);
+            let legacy_objects = u64::from(self.host.capture_resources.is_some()) * 2;
+            self.host.metrics.replace_gpu_allocation(
+                GpuAllocationKind::Capture,
+                legacy_bytes.saturating_add(direct_bytes),
+                legacy_objects.saturating_add(direct_objects),
+            );
+            let mut executor = DirectLifetimeAuditExecutor {
+                host: &mut self.host,
+                activation: &mut activation,
+                semantic,
+                hud,
+                hud_font_size,
+                reduce_motion,
+                last_submission: None,
+                pending_semantic: None,
+                reveal_pending: starts_hidden,
+                reveal_submission_pending: false,
+                surface_change,
+            };
+            let audit = run_lifetime_schedule(
+                &mut executor,
+                semantic_samples,
+                presentation_ticks,
+                virtual_elapsed_ms,
+            )?;
+            executor.host.metrics.record_lifetime_audit(audit);
+            Ok(())
+        })();
+        self.host.scene_activation = Some(activation);
+        result
+    }
+
+    pub(crate) fn record_lifetime_terminal_capture(&mut self, succeeded: bool) {
+        self.host
+            .metrics
+            .record_lifetime_terminal_capture(succeeded);
+    }
+
     pub(crate) fn record_hidden_tick(&mut self, tick_start: RuntimeWorkCounters) {
         self.host.metrics.record_hidden_tick(tick_start);
     }
 
     pub(crate) fn record_fallback(&mut self) {
         self.host.metrics.record_fallback();
+        self.host.metrics.record_fallback_pending();
     }
 
     pub(crate) fn runtime_metrics_snapshot(
@@ -747,7 +2062,7 @@ impl ActiveRetainedHost {
                 device_epoch: scene_version.map(|version| version.generation.device.0),
                 surface_epoch: scene_version
                     .map(|version| version.surface.0)
-                    .unwrap_or(self.host.surface_epoch),
+                    .unwrap_or(self.host.surface_epoch.0),
                 layout_generation: scene_version.map(|version| version.generation.layout.0),
                 resource_generation: scene_version
                     .map(|version| version.generation.resources.0)
@@ -763,7 +2078,7 @@ impl ActiveRetainedHost {
                 fixture_id: "glorp-scene-baseline-v2",
                 seed: "glorp-scene-baseline-v1",
                 update_source: "fixed-initial-state-no-live-polling",
-                cadence_ms: 250,
+                semantic_cadence_ms: 250,
                 logical_width: f64::from(self.host.physical_width) / self.host.backing_scale,
                 logical_height: f64::from(self.host.physical_height) / self.host.backing_scale,
                 physical_width: self.host.physical_width,
@@ -773,6 +2088,305 @@ impl ActiveRetainedHost {
         )
     }
 }
+
+struct DirectLifetimeAuditExecutor<'a, Semantic> {
+    host: &'a mut RetainedHost,
+    activation: &'a mut RetainedSceneActivation,
+    semantic: Semantic,
+    hud: crate::round::hud::CompanionHudText,
+    hud_font_size: f64,
+    reduce_motion: bool,
+    last_submission: Option<wgpu::SubmissionIndex>,
+    pending_semantic: Option<Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>>,
+    reveal_pending: bool,
+    reveal_submission_pending: bool,
+    surface_change: Option<SurfaceContractChange>,
+}
+
+impl<Semantic> DirectLifetimeAuditExecutor<'_, Semantic> {
+    fn reconcile_pending_semantic(
+        &mut self,
+        now: time::OffsetDateTime,
+    ) -> std::result::Result<bool, RetainedFailureCategory> {
+        let Some(mut snapshot) = self.pending_semantic.take() else {
+            return Ok(false);
+        };
+        let projection = snapshot
+            .project_presentation_frame(
+                self.activation
+                    .generations
+                    .runtime
+                    .applied_revisions()
+                    .semantic,
+                crate::presentation::companion_scene::CompanionProjectionClock::new(
+                    now,
+                    lifetime_elapsed_ms(now),
+                ),
+                crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                    reduce_motion: self.reduce_motion,
+                },
+            )
+            .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
+        Arc::make_mut(&mut snapshot).frame = projection.frame;
+        let effects = self
+            .activation
+            .generations
+            .reconcile_snapshot(snapshot, false)
+            .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
+        self.host.metrics.record_semantic_reconcile();
+        self.host.metrics.record_frame_reconcile();
+        self.host
+            .apply_scene_runtime_effects(self.activation, effects)?;
+        Ok(true)
+    }
+
+    fn submit_active_frame(
+        &mut self,
+        semantic_reconciled: bool,
+    ) -> std::result::Result<LifetimePresentationObservation, RetainedFailureCategory> {
+        let version = self
+            .activation
+            .generations
+            .active_version()
+            .ok_or(RetainedFailureCategory::LifetimeFramePreparation)?;
+        let geometry = self
+            .host
+            .scene_hud_geometry(version.generation.resources, self.hud_font_size);
+        let prepared_hud = self
+            .activation
+            .generations
+            .prepare_active_hud(&self.hud, geometry)
+            .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
+        let gpu = self
+            .activation
+            .gpu
+            .as_mut()
+            .ok_or(RetainedFailureCategory::LifetimeFramePreparation)?;
+        let (_, dirty, draws, timings, submission) = self
+            .activation
+            .generations
+            .submit_active_offscreen(
+                &mut gpu.renderer,
+                &self.host.device,
+                &self.host.queue,
+                &gpu.shared,
+                [self.host.physical_width, self.host.physical_height],
+                self.host.backing_scale,
+                &prepared_hud,
+            )
+            .map_err(scene_render_failure)?;
+        if let Some(dirty) = dirty {
+            self.host.metrics.record_scene_dirty_upload(
+                dirty.content_ranges,
+                dirty.content_bytes,
+                dirty.frame_ranges,
+                dirty.frame_bytes,
+            );
+            self.host
+                .metrics
+                .record_delta_write_us(duration_us(timings.delta_write));
+        }
+        self.host
+            .metrics
+            .record_encode_us(duration_us(timings.encode));
+        self.host
+            .metrics
+            .record_submit_us(duration_us(timings.submit));
+        self.host.metrics.record_submit();
+        self.host.metrics.record_draws(draws);
+        self.last_submission = Some(submission);
+        Ok(LifetimePresentationObservation {
+            semantic_reconciled,
+            frame_projected: true,
+            frame_reconciled: true,
+            encoded: true,
+            submitted: true,
+            draw_calls: draws,
+            gpu_bytes: self
+                .host
+                .metrics
+                .gpu_accounting_snapshot()
+                .current_bytes
+                .total_bytes,
+        })
+    }
+}
+
+impl<Semantic> LifetimeAuditExecutor for DirectLifetimeAuditExecutor<'_, Semantic>
+where
+    Semantic: FnMut(
+        LifetimeAuditPhase,
+        u64,
+        time::OffsetDateTime,
+    ) -> std::result::Result<
+        Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+        RetainedFailureCategory,
+    >,
+{
+    fn semantic_sample(
+        &mut self,
+        phase: LifetimeAuditPhase,
+        sample: u64,
+        now: time::OffsetDateTime,
+    ) -> std::result::Result<LifetimeSemanticObservation, RetainedFailureCategory> {
+        let snapshot = (self.semantic)(phase, sample, now)?;
+        if self.reveal_pending {
+            if self.activation.generations.active_delta_pending() {
+                return Err(RetainedFailureCategory::LifetimeFramePreparation);
+            }
+            let coalesced = self
+                .activation
+                .generations
+                .coalesce_hidden_snapshot(snapshot)
+                .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
+            self.host.metrics.record_semantic_reconcile();
+            self.host
+                .apply_scene_runtime_effects(self.activation, coalesced)?;
+            let scale_changed = self
+                .surface_change
+                .is_some_and(|change| change.scale_changed);
+            if let Some(change) = self.surface_change.take() {
+                let effects = self.activation.generations.rebind_surface(change.epoch)?;
+                self.host
+                    .apply_scene_runtime_effects(self.activation, effects)?;
+                self.host.clear_presented_scene_receipt();
+            }
+            let effects = self.activation.generations.reveal(scale_changed)?;
+            self.host
+                .apply_scene_runtime_effects(self.activation, effects)?;
+            self.reveal_pending = false;
+            self.reveal_submission_pending = true;
+            self.host.metrics.record_snapshot_projection();
+            return Ok(LifetimeSemanticObservation {
+                snapshot_projected: true,
+                semantic_reconciled: true,
+                stale_mutations: 0,
+                stale_rejections: 0,
+                stale_regenerations: 0,
+                gpu_bytes: self
+                    .host
+                    .metrics
+                    .gpu_accounting_snapshot()
+                    .current_bytes
+                    .total_bytes,
+            });
+        }
+        if self.pending_semantic.replace(snapshot).is_some() {
+            return Err(RetainedFailureCategory::LifetimeFramePreparation);
+        }
+        self.host.metrics.record_snapshot_projection();
+        Ok(LifetimeSemanticObservation {
+            snapshot_projected: true,
+            semantic_reconciled: false,
+            stale_mutations: 0,
+            stale_rejections: 0,
+            stale_regenerations: 0,
+            gpu_bytes: self
+                .host
+                .metrics
+                .gpu_accounting_snapshot()
+                .current_bytes
+                .total_bytes,
+        })
+    }
+
+    fn presentation_tick(
+        &mut self,
+        _phase: LifetimeAuditPhase,
+        _tick: u64,
+        now: time::OffsetDateTime,
+    ) -> std::result::Result<LifetimePresentationObservation, RetainedFailureCategory> {
+        if std::mem::take(&mut self.reveal_submission_pending) {
+            return self.submit_active_frame(true);
+        }
+        if self.reconcile_pending_semantic(now)? {
+            return self.submit_active_frame(true);
+        }
+        let projection = self
+            .activation
+            .generations
+            .project_frame(
+                crate::presentation::companion_scene::CompanionProjectionClock::new(
+                    now,
+                    lifetime_elapsed_ms(now),
+                ),
+                crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                    reduce_motion: self.reduce_motion,
+                },
+            )
+            .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
+        let (effects, regenerated) = self
+            .activation
+            .generations
+            .reconcile_frame_projection(projection)
+            .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
+        if regenerated {
+            return Err(RetainedFailureCategory::LifetimeFramePreparation);
+        }
+        self.host.metrics.record_frame_reconcile();
+        self.host
+            .apply_scene_runtime_effects(self.activation, effects)?;
+        self.submit_active_frame(false)
+    }
+
+    fn poll(&mut self) -> std::result::Result<(), RetainedFailureCategory> {
+        let Some(submission) = self.last_submission.take() else {
+            return Ok(());
+        };
+        let poll_result = self
+            .host
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(std::time::Duration::from_secs(5)),
+            })
+            .map_err(|_| RetainedFailureCategory::LifetimeGpuPoll);
+        let mailbox_result = self.host.drain_current_gpu_error();
+        poll_result.and(mailbox_result)
+    }
+
+    fn rss_bytes(&mut self) -> std::result::Result<u64, RetainedFailureCategory> {
+        current_process_rss_bytes()
+    }
+
+    fn work_counters(&self) -> RuntimeWorkCounters {
+        self.host.metrics.work_counters()
+    }
+
+    fn persistent_resource_creations(&self) -> u64 {
+        self.host.metrics.persistent_gpu_objects_created()
+    }
+
+    fn static_upload_bytes(&self) -> u64 {
+        self.host.metrics.static_upload_bytes()
+    }
+
+    fn offscreen_cache_events(&self) -> (u64, u64) {
+        self.activation
+            .gpu
+            .as_ref()
+            .map(|gpu| gpu.renderer.offscreen_cache_events())
+            .unwrap_or_default()
+    }
+
+    fn storage_capacity_signature(&self) -> u64 {
+        self.activation
+            .generations
+            .active
+            .as_ref()
+            .map(|active| active.cpu.storage_capacity_signature())
+            .unwrap_or_default()
+    }
+}
+
+fn lifetime_elapsed_ms(now: time::OffsetDateTime) -> u64 {
+    let base = time::macros::datetime!(2026-06-13 18:00 UTC);
+    (now - base)
+        .whole_milliseconds()
+        .max(0)
+        .min(i128::from(u64::MAX)) as u64
+}
+
 impl std::ops::Deref for ActiveRetainedHost {
     type Target = RetainedHost;
 
@@ -788,6 +2402,47 @@ impl std::ops::DerefMut for ActiveRetainedHost {
 }
 
 impl RetainedHost {
+    fn record_scene_presented(
+        &mut self,
+        version: crate::presentation::companion_scene::SceneVersion,
+        hud_text: &crate::round::hud::CompanionHudText,
+        hud_font_size: f64,
+        privacy: crate::presentation::companion_scene::contract::PresentedCapturePrivacy,
+        logical_state_alias:
+            crate::presentation::companion_scene::contract::CompanionCaptureStateAlias,
+    ) -> Result<(), RetainedFailureCategory> {
+        let presented_at = Instant::now();
+        let visible_no_present = self
+            .visible_present_interval_anchor
+            .map_or_else(std::time::Duration::default, |previous| {
+                presented_at.saturating_duration_since(previous)
+            });
+        let logical_points = [
+            (f64::from(self.physical_width) / self.backing_scale) as f32,
+            (f64::from(self.physical_height) / self.backing_scale) as f32,
+        ];
+        let receipt =
+            crate::presentation::companion_scene::contract::PresentedSceneVersion::try_new(
+                version,
+                logical_points,
+                [self.physical_width, self.physical_height],
+                self.backing_scale as f32,
+                self.next_hud_revision,
+                privacy,
+            )
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        self.last_presented_scene = Some(receipt);
+        self.presented_scene_count = self.presented_scene_count.saturating_add(1);
+        self.last_scene_presented_at = Some(presented_at);
+        self.visible_present_interval_anchor = Some(presented_at);
+        self.metrics.record_present(visible_no_present);
+        self.next_hud_revision = self.next_hud_revision.saturating_add(1);
+        self.last_presented_hud_text = Some(hud_text.clone());
+        self.last_presented_hud_font_size = Some(hud_font_size);
+        self.last_presented_state_alias = Some(logical_state_alias);
+        Ok(())
+    }
+
     fn scene_hud_geometry(
         &self,
         resource_generation: crate::presentation::companion_scene::ResourceGeneration,
@@ -825,13 +2480,21 @@ impl RetainedHost {
     /// the prior active generation visible until candidate activation commits.
     fn present_active_scene(
         &mut self,
-        view: &NSView,
+        _view: &NSView,
         generations: &mut RetainedSceneGenerationState,
         renderer: &mut render::SceneRenderer,
         shared: &render::SceneGpuShared,
         prepared_hud: &hud::SensitivePreparedHudFrame,
     ) -> Result<ScenePresentOutcome, RetainedFailureCategory> {
-        self.resize_if_needed(view)?;
+        let attempted_at = Instant::now();
+        self.metrics.record_present_attempt();
+        self.visible_present_interval_anchor
+            .get_or_insert(attempted_at);
+        let no_present_interval = attempted_at
+            .saturating_duration_since(*self.visible_present_interval_anchor.as_ref().unwrap());
+        self.metrics.observe_visible_no_present(no_present_interval);
+        // The live coordinator performs resize/rebind before reconciliation. A
+        // present may only consume that already-bound host contract.
         if let Some(category) = self.gpu_errors.drain() {
             return Err(category);
         }
@@ -839,7 +2502,8 @@ impl RetainedHost {
             [self.physical_width, self.physical_height],
             self.backing_scale,
         ) {
-            return Ok(ScenePresentOutcome::Skipped);
+            self.metrics.record_skip(SkipReason::Outdated);
+            return Ok(ScenePresentOutcome::Skipped(SkipReason::Outdated));
         }
         let scene_config = self
             .scene_config
@@ -859,15 +2523,22 @@ impl RetainedHost {
         progress
             .mark(FrameMilestone::Prepared)
             .expect("an active scene opens the present ladder");
+        self.metrics.record_surface_acquire();
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &scene_config);
-                return Ok(ScenePresentOutcome::Skipped);
+                self.metrics.record_skip(SkipReason::Outdated);
+                return Ok(ScenePresentOutcome::Skipped(SkipReason::Outdated));
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(ScenePresentOutcome::Skipped);
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.metrics.record_skip(SkipReason::Timeout);
+                return Ok(ScenePresentOutcome::Skipped(SkipReason::Timeout));
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                self.metrics.record_skip(SkipReason::Occluded);
+                return Ok(ScenePresentOutcome::Skipped(SkipReason::Occluded));
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 return Err(RetainedFailureCategory::SurfaceLost);
@@ -879,7 +2550,7 @@ impl RetainedHost {
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let version = generations
+        let (version, dirty_metrics, draw_count, timings) = generations
             .submit_active_to_surface(
                 renderer,
                 &self.device,
@@ -891,12 +2562,28 @@ impl RetainedHost {
                 &surface_view,
             )
             .map_err(scene_render_failure)?;
+        self.metrics.record_encode_us(duration_us(timings.encode));
+        if dirty_metrics.is_some() {
+            self.metrics
+                .record_delta_write_us(duration_us(timings.delta_write));
+        }
+        if let Some(dirty) = dirty_metrics {
+            self.metrics.record_scene_dirty_upload(
+                dirty.content_ranges,
+                dirty.content_bytes,
+                dirty.frame_ranges,
+                dirty.frame_bytes,
+            );
+        }
         progress
             .mark(FrameMilestone::Encoded)
             .expect("active scene encode follows preparation");
         progress
             .mark(FrameMilestone::Submitted)
             .expect("active scene submission follows encode");
+        self.metrics.record_submit();
+        self.metrics.record_submit_us(duration_us(timings.submit));
+        self.metrics.record_draws(draw_count);
         self.queue.present(surface_texture);
         progress
             .finish(FrameDisposition::SurfacePresentCalled)
@@ -1107,6 +2794,14 @@ impl RetainedHost {
         prepared_hud: &hud::SensitivePreparedHudFrame,
     ) -> Result<crate::presentation::companion_scene::runtime::RuntimeEffects, SceneActivationError>
     {
+        let attempted_at = Instant::now();
+        self.metrics.record_present_attempt();
+        self.visible_present_interval_anchor
+            .get_or_insert(attempted_at);
+        let no_present_interval = attempted_at
+            .saturating_duration_since(*self.visible_present_interval_anchor.as_ref().unwrap());
+        self.metrics.observe_visible_no_present(no_present_interval);
+        self.last_scene_activation_skip = None;
         if let Some(delayed) = generations.observe_delayed_gpu_error(&self.gpu_errors) {
             self.ensure_legacy_surface();
             return Ok(delayed);
@@ -1149,19 +2844,26 @@ impl RetainedHost {
         progress
             .mark(FrameMilestone::Prepared)
             .expect("a materialized scene candidate opens the activation ladder");
+        self.metrics.record_surface_acquire();
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &scene_config);
+                self.last_scene_activation_skip = Some(SkipReason::Outdated);
+                self.metrics.record_skip(SkipReason::Outdated);
                 skip(&mut progress, SkipReason::Outdated);
                 return Ok(self.finish_scene_activation(generations, attempt, progress));
             }
             wgpu::CurrentSurfaceTexture::Timeout => {
+                self.last_scene_activation_skip = Some(SkipReason::Timeout);
+                self.metrics.record_skip(SkipReason::Timeout);
                 skip(&mut progress, SkipReason::Timeout);
                 return Ok(self.finish_scene_activation(generations, attempt, progress));
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
+                self.last_scene_activation_skip = Some(SkipReason::Occluded);
+                self.metrics.record_skip(SkipReason::Occluded);
                 skip(&mut progress, SkipReason::Occluded);
                 return Ok(self.finish_scene_activation(generations, attempt, progress));
             }
@@ -1177,6 +2879,8 @@ impl RetainedHost {
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let draw_count = generations.ready_candidate_draw_count().unwrap_or(0);
+        let encode_started_at = Instant::now();
         let encoded = {
             let candidate = generations
                 .ready_candidate
@@ -1204,11 +2908,18 @@ impl RetainedHost {
                 return Ok(self.finish_scene_activation(generations, attempt, progress));
             }
         };
+        self.metrics
+            .record_encode_us(duration_us(encode_started_at.elapsed()));
         progress
             .mark(FrameMilestone::Encoded)
             .expect("scene encode follows prepared candidate");
+        let submit_started_at = Instant::now();
         self.queue.submit([command]);
         renderer.recall_uploads();
+        self.metrics
+            .record_submit_us(duration_us(submit_started_at.elapsed()));
+        self.metrics.record_submit();
+        self.metrics.record_draws(draw_count);
         progress
             .mark(FrameMilestone::Submitted)
             .expect("scene submission follows encode");
@@ -1228,6 +2939,15 @@ impl RetainedHost {
         progress: FrameProgress,
     ) -> crate::presentation::companion_scene::runtime::RuntimeEffects {
         let effects = generations.finish_candidate_activation(attempt, progress, &self.gpu_errors);
+        if effects.disposition()
+            == crate::presentation::companion_scene::runtime::RuntimeDisposition::Activation(
+                crate::presentation::companion_scene::runtime::ActivationTransition::Committed,
+            )
+        {
+            if let Some(backing_scale) = generations.active_backing_scale() {
+                self.metrics.record_generation_activation(backing_scale);
+            }
+        }
         if effects.disposition()
             == crate::presentation::companion_scene::runtime::RuntimeDisposition::Activation(
                 crate::presentation::companion_scene::runtime::ActivationTransition::HostFallbackPending,
@@ -1255,7 +2975,16 @@ impl RetainedHost {
     /// Drains any GPU device fault reported asynchronously by the wgpu error
     /// callback. The main thread checks this before treating a present as good.
     pub(in crate::companion) fn drain_gpu_error(&self) -> Option<RetainedFailureCategory> {
-        self.gpu_errors.drain()
+        self.gpu_errors.drain_for(self.device_epoch)
+    }
+
+    pub(super) fn drain_current_gpu_error(
+        &self,
+    ) -> std::result::Result<(), RetainedFailureCategory> {
+        match self.gpu_errors.drain_for(self.device_epoch) {
+            Some(category) => Err(category),
+            None => Ok(()),
+        }
     }
 
     /// Dev/test-only: posts a static category to this host's own error mailbox so
@@ -1284,7 +3013,7 @@ impl RetainedHost {
         let progress = (|| {
             let frame_id = self.next_frame_id();
             if refresh_surface {
-                if let Err(category) = self.resize_if_needed(view) {
+                if let Err(category) = self.resize_surface_if_needed(view) {
                     let mut progress = FrameProgress::new(frame_id, 0);
                     fail(&mut progress, category);
                     return progress;
@@ -1301,7 +3030,7 @@ impl RetainedHost {
                 .map(|active| active.resources.generation().value())
             else {
                 let mut progress = FrameProgress::new(frame_id, 0);
-                self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                self.record_metrics(|metrics| metrics.record_skip(SkipReason::ResourcePreparation));
                 skip(&mut progress, SkipReason::ResourcePreparation);
                 return progress;
             };
@@ -1340,17 +3069,17 @@ impl RetainedHost {
                 | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
                 wgpu::CurrentSurfaceTexture::Outdated => {
                     self.surface.configure(&self.device, &self.config);
-                    self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                    self.record_metrics(|metrics| metrics.record_skip(SkipReason::Outdated));
                     skip(&mut progress, SkipReason::Outdated);
                     return progress;
                 }
                 wgpu::CurrentSurfaceTexture::Timeout => {
-                    self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                    self.record_metrics(|metrics| metrics.record_skip(SkipReason::Timeout));
                     skip(&mut progress, SkipReason::Timeout);
                     return progress;
                 }
                 wgpu::CurrentSurfaceTexture::Occluded => {
-                    self.record_metrics(CompanionRuntimeMetrics::record_skip);
+                    self.record_metrics(|metrics| metrics.record_skip(SkipReason::Occluded));
                     skip(&mut progress, SkipReason::Occluded);
                     return progress;
                 }
@@ -1780,7 +3509,7 @@ impl RetainedHost {
 
     fn record_resource_preparation_skip(&mut self) -> FrameProgress {
         let mut progress = FrameProgress::new(self.next_frame_id(), 0);
-        self.record_metrics(CompanionRuntimeMetrics::record_skip);
+        self.record_metrics(|metrics| metrics.record_skip(SkipReason::ResourcePreparation));
         skip(&mut progress, SkipReason::ResourcePreparation);
         progress
     }
@@ -1838,10 +3567,10 @@ impl RetainedHost {
         self.counters
     }
 
-    fn resize_if_needed(
+    fn resize_surface_if_needed(
         &mut self,
         view: &NSView,
-    ) -> std::result::Result<(), RetainedFailureCategory> {
+    ) -> std::result::Result<Option<SurfaceContractChange>, RetainedFailureCategory> {
         let window = view
             .window()
             .ok_or(RetainedFailureCategory::SurfaceUnavailable)?;
@@ -1853,8 +3582,19 @@ impl RetainedHost {
             && height == self.physical_height
             && (scale - self.backing_scale).abs() < f64::EPSILON
         {
-            return Ok(());
+            return Ok(None);
         }
+        let scale_changed = (scale - self.backing_scale).abs() >= f64::EPSILON;
+        self.metrics.record_resize_invalidation();
+        if scale_changed {
+            self.metrics.record_scale_invalidation();
+        }
+        let next_surface_epoch = self
+            .surface_epoch
+            .0
+            .checked_add(1)
+            .map(crate::presentation::companion_scene::SurfaceEpoch)
+            .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
         self.physical_width = width;
         self.physical_height = height;
         self.backing_scale = scale;
@@ -1870,8 +3610,18 @@ impl RetainedHost {
         };
         self.surface.configure(&self.device, &self.config);
         self.configured_surface = ConfiguredSurface::Legacy;
-        self.surface_epoch = self.surface_epoch.saturating_add(1);
-        Ok(())
+        self.surface_epoch = next_surface_epoch;
+        Ok(Some(SurfaceContractChange {
+            epoch: self.surface_epoch,
+            scale_changed,
+        }))
+    }
+
+    fn clear_presented_scene_receipt(&mut self) {
+        self.last_presented_scene = None;
+        self.last_presented_hud_text = None;
+        self.last_presented_hud_font_size = None;
+        self.last_presented_state_alias = None;
     }
 
     fn ensure_legacy_surface(&mut self) {

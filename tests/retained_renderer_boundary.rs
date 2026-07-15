@@ -18,6 +18,42 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const RETAINED_DELETION_INVENTORY: &[&str] = &[
+    "src/companion/paired_review.rs",
+    "src/companion/retained.rs",
+    "src/companion/retained.wgsl",
+    "src/companion/retained/buffers.rs",
+    "src/companion/retained/capture.rs",
+    "src/companion/retained/compiler.rs",
+    "src/companion/retained/host.rs",
+    "src/companion/retained/hud.rs",
+    "src/companion/retained/metrics.rs",
+    "src/companion/retained/parity.rs",
+    "src/companion/retained/presentation.rs",
+    "src/companion/retained/render.rs",
+    "src/companion/retained/resources.rs",
+    "src/companion/retained/scene.wgsl",
+    "src/companion/retained/worker.rs",
+];
+
+fn collect_files(dir: &Path, root: &Path, files: &mut Vec<String>) {
+    for entry in
+        fs::read_dir(dir).unwrap_or_else(|error| panic!("cannot list {}: {error}", dir.display()))
+    {
+        let path = entry.expect("source inventory entry is readable").path();
+        if path.is_dir() {
+            collect_files(&path, root, files);
+        } else {
+            files.push(
+                path.strip_prefix(root)
+                    .expect("inventory path is under repository root")
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+}
+
 /// Every retained production source file the `renderer_spike::` ban covers:
 /// `retained.rs`, every module file under `retained/`, and `paired_review.rs`.
 fn retained_source_files() -> Vec<PathBuf> {
@@ -41,6 +77,100 @@ fn retained_source_files() -> Vec<PathBuf> {
     files
 }
 
+#[test]
+fn retained_deletion_inventory_is_complete_and_intentional() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut actual = vec![
+        "src/companion/paired_review.rs".to_string(),
+        "src/companion/retained.rs".to_string(),
+        "src/companion/retained.wgsl".to_string(),
+    ];
+    collect_files(&root.join("src/companion/retained"), root, &mut actual);
+    actual.sort();
+
+    let mut expected = RETAINED_DELETION_INVENTORY
+        .iter()
+        .map(|path| (*path).to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(
+        actual, expected,
+        "retained cutover/deletion inventory changed; classify every added, moved, or removed \
+         retained file explicitly rather than silently weakening the boundary"
+    );
+
+    for scaffold in [
+        "src/companion/paired_review.rs",
+        "src/companion/retained.rs",
+    ] {
+        assert!(RETAINED_DELETION_INVENTORY.contains(&scaffold));
+        assert!(
+            root.join(scaffold).is_file(),
+            "missing scaffold: {scaffold}"
+        );
+    }
+}
+
+#[test]
+fn native_accessibility_and_input_survive_retained_view_transitions() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app = read(&root.join("src/companion/app.rs"));
+    let host = read(&root.join("src/companion/retained/host.rs"));
+
+    for callback in [
+        "fn is_accessibility_element(&self) -> bool",
+        "fn accessibility_role(&self) -> Retained<NSString>",
+        "fn accessibility_label(&self) -> Retained<NSString>",
+        "fn accessibility_value(&self) -> Retained<NSString>",
+        "fn accessibility_frame(&self) -> NSRect",
+    ] {
+        assert!(
+            app.contains(callback),
+            "missing RoundView semantic callback: {callback}"
+        );
+    }
+    assert!(app.contains("NSString::from_str(\"AXGroup\")"));
+    assert!(app.contains("NSString::from_str(\"Glorp habitat\")"));
+    assert!(
+        app.contains("window.convertRectToScreen(self.convertRect_toView(self.bounds(), None))")
+    );
+
+    assert!(host.contains("view.setLayer(Some(&self.host.layer))"));
+    assert!(host.contains(".setDrawableSize(NSSize::new(f64::from(width), f64::from(height)))"));
+    assert!(host.contains("view.setLayer(None)"));
+    assert_eq!(app.matches("window.setContentView(Some(&view))").count(), 1);
+
+    for input_contract in [
+        "Some(sel!(terminate:))",
+        "NSCommandKeyMask",
+        "Some(sel!(toggleFullScreen:))",
+        "NSControlKeyMask.0 | NSCommandKeyMask.0",
+        "NSWindowStyleMask::Closable",
+        "NSWindowStyleMask::Miniaturizable",
+        "NSWindowStyleMask::Resizable",
+        "window.setMovableByWindowBackground(true)",
+    ] {
+        assert!(
+            app.contains(input_contract),
+            "native input contract lost: {input_contract}"
+        );
+    }
+}
+
+#[test]
+fn reduce_motion_is_refreshed_dynamically_and_gates_scene_projection() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
+    let app = read(&path);
+    assert!(app.contains("accessibilityDisplayShouldReduceMotion()"));
+    assert!(app.contains("state.reduce_motion = reduce_motion"));
+    let projection = function_body_from(&app, "fn prepare_scene_runtime_tick()");
+    assert_eq!(projection.matches("reduce_motion,").count(), 2);
+    assert_eq!(
+        projection.matches("CompanionPresentationOptions {").count(),
+        2
+    );
+}
+
 fn read(path: &Path) -> String {
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("cannot read retained source {}: {error}", path.display()))
@@ -50,6 +180,28 @@ fn production_source(text: &str) -> &str {
     text.split("\n#[cfg(test)]\nmod tests {")
         .next()
         .unwrap_or(text)
+}
+
+fn function_body_from<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature}"));
+    let tail = &source[start..];
+    let open = tail.find('{').expect("function body opens");
+    let mut depth = 0_u32;
+    for (offset, byte) in tail[open..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &tail[..open + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated function body for {signature}");
 }
 
 #[test]
@@ -189,6 +341,64 @@ fn retained_capture_never_falls_back_to_appkit_view_caching() {
 }
 
 #[test]
+fn direct_live_capture_uses_scene_readback_and_emits_the_required_evidence_set() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app = read(&root.join("src/companion/app.rs"));
+    let direct = read(&root.join("src/companion/direct_capture.rs"));
+    let host = read(&root.join("src/companion/retained/host.rs"));
+
+    let finish = function_body_from(&app, "fn finish_review_capture_if_due()");
+    assert!(finish.contains("should_run_direct_terminal_capture("));
+    assert!(finish.contains("run_direct_scene_capture(state)"));
+    assert!(
+        !finish.contains("renderer_runtime.effective().is_retained()"),
+        "a requested Live qualification must fail through direct capture rather than bypass it after fallback"
+    );
+    let terminal_route = function_body_from(&app, "fn should_run_direct_terminal_capture(");
+    assert!(terminal_route.contains("renderer.is_retained()"));
+    assert!(terminal_route.contains("scene_runtime_rollout == SceneRuntimeRollout::Live"));
+    let capture = function_body_from(&app, "fn run_direct_scene_capture(");
+    assert!(capture.contains(".capture_presented_scene(sensitive)"));
+    assert!(capture.contains("write_direct_scene_capture("));
+    assert!(!capture.contains("last_good_frame"));
+
+    let service = function_body_from(&app, "fn service_live_scene_runtime(");
+    assert!(service.contains("ActivationTransition::RetryLater"));
+    assert!(service.contains("capture.record_offscreen_review_tick()"));
+
+    let host_capture = function_body_from(&host, "fn capture_presented_scene_inner(");
+    assert!(host_capture.contains("last_presented_scene"));
+    assert!(host_capture.contains("capture_safe_clone()"));
+    assert!(host_capture.contains("render_offscreen("));
+    assert!(host_capture.contains("render_offscreen_sensitive("));
+    for forbidden in [
+        "bitmapImageRepForCachingDisplayInRect",
+        "cacheDisplayInRect_toBitmapImageRep",
+        "SmoothCompanionScenePlan",
+    ] {
+        assert!(
+            !host_capture.contains(forbidden),
+            "direct capture cannot consume AppKit or legacy Smooth evidence: {forbidden}"
+        );
+    }
+
+    for artifact in [
+        "scene.png",
+        "scene-manifest.json",
+        "scene-snapshot.json",
+        "scene-version.json",
+        "scene-metrics.json",
+    ] {
+        assert!(
+            direct.contains(artifact),
+            "missing direct artifact {artifact}"
+        );
+    }
+    assert!(direct.contains("validate_direct_rgba("));
+    assert!(direct.contains("direct-retained-scene"));
+}
+
+#[test]
 fn draw_scene_reads_only_last_good_frame_and_never_records_runtime_metrics() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
     let text = read(&path);
@@ -253,7 +463,7 @@ fn activation_finishes_on_first_successful_present_not_frame_zero() {
 }
 
 #[test]
-fn active_hold_then_raster_worker_service_run_before_current_frame_preparation() {
+fn live_and_legacy_ticks_keep_preparation_out_of_presentation_render() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let host = read(&root.join("src/companion/retained/host.rs"));
     let render_start = host
@@ -278,32 +488,54 @@ fn active_hold_then_raster_worker_service_run_before_current_frame_preparation()
     }
 
     let app = read(&root.join("src/companion/app.rs"));
-    let tick_start = app.find("fn ui_tick()").expect("ui_tick exists");
-    let tick_tail = &app[tick_start..];
-    let tick_end = tick_tail
-        .find("\n/// After a runtime fallback")
-        .expect("ui_tick end marker exists");
-    let tick = &tick_tail[..tick_end];
+    let tick = function_body_from(&app, "fn ui_tick()");
     let hidden = tick
         .find("if !companion_view_is_visible()")
         .expect("hidden early return exists");
-    let worker_service = tick
-        .find("drive_retained_resource_preparation()")
-        .expect("visible tick services the raster worker");
-    let active_present = tick
+    let live = tick
+        .find("scene_runtime_rollout == SceneRuntimeRollout::Live")
+        .expect("Live route exists");
+    let live_tail = &tick[live..];
+    let live_animate = live_tail
+        .find("animate_pet()")
+        .expect("Live animation exists");
+    let live_prepare = live_tail
+        .find("prepare_scene_runtime_tick()")
+        .expect("Live snapshot preparation exists");
+    let live_service = live_tail
+        .find("service_scene_runtime(&tick)")
+        .expect("Live scene service exists");
+    let live_return = live_tail.find("return;").expect("Live route returns");
+    let live_body = &live_tail[..live_return];
+    assert!(hidden < live && live_animate < live_prepare && live_prepare < live_service);
+    for forbidden in [
+        "present_retained_active_generation()",
+        "drive_retained_resource_preparation()",
+        "prepare_current_frame_from_state()",
+    ] {
+        assert!(
+            !live_body.contains(forbidden),
+            "Live route must not enter legacy preparation: {forbidden}"
+        );
+    }
+
+    let legacy = &tick[live + live_return..];
+    let active_present = legacy
         .find("present_retained_active_generation()")
-        .expect("active generation presentation exists");
-    let animate = tick.find("animate_pet()").expect("animation exists");
-    let present = tick
+        .expect("legacy active generation presentation exists");
+    let worker_service = legacy
+        .find("drive_retained_resource_preparation()")
+        .expect("legacy visible tick services the raster worker");
+    let animate = legacy
+        .find("animate_pet()")
+        .expect("legacy animation exists");
+    let present = legacy
         .find("prepare_current_frame_from_state()")
-        .expect("presentation preparation exists");
+        .expect("legacy presentation preparation exists");
     assert!(
-        hidden < active_present
-            && active_present < worker_service
-            && worker_service < animate
-            && worker_service < present
+        active_present < worker_service && worker_service < animate && worker_service < present
     );
-    assert!(tick.contains("ResourcePreparationTick::Yielded"));
+    assert!(legacy.contains("ResourcePreparationTick::Yielded"));
 
     let drive_start = app
         .find("fn drive_retained_resource_preparation()")
@@ -405,14 +637,10 @@ fn production_and_evidence_paths_never_use_monolithic_appkit_atlas_compile() {
 fn scene_generation_service_timing_excludes_render_owner_materialization() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let host = read(&root.join("src/companion/retained/host.rs"));
-    let start = host
-        .find("    pub(in crate::companion) fn advance_scene_generation(")
-        .expect("scene generation service entrypoint exists");
-    let tail = &host[start..];
-    let end = tail
-        .find("\n    #[allow(dead_code)] // Production entrypoint")
-        .expect("the next dormant scene entrypoint bounds the method");
-    let body = &tail[..end];
+    let body = function_body_from(
+        &host,
+        "pub(in crate::companion) fn advance_scene_generation(",
+    );
     let poll = body
         .find("self.host.advance_scene_generation()")
         .expect("the UI service polls once");
@@ -523,16 +751,13 @@ fn instance_uploads_use_one_host_owned_staging_belt_on_every_submission_path() {
     let recall = render.find("self.frame_buffers.recall_uploads()").unwrap();
     assert!(acquire < stage && stage < finish && finish < submit && submit < recall);
 
-    let lifetime_start = production
-        .find("impl<Prepare> LifetimeAuditExecutor for GpuLifetimeAuditExecutor")
-        .unwrap();
-    let lifetime = &production[lifetime_start..];
-    assert!(
-        lifetime.find("prepare_frame(&mut encoder").unwrap()
-            < lifetime.find("finish_uploads()").unwrap()
-    );
-    assert!(lifetime.find("finish_uploads()").unwrap() < lifetime.find("queue.submit").unwrap());
-    assert!(lifetime.find("queue.submit").unwrap() < lifetime.find("recall_uploads()").unwrap());
+    let scene_render = read(&root.join("src/companion/retained/render.rs"));
+    let direct = function_body_from(&scene_render, "fn submit_active_offscreen_inner(");
+    let stage = direct.find("encode_scene_delta_copies(").unwrap();
+    let finish = direct.find("self.staging_belt.finish()").unwrap();
+    let submit = direct.find("queue.submit([command])").unwrap();
+    let recall = direct.find("self.staging_belt.recall()").unwrap();
+    assert!(stage < finish && finish < submit && submit < recall);
 
     let capture = read(&root.join("src/companion/retained/capture.rs"));
     assert!(
@@ -551,7 +776,7 @@ fn retained_startup_waits_for_first_visibility_guarded_worker_service() {
         .find("*cell.borrow_mut() = Some(AppState {")
         .expect("AppState installation exists");
     let timer = text[state_ready..]
-        .find("NSTimer::scheduledTimerWithTimeInterval")
+        .find("NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats")
         .map(|offset| state_ready + offset)
         .expect("UI timer follows AppState installation");
     let startup = &text[state_ready..timer];
@@ -559,6 +784,36 @@ fn retained_startup_waits_for_first_visibility_guarded_worker_service() {
         !startup.contains("drive_retained_resource_preparation()"),
         "retained raster work must begin only inside visibility-guarded ui_tick"
     );
+    let timer_setup = &text[timer..];
+    assert!(timer_setup.contains("addTimer_forMode(&timer, NSRunLoopCommonModes)"));
+    assert!(timer_setup.contains("APP_TIMER.with(|slot|"));
+}
+
+#[test]
+fn scene_lifecycle_uses_host_epochs_common_modes_and_explicit_shutdown() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app = read(&root.join("src/companion/app.rs"));
+    let shutdown = function_body_from(&app, "fn shutdown_app_lifecycle()");
+    let invalidate = shutdown.find("timer.invalidate()").unwrap();
+    let runtime_shutdown = shutdown.find("host.shutdown_scene_runtime()").unwrap();
+    let restore = shutdown.find("restore_appkit").unwrap();
+    assert!(invalidate < runtime_shutdown && runtime_shutdown < restore);
+
+    let hidden = function_body_from(&app, "fn hide_scene_runtime(");
+    assert!(hidden.contains("host.hide_scene_runtime()?"));
+    assert!(!hidden.contains("prepare_scene_runtime_tick"));
+    assert!(!hidden.contains("CompanionSceneSnapshot::project"));
+
+    let retained = read(&root.join("src/companion/retained.rs"));
+    let production = production_source(&retained);
+    assert!(production.contains("acknowledge_operational_surface_rebound_to(surface)"));
+    assert!(!production.contains("acknowledge_operational_surface_rebound()"));
+
+    let runtime = read(&root.join("src/presentation/companion_scene/runtime.rs"));
+    let operational_allocator = runtime
+        .find("pub(crate) fn acknowledge_operational_surface_rebound(")
+        .expect("test-only compatibility allocator exists");
+    assert!(runtime[..operational_allocator].ends_with("#[cfg(test)]\n    "));
 }
 
 #[test]

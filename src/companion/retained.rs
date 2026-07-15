@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "macos", feature = "retained-renderer"))]
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 
@@ -38,12 +38,15 @@ use buffers::{
     PersistentCaptureResources, PersistentFrameBuffers, INSTANCE_RING_LEN, INSTANCE_STRIDE,
 };
 pub(crate) use capture::CanonicalRgbaFrame;
+#[cfg(feature = "dev-preview")]
+pub(crate) use host::run_review_scene_soak;
+pub(crate) use host::DirectSceneCapture;
+use host::Pipelines;
 #[cfg(test)]
 use host::{physical_dimension, LayerActivationGuard, LayerActivationState};
 pub(super) use host::{
     ActiveRetainedHost, PreparedRetainedHost, SceneGenerationServiceTick, ScenePresentOutcome,
 };
-use host::{Pipelines, RetainedHost};
 pub(crate) use metrics::{
     duration_us, CapacityContract, CompanionCapacityInventory, CompanionRuntimeMetrics,
     CompanionRuntimeMetricsSnapshot, GpuAllocationKind, LifetimeAuditSnapshot,
@@ -53,6 +56,25 @@ pub(crate) use presentation::{
     FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox, RetainedFailureCategory,
     SkipReason,
 };
+
+#[cfg(test)]
+pub(crate) fn direct_scene_capture_fixture(
+    receipt: crate::presentation::companion_scene::contract::PresentedSceneVersion,
+    rgba: Vec<u8>,
+) -> DirectSceneCapture {
+    let cpu = compiler::compile_projected_full_scene_for_render_test(0);
+    DirectSceneCapture {
+        receipt,
+        source: cpu.capture_source_identity().unwrap(),
+        scene_artifacts: cpu.scene_artifacts().unwrap(),
+        logical_state_alias:
+            crate::presentation::companion_scene::contract::CompanionCaptureStateAlias::Normal,
+        rgba,
+        presented_scene_count: 5,
+        last_present_age_ms: 7,
+    }
+}
+
 use resources::{
     CompiledGlyphAtlas, CompiledRetainedResources, FragmentGlyphMode, GlyphAtlasEntry, GlyphKey,
     GlyphRepertoireManifest, RetainedResourceCounters, RETAINED_ATLAS_POINT_SIZE,
@@ -246,6 +268,7 @@ struct ResourcePreparationController {
 struct ReadyGpuCandidate {
     identity: crate::presentation::companion_scene::runtime::RequestIdentity,
     version: crate::presentation::companion_scene::SceneVersion,
+    backing_scale: f64,
     cpu: compiler::CpuSceneCandidate,
     gpu: render::GpuSceneCandidate,
     atlas: resources::PreparedSceneAtlas,
@@ -254,8 +277,32 @@ struct ReadyGpuCandidate {
 #[allow(dead_code)] // Owned by the Task 12 host seam; live reads begin with Task 14 routing.
 struct ActiveSceneGeneration {
     version: crate::presentation::companion_scene::SceneVersion,
+    backing_scale: f64,
     cpu: compiler::CpuSceneCandidate,
     gpu: render::GpuSceneCandidate,
+    atlas: resources::PreparedSceneAtlas,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::companion) struct SceneReplacementIdentity {
+    generation: crate::presentation::companion_scene::SceneGenerationKey,
+    surface: crate::presentation::companion_scene::SurfaceEpoch,
+    source: crate::presentation::companion_scene::AppliedRevisions,
+}
+
+#[cfg(test)]
+impl SceneReplacementIdentity {
+    pub(in crate::companion) fn for_test(serial: u64) -> Self {
+        Self {
+            generation: crate::presentation::companion_scene::SceneGenerationKey {
+                device: crate::presentation::companion_scene::DeviceEpoch(serial),
+                layout: crate::presentation::companion_scene::LayoutGeneration(serial),
+                resources: crate::presentation::companion_scene::ResourceGeneration(serial),
+            },
+            surface: crate::presentation::companion_scene::SurfaceEpoch(serial),
+            source: crate::presentation::companion_scene::AppliedRevisions::new(serial, serial),
+        }
+    }
 }
 
 fn should_defer_scene_reveal(
@@ -319,6 +366,7 @@ struct RetainedSceneGenerationState {
 #[allow(dead_code)] // Held only by the dormant Task 12 host coordinator until Task 14 routing.
 struct CpuReadySceneCandidate {
     identity: crate::presentation::companion_scene::runtime::RequestIdentity,
+    backing_scale: f64,
     cpu: compiler::CpuSceneCandidate,
     atlas: resources::PreparedSceneAtlas,
 }
@@ -362,17 +410,72 @@ impl RetainedSceneGenerationState {
     fn reconcile_snapshot(
         &mut self,
         snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+        backing_scale_changed: bool,
     ) -> Result<
         crate::presentation::companion_scene::runtime::RuntimeEffects,
         RetainedFailureCategory,
     > {
         let prepared = self
             .runtime
-            .prepare_snapshot(snapshot)
+            .prepare_snapshot_with_resource_invalidation(
+                snapshot,
+                backing_scale_changed.then_some(
+                    crate::presentation::companion_scene::runtime::ResourceInvalidation::BackingScaleAtlas,
+                ),
+            )
             .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
         self.runtime
             .commit_prepared(prepared)
             .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)
+    }
+
+    fn reconcile_frame_projection(
+        &mut self,
+        mut projection: crate::presentation::companion_scene::CompanionFrameProjection,
+    ) -> Result<
+        (
+            crate::presentation::companion_scene::runtime::RuntimeEffects,
+            bool,
+        ),
+        RetainedFailureCategory,
+    > {
+        let mut regenerated = false;
+        let prepared = match self.runtime.prepare_frame_projection(projection.clone()) {
+            Ok(prepared) => prepared,
+            Err(
+                crate::presentation::companion_scene::runtime::RuntimeError::StaleSemanticBase {
+                    ..
+                },
+            ) => {
+                projection = self
+                    .project_frame(projection.clock, projection.options)
+                    .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+                regenerated = true;
+                self.runtime
+                    .prepare_frame_projection(projection)
+                    .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?
+            }
+            Err(_) => return Err(RetainedFailureCategory::SceneCandidateEncode),
+        };
+        let effects = self
+            .runtime
+            .commit_frame_projection(prepared)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+        Ok((effects, regenerated))
+    }
+
+    fn project_frame(
+        &self,
+        clock: crate::presentation::companion_scene::CompanionProjectionClock,
+        options: crate::presentation::companion_scene::input::CompanionPresentationOptions,
+    ) -> Result<
+        crate::presentation::companion_scene::CompanionFrameProjection,
+        crate::presentation::companion_scene::CompanionSceneProjectionError,
+    > {
+        let revisions = self.runtime.applied_revisions();
+        self.runtime
+            .snapshot()
+            .project_presentation_frame(revisions.semantic, clock, options)
     }
 
     fn set_hidden(&mut self) -> crate::presentation::companion_scene::runtime::RuntimeEffects {
@@ -391,17 +494,49 @@ impl RetainedSceneGenerationState {
 
     fn reveal(
         &mut self,
+        backing_scale_changed: bool,
     ) -> Result<
         crate::presentation::companion_scene::runtime::RuntimeEffects,
         RetainedFailureCategory,
     > {
         let prepared = self
             .runtime
-            .prepare_reveal()
+            .prepare_reveal_with_resource_invalidation(
+                backing_scale_changed.then_some(
+                    crate::presentation::companion_scene::runtime::ResourceInvalidation::BackingScaleAtlas,
+                ),
+            )
             .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
         self.runtime
             .commit_reveal(prepared)
             .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)
+    }
+
+    fn rebind_surface(
+        &mut self,
+        surface: crate::presentation::companion_scene::SurfaceEpoch,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::RuntimeEffects,
+        RetainedFailureCategory,
+    > {
+        self.runtime
+            .acknowledge_operational_surface_rebound_to(surface)
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)
+    }
+
+    fn retry_current_generation(
+        &mut self,
+    ) -> Result<
+        crate::presentation::companion_scene::runtime::RuntimeEffects,
+        RetainedFailureCategory,
+    > {
+        self.runtime
+            .retry_current_generation()
+            .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)
+    }
+
+    fn shutdown(&mut self) -> crate::presentation::companion_scene::runtime::RuntimeEffects {
+        self.runtime.shutdown()
     }
 
     fn accept_worker_candidate(
@@ -411,6 +546,7 @@ impl RetainedSceneGenerationState {
         let CpuSceneBuildCandidate {
             identity,
             accepted,
+            backing_scale,
             cpu,
             atlas,
             timing: _,
@@ -423,7 +559,12 @@ impl RetainedSceneGenerationState {
                     identity.request_id(),
                 )
         {
-            self.cpu_candidate = Some(Box::new(CpuReadySceneCandidate { identity, cpu, atlas }));
+            self.cpu_candidate = Some(Box::new(CpuReadySceneCandidate {
+                identity,
+                backing_scale,
+                cpu,
+                atlas,
+            }));
         }
         effects
     }
@@ -432,6 +573,18 @@ impl RetainedSceneGenerationState {
         &self,
     ) -> Option<crate::presentation::companion_scene::runtime::RequestIdentity> {
         self.runtime.pending_request_identity()
+    }
+
+    fn replacement_identity(&self) -> Option<SceneReplacementIdentity> {
+        let identity = self.runtime.pending_request_identity()?;
+        Some(SceneReplacementIdentity {
+            generation: identity.key(),
+            surface: identity.surface(),
+            source: self
+                .runtime
+                .pending_desired_source()
+                .unwrap_or_else(|| identity.source()),
+        })
     }
 
     fn materialize_ready_candidate(
@@ -444,7 +597,7 @@ impl RetainedSceneGenerationState {
             .cpu_candidate
             .take()
             .ok_or(SceneCandidatePreparationError::MissingCpuCandidate)?;
-        let CpuReadySceneCandidate { identity, mut cpu, atlas } = *candidate;
+        let CpuReadySceneCandidate { identity, backing_scale, mut cpu, atlas } = *candidate;
         if self.runtime.pending_request_identity() != Some(identity) {
             return Err(SceneCandidatePreparationError::StaleCandidate);
         }
@@ -466,6 +619,7 @@ impl RetainedSceneGenerationState {
         self.ready_candidate = Some(ReadyGpuCandidate {
             identity,
             version: rebase.version(),
+            backing_scale,
             cpu,
             gpu,
             atlas,
@@ -541,7 +695,15 @@ impl RetainedSceneGenerationState {
         backing_scale: f64,
         prepared_hud: &hud::SensitivePreparedHudFrame,
         surface_view: &wgpu::TextureView,
-    ) -> Result<crate::presentation::companion_scene::SceneVersion, render::SceneRenderError> {
+    ) -> Result<
+        (
+            crate::presentation::companion_scene::SceneVersion,
+            Option<compiler::SceneDirtyMetrics>,
+            u64,
+            render::SceneSurfaceTimings,
+        ),
+        render::SceneRenderError,
+    > {
         let Self { runtime, active, .. } = self;
         let lease = runtime.capture_lease().map_err(|_| {
             render::SceneRenderError::Delta(render::SceneDeltaRenderError::RevisionMismatch)
@@ -556,8 +718,9 @@ impl RetainedSceneGenerationState {
             ));
         }
         let request = render::SceneRenderRequest::new(version, request_extent, backing_scale);
-        if active.version.applied == version.applied {
-            renderer.submit_active_to_surface(
+        let draw_count = active.gpu.submitted_draw_count();
+        let (dirty_metrics, timings) = if active.version.applied == version.applied {
+            let (_, timings) = renderer.submit_active_to_surface(
                 device,
                 queue,
                 shared,
@@ -566,8 +729,9 @@ impl RetainedSceneGenerationState {
                 prepared_hud,
                 surface_view,
             )?;
+            (None, timings)
         } else {
-            renderer.submit_active_to_surface_with_delta(
+            let (_, dirty_metrics, timings) = renderer.submit_active_to_surface_with_delta(
                 device,
                 queue,
                 shared,
@@ -579,13 +743,114 @@ impl RetainedSceneGenerationState {
                 prepared_hud,
                 surface_view,
             )?;
-        }
+            (Some(dirty_metrics), timings)
+        };
         active.version = version;
-        Ok(version)
+        Ok((version, dirty_metrics, draw_count, timings))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_active_offscreen(
+        &mut self,
+        renderer: &mut render::SceneRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &render::SceneGpuShared,
+        request_extent: [u32; 2],
+        backing_scale: f64,
+        prepared_hud: &hud::SensitivePreparedHudFrame,
+    ) -> Result<
+        (
+            crate::presentation::companion_scene::SceneVersion,
+            Option<compiler::SceneDirtyMetrics>,
+            u64,
+            render::SceneSurfaceTimings,
+            wgpu::SubmissionIndex,
+        ),
+        render::SceneRenderError,
+    > {
+        let Self { runtime, active, .. } = self;
+        let lease = runtime.capture_lease().map_err(|_| {
+            render::SceneRenderError::Delta(render::SceneDeltaRenderError::RevisionMismatch)
+        })?;
+        let version = lease.version();
+        let active = active.as_mut().ok_or({
+            render::SceneRenderError::Delta(render::SceneDeltaRenderError::RevisionMismatch)
+        })?;
+        if active.version.generation != version.generation {
+            return Err(render::SceneRenderError::Delta(
+                render::SceneDeltaRenderError::GenerationMismatch,
+            ));
+        }
+        let request = render::SceneRenderRequest::new(version, request_extent, backing_scale);
+        let draw_count = active.gpu.submitted_draw_count();
+        let (submission, dirty_metrics, timings) = if active.version.applied == version.applied {
+            let (submission, timings) = renderer.submit_active_offscreen(
+                device,
+                queue,
+                shared,
+                &mut active.gpu,
+                request,
+                prepared_hud,
+            )?;
+            (submission, None, timings)
+        } else {
+            let (submission, dirty_metrics, timings) = renderer
+                .submit_active_offscreen_with_delta(
+                    device,
+                    queue,
+                    shared,
+                    &mut active.cpu,
+                    &mut active.gpu,
+                    lease.content_delta(),
+                    lease.frame_delta(),
+                    request,
+                    prepared_hud,
+                )?;
+            (submission, Some(dirty_metrics), timings)
+        };
+        active.version = version;
+        Ok((version, dirty_metrics, draw_count, timings, submission))
+    }
+
+    fn prewarm_offscreen_readback(
+        &mut self,
+        renderer: &mut render::SceneRenderer,
+        device: &wgpu::Device,
+        shared: &render::SceneGpuShared,
+        request_extent: [u32; 2],
+        backing_scale: f64,
+    ) -> Result<(), render::SceneRenderError> {
+        let version = self
+            .runtime
+            .capture_lease()
+            .map_err(|_| {
+                render::SceneRenderError::Delta(render::SceneDeltaRenderError::RevisionMismatch)
+            })?
+            .version();
+        let active = self.active.as_ref().ok_or({
+            render::SceneRenderError::Delta(render::SceneDeltaRenderError::RevisionMismatch)
+        })?;
+        renderer.prewarm_offscreen_readback(
+            device,
+            shared,
+            render::SceneRenderRequest::new(version, request_extent, backing_scale),
+            &active.gpu,
+        )
     }
 
     fn active_version(&self) -> Option<crate::presentation::companion_scene::SceneVersion> {
         self.active.as_ref().map(|active| active.version)
+    }
+
+    fn ready_candidate_draw_count(&self) -> Option<u64> {
+        self.ready_candidate
+            .as_ref()
+            .map(|candidate| candidate.gpu.submitted_draw_count())
+    }
+
+    fn active_backing_scale(&self) -> Option<f64> {
+        self.active.as_ref().map(|active| active.backing_scale)
     }
 
     fn active_delta_pending(&self) -> bool {
@@ -594,11 +859,24 @@ impl RetainedSceneGenerationState {
 
     fn active_surface_extent_matches(&self, physical_extent: [u32; 2], backing_scale: f64) -> bool {
         self.active.as_ref().is_some_and(|active| {
-            logical_viewport_matches_surface(
-                active.gpu.logical_viewport_points,
-                physical_extent,
-                backing_scale,
-            )
+            active.backing_scale.to_bits() == backing_scale.to_bits()
+                && logical_viewport_matches_surface(
+                    active.gpu.logical_viewport_points,
+                    physical_extent,
+                    backing_scale,
+                )
+        })
+    }
+
+    fn active_present_compatible(
+        &self,
+        surface: crate::presentation::companion_scene::SurfaceEpoch,
+        physical_extent: [u32; 2],
+        backing_scale: f64,
+    ) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.version.surface == surface
+                && self.active_surface_extent_matches(physical_extent, backing_scale)
         })
     }
 
@@ -678,8 +956,10 @@ impl RetainedSceneGenerationState {
                 debug_assert_eq!(candidate.identity.key(), attempt.key());
                 self.active = Some(ActiveSceneGeneration {
                     version: candidate.version,
+                    backing_scale: candidate.backing_scale,
                     cpu: candidate.cpu,
                     gpu: candidate.gpu,
+                    atlas: candidate.atlas,
                 });
             }
             RuntimeDisposition::Activation(ActivationTransition::RetryLater) => {}
@@ -806,6 +1086,10 @@ impl RetainedSceneGenerationState {
     const fn has_cpu_candidate(&self) -> bool {
         self.cpu_candidate.is_some()
     }
+
+    const fn has_ready_candidate(&self) -> bool {
+        self.ready_candidate.is_some()
+    }
 }
 
 #[allow(dead_code)] // Called by the dormant Task 12 host activation seam until Task 14.
@@ -860,7 +1144,8 @@ fn failure_activation_outcome(
     };
 
     match failure {
-        RetainedFailureCategory::SceneCandidateEncode => {
+        RetainedFailureCategory::SceneCandidateEncode
+        | RetainedFailureCategory::PresentationStalled => {
             ActivationAttemptOutcome::CandidateRejected(CandidateFailure::PreSubmitEncode)
         }
         RetainedFailureCategory::AtlasUnavailable
@@ -1033,254 +1318,231 @@ pub(super) enum LifetimeAuditPhase {
     Measured,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LifetimeFrameObservation {
-    semantic_hash: u64,
-    gpu_frame_hash: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifetimeAuditEvent {
+    Semantic { sample: u64, elapsed_nanos: u64 },
+    Presentation { tick: u64, elapsed_nanos: u64 },
+}
+
+impl LifetimeAuditEvent {
+    const fn elapsed_nanos(self) -> u64 {
+        match self {
+            Self::Semantic { elapsed_nanos, .. } | Self::Presentation { elapsed_nanos, .. } => {
+                elapsed_nanos
+            }
+        }
+    }
+}
+
+/// Produces two exact rational schedules over one shared interval. Event times
+/// are compared as fractions before converting to integer nanoseconds, so 30 Hz
+/// never accumulates truncation drift. A semantic event wins every exact tie.
+fn dual_cadence_events(
+    semantic_samples: u64,
+    presentation_ticks: u64,
+    elapsed_nanos: u64,
+) -> Vec<LifetimeAuditEvent> {
+    let mut events = Vec::with_capacity(
+        usize::try_from(semantic_samples.saturating_add(presentation_ticks)).unwrap_or(usize::MAX),
+    );
+    let mut semantic = 0_u64;
+    let mut presentation = 0_u64;
+    while semantic < semantic_samples || presentation < presentation_ticks {
+        let semantic_first = if semantic == semantic_samples {
+            false
+        } else if presentation == presentation_ticks {
+            true
+        } else {
+            u128::from(semantic).saturating_mul(u128::from(presentation_ticks))
+                <= u128::from(presentation).saturating_mul(u128::from(semantic_samples))
+        };
+        if semantic_first {
+            let elapsed_nanos = rational_elapsed_nanos(semantic, semantic_samples, elapsed_nanos);
+            events.push(LifetimeAuditEvent::Semantic { sample: semantic, elapsed_nanos });
+            semantic = semantic.saturating_add(1);
+        } else {
+            let elapsed_nanos =
+                rational_elapsed_nanos(presentation, presentation_ticks, elapsed_nanos);
+            events.push(LifetimeAuditEvent::Presentation { tick: presentation, elapsed_nanos });
+            presentation = presentation.saturating_add(1);
+        }
+    }
+    events
+}
+
+fn rational_elapsed_nanos(index: u64, count: u64, elapsed_nanos: u64) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    u64::try_from(u128::from(index).saturating_mul(u128::from(elapsed_nanos)) / u128::from(count))
+        .unwrap_or(u64::MAX)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LifetimeSemanticObservation {
+    snapshot_projected: bool,
+    semantic_reconciled: bool,
+    stale_mutations: u64,
+    stale_rejections: u64,
+    stale_regenerations: u64,
+    gpu_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LifetimePresentationObservation {
+    semantic_reconciled: bool,
+    frame_projected: bool,
+    frame_reconciled: bool,
+    encoded: bool,
+    submitted: bool,
     draw_calls: u64,
     gpu_bytes: u64,
 }
 
 trait LifetimeAuditExecutor {
-    fn render_frame(
+    fn semantic_sample(
         &mut self,
         phase: LifetimeAuditPhase,
-        frame: u64,
+        sample: u64,
         now: time::OffsetDateTime,
-    ) -> std::result::Result<LifetimeFrameObservation, RetainedFailureCategory>;
+    ) -> std::result::Result<LifetimeSemanticObservation, RetainedFailureCategory>;
+
+    fn presentation_tick(
+        &mut self,
+        phase: LifetimeAuditPhase,
+        tick: u64,
+        now: time::OffsetDateTime,
+    ) -> std::result::Result<LifetimePresentationObservation, RetainedFailureCategory>;
 
     fn poll(&mut self) -> std::result::Result<(), RetainedFailureCategory>;
 
     fn rss_bytes(&mut self) -> std::result::Result<u64, RetainedFailureCategory>;
-}
 
-struct GpuLifetimeAuditExecutor<'host, Prepare> {
-    host: &'host mut RetainedHost,
-    prepare: Prepare,
-    last_submission: Option<wgpu::SubmissionIndex>,
-}
+    fn work_counters(&self) -> RuntimeWorkCounters;
 
-impl<Prepare> LifetimeAuditExecutor for GpuLifetimeAuditExecutor<'_, Prepare>
-where
-    Prepare: FnMut(
-        LifetimeAuditPhase,
-        u64,
-        time::OffsetDateTime,
-    ) -> std::result::Result<
-        (crate::companion::app::PreparedCompanionFrame, u64),
-        RetainedFailureCategory,
-    >,
-{
-    fn render_frame(
-        &mut self,
-        phase: LifetimeAuditPhase,
-        frame: u64,
-        now: time::OffsetDateTime,
-    ) -> std::result::Result<LifetimeFrameObservation, RetainedFailureCategory> {
-        use crate::companion::paired_review::RendererIdentitySource;
+    fn persistent_resource_creations(&self) -> u64;
 
-        let (prepared, semantic_hash) = (self.prepare)(phase, frame, now)?;
-        let RendererIdentitySource::Smooth {
-            metrics,
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
-            plan,
-            draw_order,
-        } = prepared.renderer_source()
-        else {
-            return Err(RetainedFailureCategory::LifetimeFramePreparation);
-        };
-        let background_color = prepared.review_background();
-        let background = [
-            background_color.0,
-            background_color.1,
-            background_color.2,
-            background_color.3,
-        ];
-        let mood_aura = prepared.review_mood_aura();
-        let chrome = RetainedChrome {
-            mood_aura: [mood_aura.0, mood_aura.1, mood_aura.2, mood_aura.3],
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
-            gauges: prepared.review_gauges(),
-            overlays: prepared.review_overlays(),
-            hud: prepared.review_hud(),
-            hud_font_size: prepared.review_hud_font_size(),
-            dim_overlay: prepared.review_dim_overlay(),
-        };
-        let gpu_frame = {
-            let active = self
-                .host
-                .glyph_resources
-                .as_ref()
-                .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-            prepare_gpu_frame(
-                plan,
-                draw_order,
-                metrics,
-                prepared.review_aperture(),
-                background,
-                &chrome,
-                active.resources.atlas(),
-            )?
-        };
-        let gpu_frame_hash = hash_prepared_gpu_frame(&gpu_frame);
-        let draw_calls = gpu_frame.blends.len() as u64;
-        let width = self.host.physical_width;
-        let height = self.host.physical_height;
-        self.host.ensure_capture_resources(width, height);
-        let mut encoder =
-            self.host
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("glorp-retained-lifetime-audit"),
-                });
-        self.host.prepare_frame(&mut encoder, &gpu_frame);
-        {
-            let active = self
-                .host
-                .glyph_resources
-                .as_ref()
-                .ok_or(RetainedFailureCategory::AtlasUnavailable)?;
-            let capture = self
-                .host
-                .capture_resources
-                .as_ref()
-                .expect("lifetime capture target is prewarmed");
-            self.host.encode_scene(
-                &mut encoder,
-                &capture.intermediate_view,
-                &active.bind_group,
-                self.host.frame_buffers.current_buffer(),
-                &gpu_frame.blends,
-                background,
-            );
-        }
-        self.host.frame_buffers.finish_uploads();
-        self.last_submission = Some(self.host.queue.submit([encoder.finish()]));
-        self.host.frame_buffers.recall_uploads();
-        let gpu_bytes = self
-            .host
-            .metrics
-            .gpu_accounting_snapshot()
-            .current_bytes
-            .total_bytes;
-        Ok(LifetimeFrameObservation {
-            semantic_hash,
-            gpu_frame_hash,
-            draw_calls,
-            gpu_bytes,
-        })
-    }
+    fn static_upload_bytes(&self) -> u64;
 
-    fn poll(&mut self) -> std::result::Result<(), RetainedFailureCategory> {
-        let Some(submission) = self.last_submission.take() else {
-            return Ok(());
-        };
-        self.host
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(Duration::from_secs(5)),
-            })
-            .map(|_| ())
-            .map_err(|_| RetainedFailureCategory::LifetimeGpuPoll)
-    }
+    fn offscreen_cache_events(&self) -> (u64, u64);
 
-    fn rss_bytes(&mut self) -> std::result::Result<u64, RetainedFailureCategory> {
-        current_process_rss_bytes()
-    }
-}
-
-fn hash_prepared_gpu_frame(frame: &PreparedGpuFrame) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    for byte in bytemuck::cast_slice::<GpuPrimitive, u8>(&frame.primitives) {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    for blend in &frame.blends {
-        let byte = match blend {
-            SmoothBlendMode::Normal => 0,
-            SmoothBlendMode::Multiply => 1,
-            SmoothBlendMode::Screen => 2,
-            SmoothBlendMode::Add => 3,
-            SmoothBlendMode::Replace => 4,
-        };
-        hash ^= byte;
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
+    fn storage_capacity_signature(&self) -> u64;
 }
 
 fn run_lifetime_schedule(
     executor: &mut impl LifetimeAuditExecutor,
-    frames: u64,
+    semantic_samples: u64,
+    presentation_ticks: u64,
+    virtual_elapsed_ms: u64,
 ) -> std::result::Result<LifetimeAuditSnapshot, RetainedFailureCategory> {
-    const CADENCE_MS: i64 = 250;
     const SAMPLE_INTERVAL: u64 = 256;
     let base = time::macros::datetime!(2026-06-13 18:00 UTC);
+    let virtual_elapsed_nanos = virtual_elapsed_ms.saturating_mul(1_000_000);
+    let events = dual_cadence_events(semantic_samples, presentation_ticks, virtual_elapsed_nanos);
     let mut audit = LifetimeAuditSnapshot {
-        frames,
-        warmup_frames: frames,
-        cadence_ms: CADENCE_MS as u64,
+        semantic_samples,
+        warmup_semantic_samples: semantic_samples,
+        presentation_ticks,
+        warmup_presentation_ticks: presentation_ticks,
+        semantic_cadence_ms: virtual_elapsed_ms
+            .checked_div(semantic_samples)
+            .unwrap_or(0),
+        presentation_cadence_hz: u32::try_from(
+            u128::from(presentation_ticks)
+                .saturating_mul(1_000)
+                .checked_div(u128::from(virtual_elapsed_ms))
+                .unwrap_or(0),
+        )
+        .unwrap_or(u32::MAX),
+        virtual_elapsed_ms,
         ..LifetimeAuditSnapshot::default()
     };
-    let mut previous_semantic = None;
-    let mut previous_gpu = None;
 
     for phase in [LifetimeAuditPhase::Warmup, LifetimeAuditPhase::Measured] {
-        let mut now = base;
+        // Each phase runs the same virtual clock from the same production scene
+        // state. Sample zero is already the first event at `base`; use that counted
+        // event to rewind/reconcile rather than performing an uncounted duplicate
+        // sample and submission before the phase baselines.
+        let work_start = executor.work_counters();
+        let resource_creations_start = executor.persistent_resource_creations();
+        let static_upload_start = executor.static_upload_bytes();
+        let cache_events_start = executor.offscreen_cache_events();
+        let storage_start = executor.storage_capacity_signature();
         let mut phase_gpu_final = 0_u64;
-        for frame in 0..frames {
-            let observation = executor.render_frame(phase, frame, now)?;
-            phase_gpu_final = observation.gpu_bytes;
+        let mut phase_presentation_ticks = 0_u64;
+        for event in &events {
+            let now = base
+                + time::Duration::nanoseconds(
+                    i64::try_from(event.elapsed_nanos()).unwrap_or(i64::MAX),
+                );
+            match *event {
+                LifetimeAuditEvent::Semantic { sample, .. } => {
+                    let observation = executor.semantic_sample(phase, sample, now)?;
+                    phase_gpu_final = observation.gpu_bytes;
+                    if phase == LifetimeAuditPhase::Measured {
+                        audit.snapshot_projections = audit
+                            .snapshot_projections
+                            .saturating_add(u64::from(observation.snapshot_projected));
+                        audit.semantic_reconciles = audit
+                            .semantic_reconciles
+                            .saturating_add(u64::from(observation.semantic_reconciled));
+                        audit.stale_mutations = audit
+                            .stale_mutations
+                            .saturating_add(observation.stale_mutations);
+                        audit.stale_rejections = audit
+                            .stale_rejections
+                            .saturating_add(observation.stale_rejections);
+                        audit.stale_regenerations = audit
+                            .stale_regenerations
+                            .saturating_add(observation.stale_regenerations);
+                    }
+                }
+                LifetimeAuditEvent::Presentation { tick, .. } => {
+                    debug_assert_eq!(tick, phase_presentation_ticks);
+                    phase_presentation_ticks = phase_presentation_ticks.saturating_add(1);
+                    let observation = executor.presentation_tick(phase, tick, now)?;
+                    phase_gpu_final = observation.gpu_bytes;
+                    if phase == LifetimeAuditPhase::Measured {
+                        audit.frame_projections = audit
+                            .frame_projections
+                            .saturating_add(u64::from(observation.frame_projected));
+                        audit.frame_reconciles = audit
+                            .frame_reconciles
+                            .saturating_add(u64::from(observation.frame_reconciled));
+                        audit.semantic_reconciles = audit
+                            .semantic_reconciles
+                            .saturating_add(u64::from(observation.semantic_reconciled));
+                        audit.encoded_ticks = audit
+                            .encoded_ticks
+                            .saturating_add(u64::from(observation.encoded));
+                        audit.submitted_ticks = audit
+                            .submitted_ticks
+                            .saturating_add(u64::from(observation.submitted));
+                        audit.draw_calls = audit.draw_calls.saturating_add(observation.draw_calls);
+                    }
+                    executor.poll()?;
+                    audit.poll_count = audit.poll_count.saturating_add(1);
+                    if phase_presentation_ticks.is_multiple_of(SAMPLE_INTERVAL) {
+                        let rss = executor.rss_bytes()?;
+                        match phase {
+                            LifetimeAuditPhase::Warmup => {
+                                audit.rss_warmup_peak_bytes = audit.rss_warmup_peak_bytes.max(rss)
+                            }
+                            LifetimeAuditPhase::Measured => {
+                                audit.rss_peak_bytes = audit.rss_peak_bytes.max(rss)
+                            }
+                        }
+                    }
+                }
+            }
             match phase {
                 LifetimeAuditPhase::Warmup => {
-                    audit.gpu_warmup_peak_bytes =
-                        audit.gpu_warmup_peak_bytes.max(observation.gpu_bytes);
+                    audit.gpu_warmup_peak_bytes = audit.gpu_warmup_peak_bytes.max(phase_gpu_final);
                 }
                 LifetimeAuditPhase::Measured => {
-                    audit.prepared_frames = audit.prepared_frames.saturating_add(1);
-                    audit.encoded_frames = audit.encoded_frames.saturating_add(1);
-                    audit.draw_calls = audit.draw_calls.saturating_add(observation.draw_calls);
-                    if previous_semantic
-                        .replace(observation.semantic_hash)
-                        .is_some_and(|previous| previous != observation.semantic_hash)
-                    {
-                        audit.semantic_frame_changes =
-                            audit.semantic_frame_changes.saturating_add(1);
-                    }
-                    if previous_gpu
-                        .replace(observation.gpu_frame_hash)
-                        .is_some_and(|previous| previous != observation.gpu_frame_hash)
-                    {
-                        audit.gpu_frame_hash_changes =
-                            audit.gpu_frame_hash_changes.saturating_add(1);
-                    }
-                    audit.gpu_peak_bytes = audit.gpu_peak_bytes.max(observation.gpu_bytes);
+                    audit.gpu_peak_bytes = audit.gpu_peak_bytes.max(phase_gpu_final);
                 }
             }
-            // This audit measures resource lifetime, not burst throughput. Waiting once per
-            // virtual frame bounds macOS frame-pacing bookkeeping that the zero-delay synthetic
-            // loop would otherwise accumulate between the companion's modeled 4 Hz frames.
-            executor.poll()?;
-            audit.poll_count = audit.poll_count.saturating_add(1);
-            if (frame + 1) % SAMPLE_INTERVAL == 0 {
-                let rss = executor.rss_bytes()?;
-                match phase {
-                    LifetimeAuditPhase::Warmup => {
-                        audit.rss_warmup_peak_bytes = audit.rss_warmup_peak_bytes.max(rss)
-                    }
-                    LifetimeAuditPhase::Measured => {
-                        audit.rss_peak_bytes = audit.rss_peak_bytes.max(rss)
-                    }
-                }
-            }
-            now += time::Duration::milliseconds(CADENCE_MS);
         }
         executor.poll()?;
         audit.poll_count = audit.poll_count.saturating_add(1);
@@ -1291,16 +1553,30 @@ fn run_lifetime_schedule(
                 audit.rss_warmup_peak_bytes = audit.rss_warmup_peak_bytes.max(rss_final);
                 audit.gpu_warmup_bytes = phase_gpu_final;
                 audit.gpu_warmup_peak_bytes = audit.gpu_warmup_peak_bytes.max(phase_gpu_final);
+                let cache_events_end = executor.offscreen_cache_events();
+                audit.direct_target_prewarmed = cache_events_end.0 > 0;
+                audit.direct_readback_prewarmed = cache_events_end.1 > 0;
             }
             LifetimeAuditPhase::Measured => {
                 audit.rss_final_bytes = rss_final;
                 audit.rss_peak_bytes = audit.rss_peak_bytes.max(rss_final);
                 audit.gpu_final_bytes = phase_gpu_final;
                 audit.gpu_peak_bytes = audit.gpu_peak_bytes.max(phase_gpu_final);
-                audit.virtual_elapsed_ms = (now - base)
-                    .whole_milliseconds()
-                    .max(0)
-                    .min(i128::from(u64::MAX)) as u64;
+                audit.work_delta = executor.work_counters().saturating_sub(work_start);
+                audit.work_per_second = audit
+                    .work_delta
+                    .normalized_per_second(presentation_ticks, audit.presentation_cadence_hz);
+                audit.post_warmup_resource_creations = executor
+                    .persistent_resource_creations()
+                    .saturating_sub(resource_creations_start);
+                audit.post_warmup_static_upload_bytes = executor
+                    .static_upload_bytes()
+                    .saturating_sub(static_upload_start);
+                let cache_events_end = executor.offscreen_cache_events();
+                audit.direct_target_reused = cache_events_end.0 == cache_events_start.0;
+                audit.direct_readback_reused = cache_events_end.1 == cache_events_start.1;
+                audit.capacity_growth_events =
+                    u64::from(executor.storage_capacity_signature() != storage_start);
             }
         }
     }
@@ -2218,20 +2494,21 @@ fn rgb(r: u8, g: u8, b: u8, opacity: f32) -> [f32; 4] {
 mod tests {
     use super::parity::srgb_channel_to_linear;
     use super::resources::GlyphEntryKind;
+    use super::RuntimeWorkCounters;
     use super::{
         cached_current_failure, create_atlas_bind_group_layout, create_pipelines,
-        current_process_rss_bytes, glyph_advance, glyph_ink_rect, glyph_run_height,
-        glyph_run_width, logical_viewport_matches_surface, persistent_instance_capacity,
-        physical_dimension, push_analytic_arc, resource_failure_tick, run_lifetime_schedule,
-        should_defer_scene_reveal, terminal_worker_decision, upload_glyph_atlas,
-        CompiledGlyphAtlas, CompiledRetainedResources, FailedGlyphPreparation, GlyphAtlasEntry,
-        GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
-        LayerActivationState, LifetimeAuditExecutor, LifetimeAuditPhase, LifetimeFrameObservation,
-        PersistentFrameBuffers, Pipelines, PreparedGpuFrame, ResourcePreparationController,
-        ResourcePreparationKey, ResourcePreparationTick, RetainedFailureCategory,
-        RetainedResourceCounters, RetainedSceneGenerationState, SmoothBlendMode,
-        FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE, INSTANCE_RING_LEN, INSTANCE_STRIDE,
-        RETAINED_ATLAS_POINT_SIZE,
+        current_process_rss_bytes, dual_cadence_events, glyph_advance, glyph_ink_rect,
+        glyph_run_height, glyph_run_width, logical_viewport_matches_surface,
+        persistent_instance_capacity, physical_dimension, push_analytic_arc, resource_failure_tick,
+        run_lifetime_schedule, should_defer_scene_reveal, terminal_worker_decision,
+        upload_glyph_atlas, CompiledGlyphAtlas, CompiledRetainedResources, FailedGlyphPreparation,
+        GlyphAtlasEntry, GlyphKey, GlyphRepertoireManifest, GpuPrimitive, LayerActivationGuard,
+        LayerActivationState, LifetimeAuditEvent, LifetimeAuditExecutor, LifetimeAuditPhase,
+        LifetimePresentationObservation, LifetimeSemanticObservation, PersistentFrameBuffers,
+        Pipelines, PreparedGpuFrame, ResourcePreparationController, ResourcePreparationKey,
+        ResourcePreparationTick, RetainedFailureCategory, RetainedResourceCounters,
+        RetainedSceneGenerationState, SmoothBlendMode, FIXED_INSTANCE_RING_MIN, GLYPH_FONT_SIZE,
+        INSTANCE_RING_LEN, INSTANCE_STRIDE, RETAINED_ATLAS_POINT_SIZE,
     };
     use crate::pet::generation::Species;
     use crate::round::smooth::CompanionContentIdentity;
@@ -2378,6 +2655,39 @@ mod tests {
             RuntimeDisposition::Activation(ActivationTransition::CandidateDestroyedRetainingActive)
         );
         assert_eq!(generations.active_checksum(), Some(previous));
+    }
+
+    #[test]
+    fn active_generation_requires_the_exact_prepared_backing_scale() {
+        use crate::companion::retained::{
+            FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox,
+        };
+
+        let (mut generations, _device, _queue, _shared) = ready_scene_generation();
+        let attempt = generations.begin_activation().unwrap();
+        let mut presented = FrameProgress::new(1, attempt.key().resources.0);
+        presented.mark(FrameMilestone::Prepared).unwrap();
+        presented.mark(FrameMilestone::Encoded).unwrap();
+        presented.mark(FrameMilestone::Submitted).unwrap();
+        presented
+            .finish(FrameDisposition::SurfacePresentCalled)
+            .unwrap();
+        generations.finish_candidate_activation(attempt, presented, &GpuErrorMailbox::new());
+
+        let active = generations.active.as_ref().unwrap();
+        let physical_extent = active.gpu.logical_viewport_points.map(|logical| {
+            super::host::physical_dimension(f64::from(logical), active.backing_scale)
+        });
+        assert!(generations.active_present_compatible(
+            active.version.surface,
+            physical_extent,
+            active.backing_scale,
+        ));
+        assert!(!generations.active_present_compatible(
+            active.version.surface,
+            physical_extent,
+            active.backing_scale + 1.0,
+        ));
     }
 
     #[test]
@@ -2531,6 +2841,53 @@ mod tests {
     }
 
     #[test]
+    fn stale_frame_projection_is_regenerated_once_against_newest_semantic_base() {
+        use crate::presentation::companion_scene::input::CompanionPresentationOptions;
+        use crate::presentation::companion_scene::runtime::{
+            CompanionSceneRuntimeState, RuntimeDisposition,
+        };
+        use crate::presentation::companion_scene::{CompanionDayPhase, CompanionProjectionClock};
+
+        let initial =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(0));
+        let runtime = CompanionSceneRuntimeState::with_active(initial).unwrap();
+        let mut generations = RetainedSceneGenerationState::new(runtime);
+        let before = generations.runtime.active_version().unwrap();
+        let clock = CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 1_033);
+        let stale = generations
+            .project_frame(clock, CompanionPresentationOptions::STANDARD)
+            .unwrap();
+
+        let mut newest = (**generations.runtime.snapshot()).clone();
+        newest.content.day_phase = match newest.content.day_phase {
+            CompanionDayPhase::Day => CompanionDayPhase::Dusk,
+            _ => CompanionDayPhase::Day,
+        };
+        let mut semantic = generations
+            .reconcile_snapshot(std::sync::Arc::new(newest), false)
+            .unwrap();
+        assert!(semantic.take_start_worker().is_none());
+        let semantic_version = generations.runtime.active_version().unwrap();
+        assert_eq!(semantic_version.generation, before.generation);
+        assert_ne!(semantic_version.applied.semantic, before.applied.semantic);
+
+        let (mut frame, regenerated) = generations.reconcile_frame_projection(stale).unwrap();
+        assert!(regenerated);
+        assert!(frame.take_start_worker().is_none());
+        assert!(matches!(
+            frame.disposition(),
+            RuntimeDisposition::SnapshotCommitted(_) | RuntimeDisposition::Unchanged
+        ));
+        let after = generations.runtime.active_version().unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.applied.semantic, semantic_version.applied.semantic);
+        assert_eq!(
+            generations.runtime.snapshot().frame.elapsed_ms,
+            clock.elapsed_ms
+        );
+    }
+
+    #[test]
     fn hidden_reveal_retries_external_to_logical_before_committing_latest() {
         use crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState;
 
@@ -2575,6 +2932,52 @@ mod tests {
         assert_eq!(revealed.content_delta().to, revealed.version().applied);
         assert_eq!(revealed.frame_delta().from, logical_middle.applied);
         assert_eq!(revealed.frame_delta().to, revealed.version().applied);
+    }
+
+    #[test]
+    fn hidden_reduce_motion_change_reveals_one_settled_current_time_frame() {
+        use crate::presentation::companion_scene::input::CompanionPresentationOptions;
+        use crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState;
+        use crate::presentation::companion_scene::CompanionProjectionClock;
+
+        let initial =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(0));
+        let mut runtime =
+            CompanionSceneRuntimeState::with_active(std::sync::Arc::clone(&initial)).unwrap();
+        let semantic = runtime.active_version().unwrap().applied.semantic;
+        let reveal_clock = CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 65_000);
+        let reduced = initial
+            .project_presentation_frame(
+                semantic,
+                reveal_clock,
+                CompanionPresentationOptions { reduce_motion: true },
+            )
+            .unwrap();
+        let mut hidden_latest = (*initial).clone();
+        hidden_latest.frame = reduced.frame.clone();
+
+        let mut hidden = runtime.set_hidden();
+        assert!(hidden.take_start_worker().is_none());
+        let mut coalesced = runtime
+            .coalesce_hidden_snapshot(std::sync::Arc::new(hidden_latest))
+            .unwrap();
+        assert!(coalesced.take_start_worker().is_none());
+        let prepared = runtime.prepare_reveal().unwrap();
+        let mut revealed = runtime.commit_reveal(prepared).unwrap();
+        assert!(revealed.take_start_worker().is_none());
+
+        let frame = &runtime.snapshot().frame;
+        assert_eq!(*frame, reduced.frame);
+        assert_eq!(frame.elapsed_ms, reveal_clock.elapsed_ms);
+        assert_eq!(frame.bob_offset_y_points, 0.0);
+        assert!(frame
+            .prop_instances
+            .iter()
+            .all(|prop| prop.transition.is_none()));
+        assert!(frame.tank_instances.iter().all(|tank| tank
+            .cells
+            .iter()
+            .all(|cell| cell.position_points == cell.target_position_points)));
     }
 
     fn ready_scene_generation() -> (
@@ -3058,7 +3461,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeLifetimeExecutor {
-        calls: Vec<(LifetimeAuditPhase, u64, i128)>,
+        calls: Vec<(LifetimeAuditPhase, LifetimeAuditEvent, i128)>,
         polls: u64,
         rss_calls: u64,
         fail_poll: bool,
@@ -3066,17 +3469,53 @@ mod tests {
     }
 
     impl LifetimeAuditExecutor for FakeLifetimeExecutor {
-        fn render_frame(
+        fn semantic_sample(
             &mut self,
             phase: LifetimeAuditPhase,
-            frame: u64,
+            sample: u64,
             now: time::OffsetDateTime,
-        ) -> std::result::Result<LifetimeFrameObservation, RetainedFailureCategory> {
-            self.calls.push((phase, frame, now.unix_timestamp_nanos()));
-            Ok(LifetimeFrameObservation {
-                semantic_hash: frame % 2,
-                gpu_frame_hash: frame % 3,
-                draw_calls: frame + 1,
+        ) -> std::result::Result<LifetimeSemanticObservation, RetainedFailureCategory> {
+            let elapsed_nanos = u64::try_from(
+                now.unix_timestamp_nanos()
+                    - time::macros::datetime!(2026-06-13 18:00 UTC).unix_timestamp_nanos(),
+            )
+            .unwrap();
+            self.calls.push((
+                phase,
+                LifetimeAuditEvent::Semantic { sample, elapsed_nanos },
+                now.unix_timestamp_nanos(),
+            ));
+            Ok(LifetimeSemanticObservation {
+                snapshot_projected: true,
+                semantic_reconciled: true,
+                gpu_bytes: 1_000,
+                ..LifetimeSemanticObservation::default()
+            })
+        }
+
+        fn presentation_tick(
+            &mut self,
+            phase: LifetimeAuditPhase,
+            tick: u64,
+            now: time::OffsetDateTime,
+        ) -> std::result::Result<LifetimePresentationObservation, RetainedFailureCategory> {
+            let elapsed_nanos = u64::try_from(
+                now.unix_timestamp_nanos()
+                    - time::macros::datetime!(2026-06-13 18:00 UTC).unix_timestamp_nanos(),
+            )
+            .unwrap();
+            self.calls.push((
+                phase,
+                LifetimeAuditEvent::Presentation { tick, elapsed_nanos },
+                now.unix_timestamp_nanos(),
+            ));
+            Ok(LifetimePresentationObservation {
+                semantic_reconciled: false,
+                frame_projected: true,
+                frame_reconciled: true,
+                encoded: true,
+                submitted: true,
+                draw_calls: tick + 1,
                 gpu_bytes: 1_000,
             })
         }
@@ -3098,41 +3537,146 @@ mod tests {
                 Ok(10_000)
             }
         }
+
+        fn work_counters(&self) -> RuntimeWorkCounters {
+            RuntimeWorkCounters {
+                prepare: self.calls.len() as u64,
+                encode: self
+                    .calls
+                    .iter()
+                    .filter(|(_, event, _)| {
+                        matches!(event, LifetimeAuditEvent::Presentation { .. })
+                    })
+                    .count() as u64,
+                submit: self
+                    .calls
+                    .iter()
+                    .filter(|(_, event, _)| {
+                        matches!(event, LifetimeAuditEvent::Presentation { .. })
+                    })
+                    .count() as u64,
+                ..RuntimeWorkCounters::default()
+            }
+        }
+
+        fn persistent_resource_creations(&self) -> u64 {
+            8
+        }
+
+        fn static_upload_bytes(&self) -> u64 {
+            1_024
+        }
+
+        fn offscreen_cache_events(&self) -> (u64, u64) {
+            (1, 1)
+        }
+
+        fn storage_capacity_signature(&self) -> u64 {
+            7
+        }
+    }
+
+    #[test]
+    fn dual_cadence_scheduler_orders_semantic_first_on_ties() {
+        let events = dual_cadence_events(7, 8, 7_000);
+        assert_eq!(events.len(), 15);
+        assert_eq!(
+            events[0],
+            LifetimeAuditEvent::Semantic { sample: 0, elapsed_nanos: 0 }
+        );
+        assert_eq!(
+            events[1],
+            LifetimeAuditEvent::Presentation { tick: 0, elapsed_nanos: 0 }
+        );
+        assert_eq!(
+            events.last(),
+            Some(&LifetimeAuditEvent::Presentation { tick: 7, elapsed_nanos: 6_125 })
+        );
+        assert!(events
+            .windows(2)
+            .all(|pair| pair[0].elapsed_nanos() <= pair[1].elapsed_nanos()));
+    }
+
+    #[test]
+    fn production_dual_cadence_schedule_has_exact_counts_without_drift() {
+        let events = dual_cadence_events(4_500, 33_750, 1_125_000_000_000);
+        assert_eq!(events.len(), 38_250);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LifetimeAuditEvent::Semantic { .. }))
+                .count(),
+            4_500
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LifetimeAuditEvent::Presentation { .. }))
+                .count(),
+            33_750
+        );
+        assert_eq!(
+            events.last(),
+            Some(&LifetimeAuditEvent::Presentation {
+                tick: 33_749,
+                elapsed_nanos: 1_124_966_666_666,
+            })
+        );
+        for semantic in 0_u64..4_500 {
+            let elapsed = semantic * 250_000_000;
+            let position = events
+                .iter()
+                .position(|event| {
+                    *event
+                        == LifetimeAuditEvent::Semantic { sample: semantic, elapsed_nanos: elapsed }
+                })
+                .unwrap();
+            if semantic.is_multiple_of(2) {
+                assert!(matches!(
+                    events.get(position + 1),
+                    Some(LifetimeAuditEvent::Presentation { elapsed_nanos, .. }) if *elapsed_nanos == elapsed
+                ));
+            }
+        }
     }
 
     #[test]
     fn lifetime_schedule_repeats_identical_warmup_and_measured_virtual_clocks() {
         let mut executor = FakeLifetimeExecutor::default();
-        let audit = run_lifetime_schedule(&mut executor, 4).unwrap();
-        assert_eq!(executor.calls.len(), 8);
-        let warmup = &executor.calls[..4];
-        let measured = &executor.calls[4..];
+        let audit = run_lifetime_schedule(&mut executor, 4, 30, 1_000).unwrap();
+        assert_eq!(executor.calls.len(), 68);
+        let warmup = &executor.calls[..34];
+        let measured = &executor.calls[34..];
         for (warm, measured) in warmup.iter().zip(measured) {
             assert_eq!(warm.1, measured.1);
             assert_eq!(warm.2, measured.2);
         }
-        assert_eq!(audit.frames, 4);
-        assert_eq!(audit.warmup_frames, 4);
-        assert_eq!(audit.prepared_frames, 4);
-        assert_eq!(audit.encoded_frames, 4);
-        assert!(audit.semantic_frame_changes > 0);
-        assert!(audit.gpu_frame_hash_changes > 0);
+        assert_eq!(audit.semantic_samples, 4);
+        assert_eq!(audit.warmup_semantic_samples, 4);
+        assert_eq!(audit.presentation_ticks, 30);
+        assert_eq!(audit.warmup_presentation_ticks, 30);
+        assert_eq!(audit.snapshot_projections, 4);
+        assert_eq!(audit.semantic_reconciles, 4);
+        assert_eq!(audit.frame_projections, 30);
+        assert_eq!(audit.frame_reconciles, 30);
+        assert_eq!(audit.encoded_ticks, 30);
+        assert_eq!(audit.submitted_ticks, 30);
         assert!(audit.draw_calls > 0);
         assert_eq!(audit.virtual_elapsed_ms, 1_000);
-        assert_eq!(audit.poll_count, 10);
-        assert_eq!(executor.polls, 10);
+        assert_eq!(audit.poll_count, 62);
+        assert_eq!(executor.polls, 62);
     }
 
     #[test]
     fn lifetime_schedule_fails_closed_on_poll_or_rss_errors() {
         let mut poll_failure = FakeLifetimeExecutor { fail_poll: true, ..Default::default() };
         assert_eq!(
-            run_lifetime_schedule(&mut poll_failure, 1),
+            run_lifetime_schedule(&mut poll_failure, 1, 1, 250),
             Err(RetainedFailureCategory::LifetimeGpuPoll)
         );
         let mut rss_failure = FakeLifetimeExecutor { fail_rss: true, ..Default::default() };
         assert_eq!(
-            run_lifetime_schedule(&mut rss_failure, 1),
+            run_lifetime_schedule(&mut rss_failure, 1, 1, 250),
             Err(RetainedFailureCategory::LifetimeRssUnavailable)
         );
     }

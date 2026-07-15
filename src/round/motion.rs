@@ -138,6 +138,30 @@ pub fn project_round_companion_motion_with_options(
     )
 }
 
+/// Projects the authored neutral pose through the same envelope, bias, scale,
+/// and clamping rules as moving presentation. Used by Reduce Motion so the
+/// accessibility path cannot drift from production geometry.
+pub(crate) fn project_round_companion_motion_neutral(
+    input: CompanionMotionInput,
+    viewport: RoundCompanionMotionViewport,
+    motion: &CompanionMotion,
+    depth_override: Option<f32>,
+) -> RoundCompanionMotionProjection {
+    let mut projection = project_round_companion_motion_from_offsets(
+        input,
+        0,
+        viewport,
+        motion,
+        0.0,
+        0.0,
+        normalized_depth(depth_override.unwrap_or(0.0)),
+        input.resolved_wander_facing,
+        input.resolved_wander_offset_x,
+    );
+    projection.bob_offset_y_cells = 0.0;
+    projection
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn project_round_companion_motion_from_offsets(
     input: CompanionMotionInput,

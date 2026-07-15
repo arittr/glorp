@@ -100,6 +100,7 @@ pub(super) enum SceneBuildReply {
 pub(super) struct CpuSceneBuildCandidate {
     pub(super) identity: RequestIdentity,
     pub(super) accepted: AcceptedGenerationCandidate,
+    pub(super) backing_scale: f64,
     pub(super) cpu: CpuSceneCandidate,
     pub(super) atlas: PreparedSceneAtlas,
     pub(super) timing: RasterWorkerTiming,
@@ -730,6 +731,7 @@ fn compile_scene_job(
     SceneBuildReply::SceneCompleted(Box::new(CpuSceneBuildCandidate {
         identity,
         accepted,
+        backing_scale: job.backing_scale,
         cpu,
         atlas,
         timing: RasterWorkerTiming::since(started_at, *attempts),
@@ -836,6 +838,7 @@ mod tests {
     fn assert_send<T: Send>() {}
 
     static WORKER_TEST_LOCK: Mutex<()> = Mutex::new(());
+    const CRYSTAL_MANIFEST_GLYPH_COUNT: u32 = 340;
 
     fn worker_test_guard() -> MutexGuard<'static, ()> {
         WORKER_TEST_LOCK
@@ -918,7 +921,10 @@ mod tests {
         assert_send::<RasterReply>();
 
         let manifest = crystal_manifest();
-        assert_eq!(manifest.glyphs().len(), 242);
+        assert_eq!(
+            manifest.glyphs().len(),
+            CRYSTAL_MANIFEST_GLYPH_COUNT as usize
+        );
     }
 
     #[test]
@@ -1049,7 +1055,7 @@ mod tests {
             panic!("worker did not complete atlas");
         };
         assert!(timing.active_compile > Duration::ZERO);
-        assert_eq!(timing.raster_calls, 242);
+        assert_eq!(timing.raster_calls, CRYSTAL_MANIFEST_GLYPH_COUNT);
         assert_eq!(timing.main_thread_raster_calls, 0);
     }
 
@@ -1067,11 +1073,16 @@ mod tests {
             panic!("second job was not rejected as busy");
         };
         assert_eq!(job.job_id, 2);
-        assert_eq!(job.manifest.glyphs().len(), 242);
+        assert_eq!(
+            job.manifest.glyphs().len(),
+            CRYSTAL_MANIFEST_GLYPH_COUNT as usize
+        );
         match wait_for_reply(&mut worker) {
-            RasterReply::Cancelled { job_id: 1, timing } => assert!(timing.raster_calls <= 242),
+            RasterReply::Cancelled { job_id: 1, timing } => {
+                assert!(timing.raster_calls <= CRYSTAL_MANIFEST_GLYPH_COUNT)
+            }
             RasterReply::Completed { job_id: 1, timing, .. } => {
-                assert_eq!(timing.raster_calls, 242)
+                assert_eq!(timing.raster_calls, CRYSTAL_MANIFEST_GLYPH_COUNT)
             }
             _ => panic!("superseded in-flight job had an unexpected terminal reply"),
         }
@@ -1096,11 +1107,11 @@ mod tests {
             .expect("newer epoch cancels job");
         match wait_for_reply(&mut worker) {
             RasterReply::Cancelled { job_id: 1, timing } => {
-                assert!(timing.raster_calls <= 242);
+                assert!(timing.raster_calls <= CRYSTAL_MANIFEST_GLYPH_COUNT);
                 assert_eq!(timing.main_thread_raster_calls, 0);
             }
             RasterReply::Completed { job_id: 1, timing, .. } => {
-                assert_eq!(timing.raster_calls, 242);
+                assert_eq!(timing.raster_calls, CRYSTAL_MANIFEST_GLYPH_COUNT);
                 assert_eq!(timing.main_thread_raster_calls, 0);
             }
             _ => panic!("cancel race had an unexpected terminal reply"),

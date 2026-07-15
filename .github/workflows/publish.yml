@@ -107,25 +107,108 @@ jobs:
       - name: build companion app bundle
         if: startsWith(matrix.target, 'darwin-')
         run: node scripts/build-macos-companion-app.mjs --binary "target/${{ matrix.rust_target }}/release/glorp"
-      - name: staged retained capability smoke (Apple Silicon)
-        # Reads the shipped capability matrix from the freshly built binary's
-        # bounded metadata command. Auto now resolves to Retained (the cutover
-        # constant is on), and explicit Retained still proves the shipped
-        # capability.
+      - name: staged direct route proof (Apple Silicon)
+        # Run the exact executable staged inside Glorp.app on the native logged-in
+        # host. Auto remains on the legacy scene route while the Gate D rollback
+        # is active; explicit Live proves and captures the direct route before
+        # upload without claiming the failed hold passed.
         if: matrix.target == 'darwin-arm64'
         shell: bash
+        timeout-minutes: 2
         run: |
-          bin="target/${{ matrix.rust_target }}/release/glorp"
-          auto="$("$bin" companion-app --print-capabilities)"
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          console_user="$(stat -f '%Su' /dev/console)"
+          test -n "$console_user"
+          test "$console_user" != "root"
+          test "$console_user" != "loginwindow"
+          test "$(id -un)" = "$console_user"
+
+          app_bin="target/macos/Glorp.app/Contents/MacOS/glorp"
+          test -x "$app_bin"
+          auto="$("$app_bin" companion-app --print-capabilities)"
           echo "$auto"
           echo "$auto" | grep -qx "requested-renderer=auto"
           echo "$auto" | grep -qx "retained-compiled=true"
           echo "$auto" | grep -qx "auto-retained-on-apple-silicon=true"
           echo "$auto" | grep -qx "effective-renderer=retained"
-          retained="$("$bin" companion-app --renderer retained --print-capabilities)"
-          echo "$retained"
-          echo "$retained" | grep -qx "requested-renderer=retained"
-          echo "$retained" | grep -qx "effective-renderer=retained"
+          echo "$auto" | grep -qx "effective-scene-route=legacy"
+
+          direct="$("$app_bin" companion-app --renderer retained --retained-scene-runtime live --print-capabilities)"
+          echo "$direct"
+          echo "$direct" | grep -qx "requested-renderer=retained"
+          echo "$direct" | grep -qx "effective-renderer=retained"
+          echo "$direct" | grep -qx "effective-scene-route=direct"
+
+          proof_root="target/package-route-proof"
+          capture_dir="$proof_root/direct"
+          capture_path="$capture_dir/scene.png"
+          config_dir="$proof_root/config"
+          rm -rf "$proof_root"
+          mkdir -p "$config_dir"
+          GLORP_CONFIG_DIR="$config_dir" "$app_bin" init \
+            --seed package-route-proof-v1 --name PackageProof --yes
+          GLORP_CONFIG_DIR="$config_dir" "$app_bin" companion-app \
+            --renderer retained \
+            --retained-scene-runtime live \
+            --review-size 360x360 \
+            --review-duration-ms 2000 \
+            --review-capture-dir "$capture_dir"
+          test -f "$capture_path"
+          for artifact in scene-manifest.json scene-snapshot.json scene-version.json scene-metrics.json scene-artifacts.json; do
+            test -s "$capture_dir/$artifact"
+          done
+          grep -q '"route": "direct-retained-scene"' "$capture_dir/scene-manifest.json"
+          grep -q '"effective_renderer": "retained"' "$capture_dir/scene-manifest.json"
+          grep -q '"nonblank_validation": "valid"' "$capture_dir/scene-manifest.json"
+
+          CAPTURE_PATH="$capture_path" swift - <<'SWIFT'
+          import CoreGraphics
+          import Foundation
+          import ImageIO
+
+          let path = ProcessInfo.processInfo.environment["CAPTURE_PATH"]!
+          let url = URL(fileURLWithPath: path) as CFURL
+          guard let source = CGImageSourceCreateWithURL(url, nil),
+                let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+                image.width > 0, image.height > 0 else {
+              fputs("invalid direct capture at \(path)\n", stderr)
+              exit(1)
+          }
+          var rgba = [UInt8](repeating: 0, count: image.width * image.height * 4)
+          let drew = rgba.withUnsafeMutableBytes { bytes in
+              CGContext(
+                  data: bytes.baseAddress,
+                  width: image.width,
+                  height: image.height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: image.width * 4,
+                  space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              )
+          }
+          guard let context = drew else {
+              fputs("cannot decode direct capture at \(path)\n", stderr)
+              exit(1)
+          }
+          context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+          var colors = Set<UInt32>()
+          var visibleNonblack = false
+          for index in stride(from: 0, to: rgba.count, by: 4) {
+              let pixel = (UInt32(rgba[index]) << 24)
+                  | (UInt32(rgba[index + 1]) << 16)
+                  | (UInt32(rgba[index + 2]) << 8)
+                  | UInt32(rgba[index + 3])
+              colors.insert(pixel)
+              visibleNonblack = visibleNonblack ||
+                  (rgba[index + 3] != 0 && (rgba[index] != 0 || rgba[index + 1] != 0 || rgba[index + 2] != 0))
+          }
+          guard visibleNonblack, colors.count > 1 else {
+              fputs("blank direct capture at exact path \(path)\n", stderr)
+              exit(1)
+          }
+          print("validated nonblank direct capture: \(path) (\(image.width)x\(image.height), \(colors.count) colors)")
+          SWIFT
       - name: staged smooth-only smoke (Intel)
         # The Intel artifact ships without the retained backend: Auto stays
         # Smooth even with the cutover constant on, and explicit Retained is

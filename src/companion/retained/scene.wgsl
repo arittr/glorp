@@ -1270,6 +1270,46 @@ fn fs_aperture_composite(input: FinalVertexOutput) -> @location(0) vec4<f32> {
 }
 
 @fragment
+fn fs_aperture_surface(input: FinalVertexOutput) -> @location(0) vec4<f32> {
+    let aperture = frame_buffer.analytics[0u];
+    let aperture_content = scene_content_buffer.analytics[0u];
+    if (!valid_analytic_role(0u, aperture, aperture_content)) {
+        return vec4<f32>(0.0);
+    }
+    let radius = aperture.payload[0].z;
+    let feather = aperture.payload[0].w;
+    let viewport_points = frame_buffer.globals.viewport_points;
+    let dimensions = textureDimensions(scene_sampled_texture);
+    if (radius <= 0.0 || feather < 0.0
+        || min(viewport_points.x, viewport_points.y) <= 0.0
+        || min(dimensions.x, dimensions.y) == 0u) {
+        return vec4<f32>(0.0);
+    }
+    let pixel = vec2<i32>(input.position.xy);
+    let sampled = textureLoad(scene_sampled_texture, pixel, 0);
+    let normalized_pixel = input.position.xy / vec2<f32>(dimensions);
+    let point_position = vec2<f32>(
+        normalized_pixel.x * viewport_points.x,
+        (1.0 - normalized_pixel.y) * viewport_points.y,
+    );
+    let distance = length(point_position - aperture.payload[0].xy);
+    let point_per_pixel = max(
+        viewport_points.x / f32(dimensions.x),
+        viewport_points.y / f32(dimensions.y),
+    );
+    let edge = max(feather, point_per_pixel);
+    let coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance);
+    let alpha = sampled.a * coverage;
+    if (alpha == 0.0) {
+        return vec4<f32>(0.0);
+    }
+    // The PostMultiplied surface expects straight linear RGB. Coverage affects
+    // alpha only after unpremultiplication, exactly matching the historical
+    // aperture-intermediate plus `fs_final` pair.
+    return vec4<f32>(sampled.rgb / sampled.a, alpha);
+}
+
+@fragment
 fn fs_final(input: FinalVertexOutput) -> @location(0) vec4<f32> {
     // Sampling the sRGB intermediate decodes its stored premultiplied RGB back
     // to linear before the PostMultiplied surface receives straight RGB.

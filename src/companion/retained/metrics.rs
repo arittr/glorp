@@ -206,7 +206,7 @@ pub(crate) struct RuntimeWorkCounters {
 }
 
 impl RuntimeWorkCounters {
-    fn saturating_sub(self, previous: Self) -> Self {
+    pub(crate) fn saturating_sub(self, previous: Self) -> Self {
         Self {
             prepare: self.prepare.saturating_sub(previous.prepare),
             worker_submissions: self
@@ -237,6 +237,31 @@ impl RuntimeWorkCounters {
             surface_acquires: self.surface_acquires.saturating_add(other.surface_acquires),
             encode: self.encode.saturating_add(other.encode),
             submit: self.submit.saturating_add(other.submit),
+        }
+    }
+
+    pub(crate) fn normalized_per_second(self, ticks: u64, cadence_hz: u32) -> Self {
+        fn normalize(value: u64, ticks: u64, cadence_hz: u32) -> u64 {
+            if ticks == 0 {
+                return 0;
+            }
+            u64::try_from(
+                u128::from(value)
+                    .saturating_mul(u128::from(cadence_hz))
+                    .saturating_add(u128::from(ticks / 2))
+                    / u128::from(ticks),
+            )
+            .unwrap_or(u64::MAX)
+        }
+
+        Self {
+            prepare: normalize(self.prepare, ticks, cadence_hz),
+            worker_submissions: normalize(self.worker_submissions, ticks, cadence_hz),
+            gpu_materializations: normalize(self.gpu_materializations, ticks, cadence_hz),
+            queue_writes: normalize(self.queue_writes, ticks, cadence_hz),
+            surface_acquires: normalize(self.surface_acquires, ticks, cadence_hz),
+            encode: normalize(self.encode, ticks, cadence_hz),
+            submit: normalize(self.submit, ticks, cadence_hz),
         }
     }
 }
@@ -306,16 +331,36 @@ pub(crate) enum GpuAllocationKind {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub(crate) struct LifetimeAuditSnapshot {
-    pub frames: u64,
-    pub warmup_frames: u64,
-    pub cadence_ms: u64,
+    pub semantic_samples: u64,
+    pub warmup_semantic_samples: u64,
+    pub presentation_ticks: u64,
+    pub warmup_presentation_ticks: u64,
+    pub semantic_cadence_ms: u64,
+    pub presentation_cadence_hz: u32,
     pub virtual_elapsed_ms: u64,
-    pub prepared_frames: u64,
-    pub encoded_frames: u64,
-    pub semantic_frame_changes: u64,
-    pub gpu_frame_hash_changes: u64,
+    pub snapshot_projections: u64,
+    pub semantic_reconciles: u64,
+    pub frame_projections: u64,
+    pub frame_reconciles: u64,
+    pub encoded_ticks: u64,
+    pub submitted_ticks: u64,
     pub draw_calls: u64,
     pub poll_count: u64,
+    pub work_delta: RuntimeWorkCounters,
+    pub work_per_second: RuntimeWorkCounters,
+    pub capacity_growth_events: u64,
+    pub stale_mutations: u64,
+    pub stale_rejections: u64,
+    pub stale_regenerations: u64,
+    pub post_warmup_resource_creations: u64,
+    pub post_warmup_static_upload_bytes: u64,
+    pub direct_target_prewarmed: bool,
+    pub direct_target_reused: bool,
+    pub direct_readback_prewarmed: bool,
+    pub direct_readback_reused: bool,
+    pub terminal_direct_capture_attempted: u64,
+    pub terminal_direct_capture_succeeded: u64,
+    pub terminal_direct_capture_nonblank: u64,
     pub rss_warmup_bytes: u64,
     pub rss_warmup_peak_bytes: u64,
     pub rss_final_bytes: u64,
@@ -342,7 +387,7 @@ pub(crate) struct RuntimeFixtureIdentity {
     pub fixture_id: &'static str,
     pub seed: &'static str,
     pub update_source: &'static str,
-    pub cadence_ms: u64,
+    pub semantic_cadence_ms: u64,
     pub logical_width: f64,
     pub logical_height: f64,
     pub physical_width: u32,
@@ -355,12 +400,19 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub schema_version: u32,
     pub identity: RuntimeIdentity,
     pub fixture: RuntimeFixtureIdentity,
+    pub presentation_cadence_target_hz: u32,
+    pub semantic_cadence_target_hz: u32,
     pub sample_capacity: usize,
     pub visible_samples: usize,
     pub ui_tick_us: Percentiles,
+    pub projection_us: Percentiles,
+    pub reconcile_us: Percentiles,
     pub state_prepare_us: Percentiles,
     pub gpu_translate_us: Percentiles,
+    pub delta_write_us: Percentiles,
     pub encode_us: Percentiles,
+    pub submit_us: Percentiles,
+    pub capture_us: Percentiles,
     pub queue_wait_us: Percentiles,
     pub worker_active_compile_us: Percentiles,
     pub raster_request_wall_us: Percentiles,
@@ -377,6 +429,21 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub worker_failures: u64,
     pub gpu_materializations: u64,
     pub generation_count: u64,
+    pub generation_requests: u64,
+    pub generation_coalesces: u64,
+    pub generation_completions: u64,
+    pub generation_failures: u64,
+    pub generation_retries: u64,
+    pub generation_stale_drops: u64,
+    pub generation_activations: u64,
+    pub snapshot_projections: u64,
+    pub semantic_reconciles: u64,
+    pub frame_reconciles: u64,
+    pub unchanged_ticks: u64,
+    pub content_dirty_ranges: u64,
+    pub content_dirty_bytes: u64,
+    pub frame_dirty_ranges: u64,
+    pub frame_dirty_bytes: u64,
     pub static_upload_bytes: u64,
     pub dynamic_upload_bytes: u64,
     pub queue_writes: u64,
@@ -385,14 +452,27 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
     pub persistent_gpu_objects_destroyed: u64,
     pub hidden_ticks: u64,
     pub prepare_count: u64,
+    pub present_attempts: u64,
     pub surface_acquires: u64,
     pub encode_count: u64,
     pub submit_count: u64,
+    pub successful_presents: u64,
     pub skipped_frames: u64,
+    pub skipped_resource_preparation: u64,
+    pub skipped_outdated: u64,
+    pub skipped_timeout: u64,
+    pub skipped_occluded: u64,
+    pub longest_visible_no_present_ms: u64,
+    pub resize_invalidations: u64,
+    pub scale_invalidations: u64,
+    pub atlas_backing_scale: Option<f64>,
     pub fallback_count: u64,
+    pub fallback_pending_transitions: u64,
+    pub fallback_painted_transitions: u64,
     pub capture_attempted: u64,
     pub capture_succeeded: u64,
     pub capture_failed: u64,
+    pub capture_nonblank_validated: u64,
     pub node_high_water: u32,
     pub primitive_high_water: u32,
     pub blended_draw_high_water: u32,
@@ -409,9 +489,14 @@ pub(crate) struct CompanionRuntimeMetricsSnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct CompanionRuntimeMetrics {
     ui_tick_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    projection_us: Box<FixedSamples<METRIC_SAMPLE_CAPACITY>>,
+    reconcile_us: Box<FixedSamples<METRIC_SAMPLE_CAPACITY>>,
     state_prepare_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     gpu_translate_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    delta_write_us: Box<FixedSamples<METRIC_SAMPLE_CAPACITY>>,
     encode_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
+    submit_us: Box<FixedSamples<METRIC_SAMPLE_CAPACITY>>,
+    capture_us: Box<FixedSamples<METRIC_SAMPLE_CAPACITY>>,
     queue_wait_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     worker_active_compile_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
     raster_request_wall_us: FixedSamples<METRIC_SAMPLE_CAPACITY>,
@@ -428,6 +513,16 @@ pub(crate) struct CompanionRuntimeMetrics {
     worker_failures: u64,
     gpu_materializations: u64,
     generation_count: u64,
+    generation_retries: u64,
+    generation_activations: u64,
+    snapshot_projections: u64,
+    semantic_reconciles: u64,
+    frame_reconciles: u64,
+    unchanged_ticks: u64,
+    content_dirty_ranges: u64,
+    content_dirty_bytes: u64,
+    frame_dirty_ranges: u64,
+    frame_dirty_bytes: u64,
     static_upload_bytes: u64,
     dynamic_upload_bytes: u64,
     queue_writes: u64,
@@ -436,14 +531,27 @@ pub(crate) struct CompanionRuntimeMetrics {
     persistent_gpu_objects_destroyed: u64,
     hidden_ticks: u64,
     prepare_count: u64,
+    present_attempts: u64,
     surface_acquires: u64,
     encode_count: u64,
     submit_count: u64,
+    successful_presents: u64,
     skipped_frames: u64,
+    skipped_resource_preparation: u64,
+    skipped_outdated: u64,
+    skipped_timeout: u64,
+    skipped_occluded: u64,
+    longest_visible_no_present_ms: u64,
+    resize_invalidations: u64,
+    scale_invalidations: u64,
+    atlas_backing_scale: Option<f64>,
     fallback_count: u64,
+    fallback_pending_transitions: u64,
+    fallback_painted_transitions: u64,
     capture_attempted: u64,
     capture_succeeded: u64,
     capture_failed: u64,
+    capture_nonblank_validated: u64,
     node_high_water: u32,
     primitive_high_water: u32,
     blended_draw_high_water: u32,
@@ -470,9 +578,14 @@ impl Default for CompanionRuntimeMetrics {
     fn default() -> Self {
         Self {
             ui_tick_us: FixedSamples::default(),
+            projection_us: Box::default(),
+            reconcile_us: Box::default(),
             state_prepare_us: FixedSamples::default(),
             gpu_translate_us: FixedSamples::default(),
+            delta_write_us: Box::default(),
             encode_us: FixedSamples::default(),
+            submit_us: Box::default(),
+            capture_us: Box::default(),
             queue_wait_us: FixedSamples::default(),
             worker_active_compile_us: FixedSamples::default(),
             raster_request_wall_us: FixedSamples::default(),
@@ -489,6 +602,16 @@ impl Default for CompanionRuntimeMetrics {
             worker_failures: 0,
             gpu_materializations: 0,
             generation_count: 0,
+            generation_retries: 0,
+            generation_activations: 0,
+            snapshot_projections: 0,
+            semantic_reconciles: 0,
+            frame_reconciles: 0,
+            unchanged_ticks: 0,
+            content_dirty_ranges: 0,
+            content_dirty_bytes: 0,
+            frame_dirty_ranges: 0,
+            frame_dirty_bytes: 0,
             static_upload_bytes: 0,
             dynamic_upload_bytes: 0,
             queue_writes: 0,
@@ -497,14 +620,27 @@ impl Default for CompanionRuntimeMetrics {
             persistent_gpu_objects_destroyed: 0,
             hidden_ticks: 0,
             prepare_count: 0,
+            present_attempts: 0,
             surface_acquires: 0,
             encode_count: 0,
             submit_count: 0,
+            successful_presents: 0,
             skipped_frames: 0,
+            skipped_resource_preparation: 0,
+            skipped_outdated: 0,
+            skipped_timeout: 0,
+            skipped_occluded: 0,
+            longest_visible_no_present_ms: 0,
+            resize_invalidations: 0,
+            scale_invalidations: 0,
+            atlas_backing_scale: None,
             fallback_count: 0,
+            fallback_pending_transitions: 0,
+            fallback_painted_transitions: 0,
             capture_attempted: 0,
             capture_succeeded: 0,
             capture_failed: 0,
+            capture_nonblank_validated: 0,
             node_high_water: 0,
             primitive_high_water: 0,
             blended_draw_high_water: 0,
@@ -553,14 +689,34 @@ impl CompanionRuntimeMetrics {
                 self.persistent_gpu_objects_created = 0;
                 self.persistent_gpu_objects_destroyed = 0;
                 self.prepare_count = 0;
+                self.present_attempts = 0;
+                self.snapshot_projections = 0;
+                self.semantic_reconciles = 0;
+                self.frame_reconciles = 0;
+                self.unchanged_ticks = 0;
+                self.content_dirty_ranges = 0;
+                self.content_dirty_bytes = 0;
+                self.frame_dirty_ranges = 0;
+                self.frame_dirty_bytes = 0;
                 self.surface_acquires = 0;
                 self.encode_count = 0;
                 self.submit_count = 0;
+                self.successful_presents = 0;
                 self.skipped_frames = 0;
+                self.skipped_resource_preparation = 0;
+                self.skipped_outdated = 0;
+                self.skipped_timeout = 0;
+                self.skipped_occluded = 0;
+                self.longest_visible_no_present_ms = 0;
+                self.resize_invalidations = 0;
+                self.scale_invalidations = 0;
                 self.fallback_count = 0;
+                self.fallback_pending_transitions = 0;
+                self.fallback_painted_transitions = 0;
                 self.capture_attempted = 0;
                 self.capture_succeeded = 0;
                 self.capture_failed = 0;
+                self.capture_nonblank_validated = 0;
                 self.reset_steady_state_after_warmup = false;
             }
             self.sample_current_tick = true;
@@ -570,6 +726,18 @@ impl CompanionRuntimeMetrics {
     pub(crate) fn record_ui_tick_us(&mut self, value: u32) {
         if self.sample_current_tick {
             self.ui_tick_us.push(value);
+        }
+    }
+
+    pub(crate) fn record_projection_us(&mut self, value: u32) {
+        if self.sample_current_tick {
+            self.projection_us.push(value);
+        }
+    }
+
+    pub(crate) fn record_reconcile_us(&mut self, value: u32) {
+        if self.sample_current_tick {
+            self.reconcile_us.push(value);
         }
     }
 
@@ -586,11 +754,27 @@ impl CompanionRuntimeMetrics {
         }
     }
 
+    pub(crate) fn record_delta_write_us(&mut self, value: u32) {
+        if self.sample_current_tick {
+            self.delta_write_us.push(value);
+        }
+    }
+
     pub(crate) fn record_encode_us(&mut self, value: u32) {
         if self.sample_current_tick {
             self.encode_us.push(value);
             increment(&mut self.encode_count, 1);
         }
+    }
+
+    pub(crate) fn record_submit_us(&mut self, value: u32) {
+        if self.sample_current_tick {
+            self.submit_us.push(value);
+        }
+    }
+
+    pub(crate) fn record_capture_us(&mut self, value: u32) {
+        self.capture_us.push(value);
     }
 
     pub(crate) fn record_queue_wait_us(&mut self, value: u32) {
@@ -655,6 +839,52 @@ impl CompanionRuntimeMetrics {
         increment(&mut self.generation_count, 1);
     }
 
+    pub(crate) fn record_generation_retry(&mut self) {
+        increment(&mut self.generation_retries, 1);
+    }
+
+    pub(crate) fn record_generation_activation(&mut self, atlas_backing_scale: f64) {
+        increment(&mut self.generation_activations, 1);
+        self.atlas_backing_scale = Some(atlas_backing_scale);
+    }
+
+    pub(crate) fn record_resize_invalidation(&mut self) {
+        increment(&mut self.resize_invalidations, 1);
+    }
+
+    pub(crate) fn record_scale_invalidation(&mut self) {
+        increment(&mut self.scale_invalidations, 1);
+    }
+
+    pub(crate) fn record_snapshot_projection(&mut self) {
+        increment(&mut self.snapshot_projections, 1);
+    }
+
+    pub(crate) fn record_semantic_reconcile(&mut self) {
+        increment(&mut self.semantic_reconciles, 1);
+    }
+
+    pub(crate) fn record_frame_reconcile(&mut self) {
+        increment(&mut self.frame_reconciles, 1);
+    }
+
+    pub(crate) fn record_unchanged_tick(&mut self) {
+        increment(&mut self.unchanged_ticks, 1);
+    }
+
+    pub(crate) fn record_scene_dirty_upload(
+        &mut self,
+        content_ranges: u64,
+        content_bytes: u64,
+        frame_ranges: u64,
+        frame_bytes: u64,
+    ) {
+        increment(&mut self.content_dirty_ranges, content_ranges);
+        increment(&mut self.content_dirty_bytes, content_bytes);
+        increment(&mut self.frame_dirty_ranges, frame_ranges);
+        increment(&mut self.frame_dirty_bytes, frame_bytes);
+    }
+
     pub(crate) fn record_activation_render_owner_us(&mut self, value: u32) {
         self.activation_render_owner_us.push(value);
     }
@@ -702,20 +932,53 @@ impl CompanionRuntimeMetrics {
         }
     }
 
+    pub(crate) fn record_present_attempt(&mut self) {
+        if self.sample_current_tick {
+            increment(&mut self.present_attempts, 1);
+        }
+    }
+
     pub(crate) fn record_submit(&mut self) {
         if self.sample_current_tick {
             increment(&mut self.submit_count, 1);
         }
     }
 
-    pub(crate) fn record_skip(&mut self) {
+    pub(crate) fn record_skip(&mut self, reason: super::SkipReason) {
         if self.sample_current_tick {
             increment(&mut self.skipped_frames, 1);
+            match reason {
+                super::SkipReason::ResourcePreparation => {
+                    increment(&mut self.skipped_resource_preparation, 1);
+                }
+                super::SkipReason::Outdated => increment(&mut self.skipped_outdated, 1),
+                super::SkipReason::Timeout => increment(&mut self.skipped_timeout, 1),
+                super::SkipReason::Occluded => increment(&mut self.skipped_occluded, 1),
+            }
+        }
+    }
+
+    pub(crate) fn record_present(&mut self, visible_no_present: Duration) {
+        if self.sample_current_tick {
+            increment(&mut self.successful_presents, 1);
+            self.observe_visible_no_present(visible_no_present);
+        }
+    }
+
+    pub(crate) fn observe_visible_no_present(&mut self, interval: Duration) {
+        if self.sample_current_tick {
+            self.longest_visible_no_present_ms = self
+                .longest_visible_no_present_ms
+                .max(interval.as_millis().min(u128::from(u64::MAX)) as u64);
         }
     }
 
     pub(crate) fn record_fallback(&mut self) {
         increment(&mut self.fallback_count, 1);
+    }
+
+    pub(crate) fn record_fallback_pending(&mut self) {
+        increment(&mut self.fallback_pending_transitions, 1);
     }
 
     pub(crate) fn record_capture_attempt(&mut self) {
@@ -724,6 +987,10 @@ impl CompanionRuntimeMetrics {
 
     pub(crate) fn record_capture_success(&mut self) {
         increment(&mut self.capture_succeeded, 1);
+    }
+
+    pub(crate) fn record_capture_nonblank_validated(&mut self) {
+        increment(&mut self.capture_nonblank_validated, 1);
     }
 
     pub(crate) fn record_capture_failure(&mut self) {
@@ -836,8 +1103,30 @@ impl CompanionRuntimeMetrics {
         }
     }
 
+    pub(crate) const fn static_upload_bytes(&self) -> u64 {
+        self.static_upload_bytes
+    }
+
+    pub(crate) const fn persistent_gpu_objects_created(&self) -> u64 {
+        self.persistent_gpu_objects_created
+    }
+
     pub(crate) fn record_lifetime_audit(&mut self, audit: LifetimeAuditSnapshot) {
         self.lifetime_audit = Some(audit);
+    }
+
+    pub(crate) fn record_lifetime_terminal_capture(&mut self, succeeded: bool) {
+        let Some(audit) = self.lifetime_audit.as_mut() else {
+            return;
+        };
+        audit.terminal_direct_capture_attempted =
+            audit.terminal_direct_capture_attempted.saturating_add(1);
+        if succeeded {
+            audit.terminal_direct_capture_succeeded =
+                audit.terminal_direct_capture_succeeded.saturating_add(1);
+            audit.terminal_direct_capture_nonblank =
+                audit.terminal_direct_capture_nonblank.saturating_add(1);
+        }
     }
 
     pub(crate) fn snapshot(
@@ -847,15 +1136,22 @@ impl CompanionRuntimeMetrics {
         fixture: RuntimeFixtureIdentity,
     ) -> CompanionRuntimeMetricsSnapshot {
         CompanionRuntimeMetricsSnapshot {
-            schema_version: 6,
+            schema_version: 10,
             identity,
             fixture,
+            presentation_cadence_target_hz: 30,
+            semantic_cadence_target_hz: 4,
             sample_capacity: METRIC_SAMPLE_CAPACITY,
             visible_samples: self.ui_tick_us.len(),
             ui_tick_us: Percentiles::from_samples(&self.ui_tick_us),
+            projection_us: Percentiles::from_samples(&self.projection_us),
+            reconcile_us: Percentiles::from_samples(&self.reconcile_us),
             state_prepare_us: Percentiles::from_samples(&self.state_prepare_us),
             gpu_translate_us: Percentiles::from_samples(&self.gpu_translate_us),
+            delta_write_us: Percentiles::from_samples(&self.delta_write_us),
             encode_us: Percentiles::from_samples(&self.encode_us),
+            submit_us: Percentiles::from_samples(&self.submit_us),
+            capture_us: Percentiles::from_samples(&self.capture_us),
             queue_wait_us: Percentiles::from_samples(&self.queue_wait_us),
             worker_active_compile_us: Percentiles::from_samples(&self.worker_active_compile_us),
             raster_request_wall_us: Percentiles::from_samples(&self.raster_request_wall_us),
@@ -872,6 +1168,21 @@ impl CompanionRuntimeMetrics {
             worker_failures: self.worker_failures,
             gpu_materializations: self.gpu_materializations,
             generation_count: self.generation_count,
+            generation_requests: self.worker_submissions,
+            generation_coalesces: self.worker_coalesces,
+            generation_completions: self.worker_completions,
+            generation_failures: self.worker_failures,
+            generation_retries: self.generation_retries,
+            generation_stale_drops: self.worker_stale_rejections,
+            generation_activations: self.generation_activations,
+            snapshot_projections: self.snapshot_projections,
+            semantic_reconciles: self.semantic_reconciles,
+            frame_reconciles: self.frame_reconciles,
+            unchanged_ticks: self.unchanged_ticks,
+            content_dirty_ranges: self.content_dirty_ranges,
+            content_dirty_bytes: self.content_dirty_bytes,
+            frame_dirty_ranges: self.frame_dirty_ranges,
+            frame_dirty_bytes: self.frame_dirty_bytes,
             static_upload_bytes: self.static_upload_bytes,
             dynamic_upload_bytes: self.dynamic_upload_bytes,
             queue_writes: self.queue_writes,
@@ -880,14 +1191,27 @@ impl CompanionRuntimeMetrics {
             persistent_gpu_objects_destroyed: self.persistent_gpu_objects_destroyed,
             hidden_ticks: self.hidden_ticks,
             prepare_count: self.prepare_count,
+            present_attempts: self.present_attempts,
             surface_acquires: self.surface_acquires,
             encode_count: self.encode_count,
             submit_count: self.submit_count,
+            successful_presents: self.successful_presents,
             skipped_frames: self.skipped_frames,
+            skipped_resource_preparation: self.skipped_resource_preparation,
+            skipped_outdated: self.skipped_outdated,
+            skipped_timeout: self.skipped_timeout,
+            skipped_occluded: self.skipped_occluded,
+            longest_visible_no_present_ms: self.longest_visible_no_present_ms,
+            resize_invalidations: self.resize_invalidations,
+            scale_invalidations: self.scale_invalidations,
+            atlas_backing_scale: self.atlas_backing_scale,
             fallback_count: self.fallback_count,
+            fallback_pending_transitions: self.fallback_pending_transitions,
+            fallback_painted_transitions: self.fallback_painted_transitions,
             capture_attempted: self.capture_attempted,
             capture_succeeded: self.capture_succeeded,
             capture_failed: self.capture_failed,
+            capture_nonblank_validated: self.capture_nonblank_validated,
             node_high_water: self.node_high_water,
             primitive_high_water: self.primitive_high_water,
             blended_draw_high_water: self.blended_draw_high_water,
@@ -1021,9 +1345,14 @@ mod tests {
     fn snapshot_carries_epochs_counters_and_high_water_marks() {
         let mut metrics = CompanionRuntimeMetrics::default();
         metrics.record_ui_tick_us(1_500);
+        metrics.record_projection_us(250);
+        metrics.record_reconcile_us(275);
         metrics.record_state_prepare_us(900);
         metrics.record_gpu_translate_us(300);
+        metrics.record_delta_write_us(325);
         metrics.record_encode_us(800);
+        metrics.record_submit_us(125);
+        metrics.record_capture_us(5_000);
         metrics.record_worker_terminal(Duration::from_micros(12_345), 242, 0);
         metrics.record_raster_request_wall_us(250_000);
         metrics.record_generation_service_ui_us(3_999);
@@ -1036,6 +1365,27 @@ mod tests {
         metrics.record_worker_stale_rejection();
         metrics.record_worker_failure();
         metrics.record_generation_accepted();
+        metrics.record_generation_retry();
+        metrics.record_generation_activation(2.0);
+        metrics.record_snapshot_projection();
+        metrics.record_semantic_reconcile();
+        metrics.record_frame_reconcile();
+        metrics.record_unchanged_tick();
+        metrics.record_scene_dirty_upload(2, 320, 3, 480);
+        metrics.record_present_attempt();
+        metrics.record_surface_acquire();
+        metrics.record_submit();
+        metrics.record_draws(12);
+        metrics.record_skip(super::super::SkipReason::ResourcePreparation);
+        metrics.record_skip(super::super::SkipReason::Outdated);
+        metrics.record_skip(super::super::SkipReason::Timeout);
+        metrics.record_skip(super::super::SkipReason::Occluded);
+        metrics.observe_visible_no_present(Duration::from_millis(95));
+        metrics.record_present(Duration::from_millis(120));
+        metrics.record_resize_invalidation();
+        metrics.record_scale_invalidation();
+        metrics.record_fallback();
+        metrics.record_fallback_pending();
         metrics.record_persistent_gpu_create(3);
         metrics.observe_nodes(72);
         let snapshot = metrics.snapshot(
@@ -1045,7 +1395,7 @@ mod tests {
                 fixture_id: "test",
                 seed: "test",
                 update_source: "fixed",
-                cadence_ms: 250,
+                semantic_cadence_ms: 250,
                 logical_width: 360.0,
                 logical_height: 360.0,
                 physical_width: 720,
@@ -1053,11 +1403,19 @@ mod tests {
                 backing_scale: 2.0,
             },
         );
-        assert_eq!(snapshot.schema_version, 6);
+        assert_eq!(snapshot.schema_version, 10);
+        assert_eq!(snapshot.presentation_cadence_target_hz, 30);
+        assert_eq!(snapshot.semantic_cadence_target_hz, 4);
+        assert_eq!(snapshot.fixture.semantic_cadence_ms, 250);
         assert_eq!(snapshot.ui_tick_us.p95, Some(1_500));
+        assert_eq!(snapshot.projection_us.p95, Some(250));
+        assert_eq!(snapshot.reconcile_us.p95, Some(275));
         assert_eq!(snapshot.state_prepare_us.p95, Some(900));
         assert_eq!(snapshot.gpu_translate_us.p95, Some(300));
+        assert_eq!(snapshot.delta_write_us.p95, Some(325));
         assert_eq!(snapshot.encode_us.p99, Some(800));
+        assert_eq!(snapshot.submit_us.p99, Some(125));
+        assert_eq!(snapshot.capture_us.p99, Some(5_000));
         assert_eq!(snapshot.worker_active_compile_us.max, Some(12_345));
         assert_eq!(snapshot.raster_request_wall_us.max, Some(250_000));
         assert_eq!(snapshot.generation_service_ui_us.max, Some(4_000));
@@ -1072,11 +1430,106 @@ mod tests {
         assert_eq!(snapshot.worker_failures, 1);
         assert_eq!(snapshot.gpu_materializations, 1);
         assert_eq!(snapshot.generation_count, 1);
+        assert_eq!(snapshot.generation_requests, 1);
+        assert_eq!(snapshot.generation_coalesces, 1);
+        assert_eq!(snapshot.generation_completions, 1);
+        assert_eq!(snapshot.generation_failures, 1);
+        assert_eq!(snapshot.generation_retries, 1);
+        assert_eq!(snapshot.generation_stale_drops, 1);
+        assert_eq!(snapshot.generation_activations, 1);
+        assert_eq!(snapshot.atlas_backing_scale, Some(2.0));
+        assert_eq!(snapshot.snapshot_projections, 1);
+        assert_eq!(snapshot.semantic_reconciles, 1);
+        assert_eq!(snapshot.frame_reconciles, 1);
+        assert_eq!(snapshot.unchanged_ticks, 1);
+        assert_eq!(snapshot.content_dirty_ranges, 2);
+        assert_eq!(snapshot.content_dirty_bytes, 320);
+        assert_eq!(snapshot.frame_dirty_ranges, 3);
+        assert_eq!(snapshot.frame_dirty_bytes, 480);
+        assert_eq!(snapshot.present_attempts, 1);
+        assert_eq!(snapshot.surface_acquires, 1);
+        assert_eq!(snapshot.submit_count, 1);
+        assert_eq!(snapshot.draw_calls, 12);
+        assert_eq!(snapshot.successful_presents, 1);
+        assert_eq!(snapshot.skipped_frames, 4);
+        assert_eq!(snapshot.skipped_resource_preparation, 1);
+        assert_eq!(snapshot.skipped_outdated, 1);
+        assert_eq!(snapshot.skipped_timeout, 1);
+        assert_eq!(snapshot.skipped_occluded, 1);
+        assert_eq!(snapshot.longest_visible_no_present_ms, 120);
+        assert_eq!(snapshot.resize_invalidations, 1);
+        assert_eq!(snapshot.scale_invalidations, 1);
+        assert_eq!(snapshot.fallback_count, 1);
+        assert_eq!(snapshot.fallback_pending_transitions, 1);
         assert_eq!(snapshot.persistent_gpu_objects_created, 3);
         assert_eq!(snapshot.node_high_water, 72);
         assert_eq!(snapshot.identity.layout_generation, None);
         assert_eq!(snapshot.identity.semantic_revision, None);
         assert_eq!(snapshot.identity.frame_revision, None);
+    }
+
+    #[test]
+    fn lifetime_audit_serializes_explicit_dual_cadence_and_direct_evidence() {
+        let audit = LifetimeAuditSnapshot {
+            semantic_samples: 4_500,
+            warmup_semantic_samples: 4_500,
+            presentation_ticks: 33_750,
+            warmup_presentation_ticks: 33_750,
+            semantic_cadence_ms: 250,
+            presentation_cadence_hz: 30,
+            virtual_elapsed_ms: 1_125_000,
+            encoded_ticks: 33_750,
+            submitted_ticks: 33_750,
+            direct_target_prewarmed: true,
+            direct_target_reused: true,
+            direct_readback_prewarmed: true,
+            direct_readback_reused: true,
+            terminal_direct_capture_attempted: 1,
+            terminal_direct_capture_succeeded: 1,
+            terminal_direct_capture_nonblank: 1,
+            ..LifetimeAuditSnapshot::default()
+        };
+
+        let value = serde_json::to_value(audit).unwrap();
+        assert_eq!(value["semantic_samples"], 4_500);
+        assert_eq!(value["presentation_ticks"], 33_750);
+        assert_eq!(value["semantic_cadence_ms"], 250);
+        assert_eq!(value["presentation_cadence_hz"], 30);
+        assert_eq!(value["virtual_elapsed_ms"], 1_125_000);
+        assert_eq!(value["terminal_direct_capture_succeeded"], 1);
+        assert_eq!(value["terminal_direct_capture_nonblank"], 1);
+        assert!(value.get("frames").is_none());
+        assert!(value.get("prepared_frames").is_none());
+    }
+
+    #[test]
+    fn runtime_work_normalization_reports_per_second_without_float_drift() {
+        let work = RuntimeWorkCounters {
+            prepare: 33_750,
+            worker_submissions: 0,
+            gpu_materializations: 0,
+            queue_writes: 67_500,
+            surface_acquires: 0,
+            encode: 33_750,
+            submit: 33_750,
+        };
+
+        assert_eq!(
+            work.normalized_per_second(33_750, 30),
+            RuntimeWorkCounters {
+                prepare: 30,
+                worker_submissions: 0,
+                gpu_materializations: 0,
+                queue_writes: 60,
+                surface_acquires: 0,
+                encode: 30,
+                submit: 30,
+            }
+        );
+        assert_eq!(
+            work.normalized_per_second(0, 30),
+            RuntimeWorkCounters::default()
+        );
     }
 
     #[test]
@@ -1099,7 +1552,7 @@ mod tests {
                 fixture_id: "test",
                 seed: "test",
                 update_source: "fixed",
-                cadence_ms: 250,
+                semantic_cadence_ms: 250,
                 logical_width: 360.0,
                 logical_height: 360.0,
                 physical_width: 720,
@@ -1192,11 +1645,13 @@ mod tests {
         let mut metrics = CompanionRuntimeMetrics::default();
         metrics.record_capture_attempt();
         metrics.record_capture_success();
+        metrics.record_capture_nonblank_validated();
         metrics.record_capture_attempt();
         metrics.record_capture_failure();
         assert_eq!(metrics.capture_attempted, 2);
         assert_eq!(metrics.capture_succeeded, 1);
         assert_eq!(metrics.capture_failed, 1);
+        assert_eq!(metrics.capture_nonblank_validated, 1);
     }
 
     #[test]

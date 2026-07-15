@@ -701,6 +701,10 @@ pub fn collect_companion_glyph_repertoire(
     chars.extend(crate::tui::component::habitat_props::declared_prop_glyphs(
         identity.species(),
     ));
+    // The direct retained scene has a closed renderer-neutral authored repertoire.
+    // Include it in the shared atlas declaration so adding a direct-scene glyph
+    // cannot create a post-activation miss even when the legacy TUI never paints it.
+    chars.extend(crate::presentation::companion_scene::scene::AuthoredGlyph::declared_repertoire());
     chars.extend(
         crate::round::hud::COMPANION_HUD_GLYPH_REPERTOIRE
             .iter()

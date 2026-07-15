@@ -79,13 +79,14 @@ fn rollout_live_activates_then_presents_active_scene_versions() {
 }
 
 #[test]
-fn hidden_scene_path_only_coalesces_and_reveal_reconciles_once() {
+fn hidden_scene_path_only_marks_hidden_and_reveal_coalesces_once() {
     let hidden = source_between(
-        APP_SOURCE,
-        "\nfn coalesce_hidden_scene_snapshot(",
-        "\nfn reveal_scene_runtime(",
+        HOST_SOURCE,
+        "\n    pub(in crate::companion) fn hide_scene_runtime(",
+        "\n    pub(in crate::companion) fn reveal_scene_runtime(",
     );
-    assert!(hidden.contains("coalesce_hidden_scene_snapshot("));
+    assert_eq!(hidden.matches(".set_hidden() ").count(), 0);
+    assert_eq!(hidden.matches(".set_hidden();").count(), 1);
     for forbidden in [
         "prepare_snapshot(",
         "write_buffer",
@@ -101,11 +102,18 @@ fn hidden_scene_path_only_coalesces_and_reveal_reconciles_once() {
     }
 
     let reveal = source_between(
+        HOST_SOURCE,
+        "\n    pub(in crate::companion) fn reveal_scene_runtime(",
+        "\n    pub(in crate::companion) fn retry_scene_replacement(",
+    );
+    assert_eq!(reveal.matches(".coalesce_hidden_snapshot(").count(), 1);
+
+    let app_reveal = source_between(
         APP_SOURCE,
         "\nfn reveal_scene_runtime(",
         "\nfn prepare_scene_runtime_tick(",
     );
-    assert_eq!(reveal.matches("host.reveal_scene_runtime(").count(), 1);
+    assert_eq!(app_reveal.matches("host.reveal_scene_runtime(").count(), 1);
 }
 
 #[test]
@@ -127,15 +135,12 @@ fn live_surface_delta_route_uses_transactional_retained_delta_machinery() {
 }
 
 #[test]
-fn active_present_skips_a_stale_generation_during_surface_resize() {
+fn active_present_skips_a_stale_generation_before_surface_acquire() {
     let present = source_between(
         HOST_SOURCE,
         "\n    fn present_active_scene(",
         "\n    #[allow(dead_code)] // Reached through the dormant Task 12 entrypoint above.",
     );
-    let resize = present
-        .find("self.resize_if_needed(view)?;")
-        .expect("active present resizes the surface first");
     let extent_guard = present
         .find("generations.active_surface_extent_matches(")
         .expect("active present guards a resized surface from the stale generation");
@@ -143,9 +148,35 @@ fn active_present_skips_a_stale_generation_during_surface_resize() {
         .find("self.surface.get_current_texture()")
         .expect("active present acquires a surface texture");
 
-    assert!(resize < extent_guard);
     assert!(extent_guard < acquire);
-    assert!(present[extent_guard..acquire].contains("return Ok(ScenePresentOutcome::Skipped);"));
+    assert!(present[extent_guard..acquire]
+        .contains("return Ok(ScenePresentOutcome::Skipped(SkipReason::Outdated));"));
+
+    for (start, end, reconcile_call) in [
+        (
+            "\n    pub(in crate::companion) fn reconcile_scene_snapshot(",
+            "\n    pub(in crate::companion) fn reconcile_scene_frame(",
+            ".reconcile_snapshot(",
+        ),
+        (
+            "\n    pub(in crate::companion) fn reconcile_scene_frame(",
+            "\n    pub(in crate::companion) fn hide_scene_runtime(",
+            ".reconcile_frame_projection(",
+        ),
+    ] {
+        let reconcile = source_between(HOST_SOURCE, start, end);
+        let resize = reconcile
+            .find("let surface_change = self.host.resize_surface_if_needed(view)?;")
+            .expect("coordinator resize precedes scene reconciliation");
+        let rebind = reconcile
+            .find("activation.generations.rebind_surface(change.epoch)?")
+            .expect("surface change rebinds the scene runtime");
+        let reconcile_scene = reconcile
+            .find(reconcile_call)
+            .expect("surface rebind precedes the applicable scene reconciliation");
+        assert!(resize < rebind);
+        assert!(rebind < reconcile_scene);
+    }
 }
 
 #[test]
@@ -153,7 +184,7 @@ fn shadow_metrics_bind_the_pending_cpu_scene_version() {
     let metrics = source_between(
         HOST_SOURCE,
         "\n    pub(crate) fn runtime_metrics_snapshot(",
-        "\n}\nimpl std::ops::Deref for ActiveRetainedHost",
+        "\n}\n\nstruct DirectLifetimeAuditExecutor",
     );
     assert!(metrics.contains(".metrics_version()"));
     assert!(metrics.contains("semantic_revision: scene_version"));

@@ -1,11 +1,12 @@
 use super::{
     AmbientFrameSnapshot, AmbientSemanticSnapshot, AuthoredDepthSnapshot, CompanionDayPhase,
-    CompanionSceneProjectionError, CompanionSceneProjectionInput, CompanionSceneSnapshot,
-    ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot, PaletteSnapshot,
-    PetLatticeSnapshot, PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot,
-    PropAnimationSnapshot, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
-    TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot, TankLayerSnapshot,
-    TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
+    CompanionFrameProjection, CompanionSceneProjectionError, CompanionSceneProjectionInput,
+    CompanionSceneSnapshot, ContentSnapshot, DepthCue, EaseCurve, FrameSnapshot,
+    GaugeLevelSnapshot, PaletteSnapshot, PetLatticeSnapshot, PetRoleSpanSnapshot,
+    PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot, PropFrameSnapshot,
+    PropPresentationMotion, PropTopologySnapshot, PropZoneSnapshot, RoomTopologySnapshot,
+    TankAnimationSnapshot, TankCellFrameSnapshot, TankCellSnapshot, TankFrameSnapshot,
+    TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot, TopologySnapshot,
     COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION, MAX_VISIBLE_PROPS,
     MAX_VISIBLE_TANK_INHABITANTS, PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
 };
@@ -20,6 +21,15 @@ use crate::tui::day::DayPhase;
 use crate::tui::room::{derive_room_life_profile, RoomBiomeTag, RoomLifeProfile, RoomWeatherLayer};
 use crate::tui::view_model::{SourceStatus, WatchViewModel};
 use time::{Duration, OffsetDateTime};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompanionPresentationOptions {
+    pub(crate) reduce_motion: bool,
+}
+
+impl CompanionPresentationOptions {
+    pub(crate) const STANDARD: Self = Self { reduce_motion: false };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SemanticVitalBucket {
@@ -154,6 +164,14 @@ impl CompanionSceneSnapshot {
         vm: &WatchViewModel,
         input: CompanionSceneProjectionInput,
     ) -> Result<Self, CompanionSceneProjectionError> {
+        Self::project_with_input_and_options(vm, input, CompanionPresentationOptions::STANDARD)
+    }
+
+    pub(crate) fn project_with_input_and_options(
+        vm: &WatchViewModel,
+        input: CompanionSceneProjectionInput,
+        options: CompanionPresentationOptions,
+    ) -> Result<Self, CompanionSceneProjectionError> {
         if input.grid_columns == 0 || input.grid_rows == 0 {
             return Err(CompanionSceneProjectionError::InvalidProjectionGrid);
         }
@@ -184,21 +202,43 @@ impl CompanionSceneSnapshot {
         let elapsed_ms = input.clock.elapsed_ms;
         let roam_motion = crate::round::motion::companion_roam_motion();
         let motion_input = companion_motion_input(vm, now, &roam_motion);
-        let motion = crate::round::motion::project_round_companion_motion_with_options(
-            motion_input,
-            now,
-            elapsed_ms,
-            input.motion_viewport(),
-            &roam_motion,
-            crate::round::motion::RoundMotionProjectionOptions {
-                depth_override: input.depth_override,
-            },
-        );
+        let motion = if options.reduce_motion {
+            crate::round::motion::project_round_companion_motion_neutral(
+                motion_input,
+                input.motion_viewport(),
+                &roam_motion,
+                input.depth_override,
+            )
+        } else {
+            crate::round::motion::project_round_companion_motion_with_options(
+                motion_input,
+                now,
+                elapsed_ms,
+                input.motion_viewport(),
+                &roam_motion,
+                crate::round::motion::RoundMotionProjectionOptions {
+                    depth_override: input.depth_override,
+                },
+            )
+        };
         let visible_props = project_props(vm, now);
         let visible_tank_inhabitants = project_tank_inhabitants(vm);
         let prop_animation_states = project_prop_animation_states(vm, &visible_props, now, layout);
         let tank_animation_states =
             project_tank_animation_states(vm, &visible_tank_inhabitants, input, motion)?;
+        let prop_instances = project_prop_frame_states(
+            &visible_props,
+            &prop_animation_states,
+            PropFrameProjectionContext {
+                clock: input.clock,
+                layout,
+                asleep: vm.day_context.asleep,
+                options,
+                semantic_revision: super::SemanticRevision(1),
+                previous: None,
+            },
+        );
+        let tank_instances = project_tank_frame_states(&tank_animation_states, input);
         let (ambient_semantics, ambient_instances) = project_ambient_slots();
         let (room_glyphs, room_glyph_frames) =
             project_room_glyphs(&room_profile, vm, motion, input, cell_extent_points)?;
@@ -215,7 +255,7 @@ impl CompanionSceneSnapshot {
         Ok(Self {
             schema_version: COMPANION_SCENE_SCHEMA_VERSION,
             privacy: PrivacyProjection::for_surface(PresentationSurface::RoundCompanion),
-            topology: TopologySnapshot {
+            topology: super::SharedSemanticSnapshot::new(TopologySnapshot {
                 layout,
                 glyph_grid: super::CompanionGlyphGrid {
                     columns: input.grid_columns,
@@ -239,8 +279,8 @@ impl CompanionSceneSnapshot {
                 visible_props,
                 visible_tank_inhabitants,
                 renderer_schema: COMPANION_RENDERER_SCHEMA_VERSION,
-            },
-            content: ContentSnapshot {
+            }),
+            content: super::SharedSemanticSnapshot::new(ContentSnapshot {
                 mood: vm.pet_render.mood,
                 room_weather: room_weather_alias(room_profile.room_weather),
                 day_phase: companion_day_phase(vm.day_context.day_phase),
@@ -251,7 +291,7 @@ impl CompanionSceneSnapshot {
                 prop_animation_states,
                 tank_animation_states,
                 ambient_semantics,
-            },
+            }),
             frame: FrameSnapshot {
                 elapsed_ms,
                 pet_anchor_points: motion.motion_top_left_points,
@@ -278,9 +318,98 @@ impl CompanionSceneSnapshot {
                 dimmed,
                 dim_amount: if dimmed { 0.35 } else { 0.0 },
                 room_glyphs: room_glyph_frames,
+                prop_instances,
+                tank_instances,
                 ambient_instances,
+                pet_motion_input: motion_input,
+                pet_depth_override: input.depth_override,
             },
         })
+    }
+
+    /// Builds only bounded presentation state against one accepted semantic
+    /// revision. This path never accepts a `WatchViewModel` and therefore
+    /// cannot regenerate pet art, casts, inventories, room content, or topology.
+    pub(crate) fn project_presentation_frame(
+        &self,
+        semantic_base: super::SemanticRevision,
+        clock: super::CompanionProjectionClock,
+        options: CompanionPresentationOptions,
+    ) -> Result<CompanionFrameProjection, CompanionSceneProjectionError> {
+        let input = CompanionSceneProjectionInput::round(
+            clock,
+            self.topology.layout,
+            self.topology.glyph_grid.columns,
+            self.topology.glyph_grid.rows,
+            crate::round::scene::current_round_motion_clearance(self.topology.glyph_grid.rows),
+        )
+        .with_optional_depth_override(self.frame.pet_depth_override);
+        let motion_clock = OffsetDateTime::UNIX_EPOCH
+            + Duration::milliseconds(i64::try_from(clock.elapsed_ms).unwrap_or(i64::MAX));
+        let roam_motion = crate::round::motion::companion_roam_motion();
+        let motion = if options.reduce_motion {
+            crate::round::motion::project_round_companion_motion_neutral(
+                self.frame.pet_motion_input,
+                input.motion_viewport(),
+                &roam_motion,
+                input.depth_override,
+            )
+        } else {
+            crate::round::motion::project_round_companion_motion_with_options(
+                self.frame.pet_motion_input,
+                motion_clock,
+                clock.elapsed_ms,
+                input.motion_viewport(),
+                &roam_motion,
+                crate::round::motion::RoundMotionProjectionOptions {
+                    depth_override: input.depth_override,
+                },
+            )
+        };
+        let depth = crate::round::depth::resolve_smooth_depth(
+            motion.normalized_depth,
+            crate::round::depth::depth_lifecycle_scale(self.frame.asleep, self.frame.calm),
+        )
+        .map_err(|_| CompanionSceneProjectionError::InvalidDepthProjection)?;
+        let mut frame = self.frame.clone();
+        frame.elapsed_ms = clock.elapsed_ms;
+        frame.pet_anchor_points = motion.motion_top_left_points;
+        frame.pet_depth = motion.normalized_depth;
+        frame.pet_depth_cue = DepthCue {
+            scale: depth.scale,
+            y_offset_points_up: -depth.perspective_y
+                * self.topology.glyph_grid.cell_extent_points[1],
+            opacity: depth.atmosphere,
+            saturation: 1.0,
+        };
+        frame.facing = motion.facing;
+        frame.bob_offset_y_points =
+            motion.bob_offset_y_cells * self.topology.glyph_grid.cell_extent_points[1];
+        frame.prop_instances = project_prop_frame_states(
+            &self.topology.visible_props,
+            &self.content.prop_animation_states,
+            PropFrameProjectionContext {
+                clock,
+                layout: self.topology.layout,
+                asleep: self.frame.asleep,
+                options,
+                semantic_revision: semantic_base,
+                previous: Some(&self.frame.prop_instances),
+            },
+        );
+        frame.tank_instances = project_tank_frame_states_interpolated(
+            &self.frame.tank_instances,
+            clock.elapsed_ms,
+            options.reduce_motion,
+        );
+        Ok(CompanionFrameProjection { semantic_base, clock, options, frame })
+    }
+}
+
+impl CompanionSceneProjectionInput {
+    const fn with_optional_depth_override(mut self, depth: Option<f32>) -> Self {
+        self.depth_override = depth;
+        self
     }
 }
 
@@ -351,9 +480,49 @@ fn project_props(vm: &WatchViewModel, now: OffsetDateTime) -> Vec<PropTopologySn
                 stable_order: index as u8,
                 zone: spec.zone.into(),
                 authored_depth: spec.pet_layer.into(),
+                presentation_motion: prop_presentation_motion(spec.id),
             })
         })
         .collect()
+}
+
+pub(crate) fn prop_presentation_motion(catalog_id: &str) -> PropPresentationMotion {
+    use crate::game::habitat::{
+        CODEX_SIGNAL_LAMP, HEAVY_SESSION_PLANTER, TOKEN_AURORA_500M, TOKEN_BONSAI_100M,
+        TOKEN_CONSTELLATION_250M, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_GEODE_50M,
+        TOKEN_HANGING_VINE_25M, TOKEN_LANTERN_10M, TOKEN_MOON_1B, TOKEN_MOSS_TUFT_250K,
+        TOKEN_ORBIT_5M, TOKEN_PEBBLE_25K, TOKEN_REEDS_5M, TOKEN_SHELL_100K, TOKEN_SPARK_500K,
+        TOKEN_TREASURE_CHEST_2M, WILT_RECOVERY_SPROUT,
+    };
+
+    match catalog_id {
+        TOKEN_PEBBLE_25K
+        | TOKEN_SHELL_100K
+        | TOKEN_ORBIT_5M
+        | TOKEN_LANTERN_10M
+        | TOKEN_TREASURE_CHEST_2M => PropPresentationMotion::TwoPoseEase {
+            duration_ms: 900,
+            curve: EaseCurve::SmoothStep,
+        },
+        TOKEN_MOSS_TUFT_250K
+        | TOKEN_HANGING_VINE_25M
+        | TOKEN_REEDS_5M
+        | TOKEN_GEODE_50M
+        | TOKEN_BONSAI_100M
+        | WILT_RECOVERY_SPROUT
+        | HEAVY_SESSION_PLANTER => {
+            PropPresentationMotion::Sway { amplitude_points: 2.0, period_ms: 5_000 }
+        }
+        TOKEN_FRIENDLY_CLOUD_750K
+        | TOKEN_CONSTELLATION_250M
+        | TOKEN_AURORA_500M
+        | TOKEN_MOON_1B
+        | CODEX_SIGNAL_LAMP => {
+            PropPresentationMotion::Hover { amplitude_points: 2.5, period_ms: 6_000 }
+        }
+        TOKEN_SPARK_500K => PropPresentationMotion::TwinkleFade { attack_ms: 180, release_ms: 420 },
+        _ => PropPresentationMotion::Static,
+    }
 }
 
 fn project_tank_inhabitants(vm: &WatchViewModel) -> Vec<TankTopologySnapshot> {
@@ -448,7 +617,7 @@ fn project_prop_animation_states(
     vm: &WatchViewModel,
     visible_props: &[PropTopologySnapshot],
     now: OffsetDateTime,
-    layout: super::CompanionLogicalLayout,
+    _layout: super::CompanionLogicalLayout,
 ) -> Vec<PropAnimationSnapshot> {
     visible_props
         .iter()
@@ -473,7 +642,6 @@ fn project_prop_animation_states(
                         .find(|earned| earned.id.as_str() == prop.catalog_id)
                         .is_some_and(|earned| (now - earned.earned_at).whole_days() >= 3)
                 }),
-                origin_points: resolved_prop_origin(prop.zone, prop.stable_order, layout),
             }
         })
         .collect()
@@ -528,7 +696,6 @@ fn project_tank_animation_states(
                 visible: outcome.visible,
                 origin_col: outcome.origin_col,
                 origin_row: outcome.origin_row,
-                origin_points: grid_cell_to_points(outcome.origin_col, outcome.origin_row, input),
                 side: outcome.side.map(|side| match side {
                     crate::presentation::tank_life::TankRouteSide::Left => TankSideSnapshot::Left,
                     crate::presentation::tank_life::TankRouteSide::Right => TankSideSnapshot::Right,
@@ -571,30 +738,8 @@ fn project_tank_animation_states(
                                 unreachable!("combined route layer is not a resolved cell layer")
                             }
                         },
-                        position_points: grid_cell_to_points(
-                            cell.col,
-                            cell.row,
-                            input,
-                        ),
                     })
                     .collect(),
-                bounds: outcome.bounds.map(|bounds| TankBoundsSnapshot {
-                    x: bounds.x,
-                    y: bounds.y,
-                    width: bounds.width,
-                    height: bounds.height,
-                }),
-                bounds_points: outcome.bounds.map(|bounds| {
-                    let origin = grid_cell_to_points(bounds.x, bounds.y, input);
-                    let cell_width = input.layout.width_points / f32::from(input.grid_columns.max(1));
-                    let cell_height = input.layout.height_points / f32::from(input.grid_rows.max(1));
-                    [
-                        origin[0],
-                        origin[1],
-                        f32::from(bounds.width) * cell_width,
-                        f32::from(bounds.height) * cell_height,
-                    ]
-                }),
             })
         })
         .collect()
@@ -621,6 +766,301 @@ fn resolved_prop_origin(
         (x + lane * 0.025) * layout.width_points,
         y * layout.height_points,
     ]
+}
+
+#[derive(Clone, Copy)]
+struct PropFrameProjectionContext<'a> {
+    clock: super::CompanionProjectionClock,
+    layout: super::CompanionLogicalLayout,
+    asleep: bool,
+    options: CompanionPresentationOptions,
+    semantic_revision: super::SemanticRevision,
+    previous: Option<&'a [PropFrameSnapshot]>,
+}
+
+fn project_prop_frame_states(
+    topology: &[PropTopologySnapshot],
+    semantics: &[PropAnimationSnapshot],
+    context: PropFrameProjectionContext<'_>,
+) -> Vec<PropFrameSnapshot> {
+    let PropFrameProjectionContext {
+        clock,
+        layout,
+        asleep,
+        options,
+        semantic_revision,
+        previous,
+    } = context;
+    topology
+        .iter()
+        .zip(semantics)
+        .map(|(topology, semantic)| {
+            let phase = stable_period_phase(
+                clock.elapsed_ms,
+                topology.catalog_id,
+                topology.presentation_motion,
+            );
+            let target_pose = prop_two_pose_target(topology.catalog_id, semantic.motion_phase);
+            let target_opacity = prop_target_opacity(topology.presentation_motion, semantic);
+            let previous_slot = previous.and_then(|frames| {
+                frames
+                    .iter()
+                    .find(|frame| frame.slot == topology.stable_order)
+            });
+            let transition = match topology.presentation_motion {
+                PropPresentationMotion::TwoPoseEase { duration_ms, curve } => {
+                    let previous_anchor = previous_slot.and_then(|frame| frame.transition);
+                    let semantic_changed = previous_anchor
+                        .is_none_or(|anchor| anchor.semantic_revision != semantic_revision);
+                    if semantic_changed {
+                        Some(super::PropTransitionAnchor {
+                            source_pose: previous_slot
+                                .map_or(target_pose, |frame| frame.motion_offset_points),
+                            target_pose,
+                            source_opacity: target_opacity,
+                            target_opacity,
+                            semantic_revision,
+                            started_at_monotonic_ms: clock.elapsed_ms,
+                            duration_ms,
+                            curve,
+                        })
+                    } else {
+                        previous_anchor
+                    }
+                }
+                PropPresentationMotion::TwinkleFade { attack_ms, release_ms } => {
+                    let previous_anchor = previous_slot.and_then(|frame| frame.transition);
+                    let semantic_changed = previous_anchor
+                        .is_none_or(|anchor| anchor.semantic_revision != semantic_revision);
+                    if semantic_changed {
+                        let source_opacity =
+                            previous_slot.map_or(target_opacity, |frame| frame.opacity);
+                        Some(super::PropTransitionAnchor {
+                            source_pose: [0.0; 2],
+                            target_pose: [0.0; 2],
+                            source_opacity,
+                            target_opacity,
+                            semantic_revision,
+                            started_at_monotonic_ms: clock.elapsed_ms,
+                            duration_ms: if target_opacity >= source_opacity {
+                                attack_ms
+                            } else {
+                                release_ms
+                            },
+                            curve: EaseCurve::SmoothStep,
+                        })
+                    } else {
+                        previous_anchor
+                    }
+                }
+                _ => None,
+            };
+            let motion_offset_points = if options.reduce_motion {
+                match topology.presentation_motion {
+                    PropPresentationMotion::TwoPoseEase { .. } => target_pose,
+                    PropPresentationMotion::Static
+                    | PropPresentationMotion::Sway { .. }
+                    | PropPresentationMotion::Hover { .. }
+                    | PropPresentationMotion::TwinkleFade { .. } => [0.0; 2],
+                }
+            } else {
+                match topology.presentation_motion {
+                    PropPresentationMotion::Static | PropPresentationMotion::TwinkleFade { .. } => {
+                        [0.0; 2]
+                    }
+                    PropPresentationMotion::Sway { amplitude_points, .. } => [
+                        (phase * std::f32::consts::TAU).sin() * amplitude_points,
+                        0.0,
+                    ],
+                    PropPresentationMotion::Hover { amplitude_points, .. } => [
+                        0.0,
+                        (phase * std::f32::consts::TAU).sin() * amplitude_points,
+                    ],
+                    PropPresentationMotion::TwoPoseEase { .. } => transition
+                        .map(|anchor| resolve_prop_transition(anchor, clock.elapsed_ms))
+                        .unwrap_or(target_pose),
+                }
+            };
+            let opacity = if asleep {
+                0.72
+            } else if matches!(
+                topology.presentation_motion,
+                PropPresentationMotion::TwinkleFade { .. }
+            ) {
+                if options.reduce_motion {
+                    target_opacity
+                } else {
+                    transition
+                        .map(|anchor| resolve_prop_opacity_transition(anchor, clock.elapsed_ms))
+                        .unwrap_or(target_opacity)
+                }
+            } else {
+                1.0
+            };
+            PropFrameSnapshot {
+                slot: topology.stable_order,
+                origin_points: resolved_prop_origin(topology.zone, topology.stable_order, layout),
+                motion_offset_points,
+                opacity,
+                transition: if options.reduce_motion {
+                    None
+                } else {
+                    transition
+                },
+            }
+        })
+        .collect()
+}
+
+fn prop_target_opacity(motion: PropPresentationMotion, semantic: &PropAnimationSnapshot) -> f32 {
+    if matches!(motion, PropPresentationMotion::TwinkleFade { .. })
+        && !semantic.twinkle_active.unwrap_or(false)
+    {
+        0.55
+    } else {
+        1.0
+    }
+}
+
+fn resolve_prop_transition(anchor: super::PropTransitionAnchor, elapsed_ms: u64) -> [f32; 2] {
+    let elapsed = elapsed_ms.saturating_sub(anchor.started_at_monotonic_ms);
+    let t = (elapsed as f32 / f32::from(anchor.duration_ms.max(1))).clamp(0.0, 1.0);
+    let eased = match anchor.curve {
+        EaseCurve::SmoothStep => phase_smooth_step(t),
+    };
+    [
+        anchor.source_pose[0] + (anchor.target_pose[0] - anchor.source_pose[0]) * eased,
+        anchor.source_pose[1] + (anchor.target_pose[1] - anchor.source_pose[1]) * eased,
+    ]
+}
+
+fn resolve_prop_opacity_transition(anchor: super::PropTransitionAnchor, elapsed_ms: u64) -> f32 {
+    let elapsed = elapsed_ms.saturating_sub(anchor.started_at_monotonic_ms);
+    let t = (elapsed as f32 / f32::from(anchor.duration_ms.max(1))).clamp(0.0, 1.0);
+    let eased = match anchor.curve {
+        EaseCurve::SmoothStep => phase_smooth_step(t),
+    };
+    anchor.source_opacity + (anchor.target_opacity - anchor.source_opacity) * eased
+}
+
+fn stable_period_phase(elapsed_ms: u64, catalog_id: &str, motion: PropPresentationMotion) -> f32 {
+    let period_ms = match motion {
+        PropPresentationMotion::Sway { period_ms, .. }
+        | PropPresentationMotion::Hover { period_ms, .. } => period_ms,
+        PropPresentationMotion::TwoPoseEase { duration_ms, .. } => u32::from(duration_ms),
+        PropPresentationMotion::Static | PropPresentationMotion::TwinkleFade { .. } => return 0.0,
+    }
+    .max(1);
+    let identity_offset = catalog_id.bytes().fold(0_u64, |hash, byte| {
+        hash.wrapping_mul(16777619).wrapping_add(u64::from(byte))
+    });
+    ((elapsed_ms.wrapping_add(identity_offset) % u64::from(period_ms)) as f32 / period_ms as f32)
+        .clamp(0.0, 1.0)
+}
+
+fn phase_smooth_step(value: f32) -> f32 {
+    value * value * (3.0 - 2.0 * value)
+}
+
+fn prop_two_pose_target(catalog_id: &str, motion_phase: Option<u8>) -> [f32; 2] {
+    if !motion_phase.is_some_and(|phase| !phase.is_multiple_of(2)) {
+        return [0.0; 2];
+    }
+    match catalog_id {
+        crate::game::habitat::TOKEN_PEBBLE_25K | crate::game::habitat::TOKEN_SHELL_100K => {
+            [0.0, 3.0]
+        }
+        crate::game::habitat::TOKEN_ORBIT_5M => [3.0, 0.0],
+        crate::game::habitat::TOKEN_LANTERN_10M => [0.0, 3.0],
+        _ => [0.0; 2],
+    }
+}
+
+fn project_tank_frame_states(
+    semantics: &[TankAnimationSnapshot],
+    input: CompanionSceneProjectionInput,
+) -> Vec<TankFrameSnapshot> {
+    semantics
+        .iter()
+        .map(|semantic| {
+            let cell_width = input.layout.width_points / f32::from(input.grid_columns.max(1));
+            let cell_height = input.layout.height_points / f32::from(input.grid_rows.max(1));
+            let bounds: Option<(u16, u16, u16, u16)> =
+                semantic.cells.iter().fold(None, |bounds, cell| {
+                    Some(match bounds {
+                        None => (cell.col, cell.row, cell.col, cell.row),
+                        Some((min_col, min_row, max_col, max_row)) => (
+                            min_col.min(cell.col),
+                            min_row.min(cell.row),
+                            max_col.max(cell.col),
+                            max_row.max(cell.row),
+                        ),
+                    })
+                });
+            TankFrameSnapshot {
+                slot: semantic.stable_order,
+                visible: semantic.visible,
+                origin_points: grid_cell_to_points(semantic.origin_col, semantic.origin_row, input),
+                cells: semantic
+                    .cells
+                    .iter()
+                    .map(|cell| {
+                        let position = grid_cell_to_points(cell.col, cell.row, input);
+                        TankCellFrameSnapshot {
+                            source_position_points: position,
+                            position_points: position,
+                            target_position_points: position,
+                        }
+                    })
+                    .collect(),
+                bounds_points: bounds.map(|(min_col, min_row, max_col, max_row)| {
+                    let origin = grid_cell_to_points(min_col, min_row, input);
+                    [
+                        origin[0],
+                        origin[1],
+                        f32::from(max_col.saturating_sub(min_col).saturating_add(1)) * cell_width,
+                        f32::from(max_row.saturating_sub(min_row).saturating_add(1)) * cell_height,
+                    ]
+                }),
+                semantic_revision: super::SemanticRevision(1),
+                started_at_monotonic_ms: input.clock.elapsed_ms,
+                duration_ms: semantic.cadence_ms,
+            }
+        })
+        .collect()
+}
+
+fn project_tank_frame_states_interpolated(
+    accepted: &[TankFrameSnapshot],
+    elapsed_ms: u64,
+    reduce_motion: bool,
+) -> Vec<TankFrameSnapshot> {
+    accepted
+        .iter()
+        .map(|source| {
+            let mut frame = source.clone();
+            if reduce_motion {
+                for cell in &mut frame.cells {
+                    cell.position_points = cell.target_position_points;
+                }
+            } else {
+                let elapsed = elapsed_ms.saturating_sub(source.started_at_monotonic_ms);
+                let t = (elapsed as f32 / f32::from(source.duration_ms.max(1))).clamp(0.0, 1.0);
+                let eased = phase_smooth_step(t);
+                for cell in &mut frame.cells {
+                    cell.position_points = [
+                        cell.source_position_points[0]
+                            + (cell.target_position_points[0] - cell.source_position_points[0])
+                                * eased,
+                        cell.source_position_points[1]
+                            + (cell.target_position_points[1] - cell.source_position_points[1])
+                                * eased,
+                    ];
+                }
+            }
+            frame
+        })
+        .collect()
 }
 
 fn grid_cell_to_points(col: u16, row: u16, input: CompanionSceneProjectionInput) -> [f32; 2] {
@@ -861,6 +1301,98 @@ mod tests {
                 crate::round::scene::current_round_motion_clearance(18),
             ),
         )
+    }
+
+    #[test]
+    fn initial_semantic_projection_applies_reduce_motion_before_first_frame() {
+        use crate::presentation::companion_scene::SemanticRevision;
+
+        let vm = fixture_with_real_pet_art();
+        let clock = CompanionProjectionClock::new(datetime!(2026-07-11 12:00 UTC), 2_731);
+        let input = CompanionSceneProjectionInput::round(
+            clock,
+            CompanionLogicalLayout::round(360.0, 360.0),
+            44,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        );
+        let options = super::CompanionPresentationOptions { reduce_motion: true };
+        let initial = CompanionSceneSnapshot::project_with_input_and_options(&vm, input, options)
+            .expect("initial reduced-motion semantic projection");
+        let replay = initial
+            .project_presentation_frame(SemanticRevision(1), clock, options)
+            .expect("reduced-motion frame replay");
+
+        assert_eq!(initial.frame, replay.frame);
+        assert_eq!(initial.frame.bob_offset_y_points, 0.0);
+        assert!(initial
+            .frame
+            .prop_instances
+            .iter()
+            .all(|prop| prop.transition.is_none()));
+    }
+
+    #[test]
+    fn reduce_motion_toggle_settles_active_motion_and_standard_mode_resumes_deterministically() {
+        use crate::presentation::companion_scene::SemanticRevision;
+
+        let vm = lifetime_watch_fixture();
+        let wall_time = datetime!(2026-07-11 12:00 UTC);
+        let input_at = |elapsed_ms| {
+            CompanionSceneProjectionInput::round(
+                CompanionProjectionClock::new(wall_time, elapsed_ms),
+                CompanionLogicalLayout::round(360.0, 360.0),
+                44,
+                18,
+                crate::round::scene::current_round_motion_clearance(18),
+            )
+        };
+        let initial = CompanionSceneSnapshot::project_with_input_and_options(
+            &vm,
+            input_at(1_000),
+            super::CompanionPresentationOptions::STANDARD,
+        )
+        .expect("initial standard-motion projection");
+        let standard = initial
+            .project_presentation_frame(
+                SemanticRevision(1),
+                input_at(1_777).clock,
+                super::CompanionPresentationOptions::STANDARD,
+            )
+            .expect("active standard-motion frame");
+        let reduced_options = super::CompanionPresentationOptions { reduce_motion: true };
+        let reduced = initial
+            .project_presentation_frame(SemanticRevision(1), input_at(1_778).clock, reduced_options)
+            .expect("active reduced-motion frame");
+        let resumed = initial
+            .project_presentation_frame(
+                SemanticRevision(1),
+                input_at(1_779).clock,
+                super::CompanionPresentationOptions::STANDARD,
+            )
+            .expect("resumed standard-motion frame");
+        let resumed_replay = initial
+            .project_presentation_frame(
+                SemanticRevision(1),
+                input_at(1_779).clock,
+                super::CompanionPresentationOptions::STANDARD,
+            )
+            .expect("replayed resumed standard-motion frame");
+
+        assert_ne!(standard.frame.bob_offset_y_points, 0.0);
+        assert_eq!(reduced.frame.bob_offset_y_points, 0.0);
+        assert!(reduced
+            .frame
+            .prop_instances
+            .iter()
+            .all(|prop| prop.transition.is_none()));
+        assert!(reduced.frame.tank_instances.iter().all(|tank| tank
+            .cells
+            .iter()
+            .all(|cell| cell.position_points == cell.target_position_points)));
+        assert_eq!(resumed, resumed_replay);
+        assert_ne!(resumed.frame.bob_offset_y_points, 0.0);
+        assert_ne!(resumed.frame, reduced.frame);
     }
 
     #[test]
@@ -1137,13 +1669,13 @@ mod tests {
         assert_eq!(snapshot.content.ambient_semantics.len(), 64);
         assert_eq!(snapshot.frame.ambient_instances.len(), 64);
         assert!(snapshot
-            .content
-            .prop_animation_states
+            .frame
+            .prop_instances
             .iter()
             .all(|state| state.origin_points.iter().all(|value| value.is_finite())));
         assert!(snapshot
-            .content
-            .tank_animation_states
+            .frame
+            .tank_instances
             .iter()
             .flat_map(|state| &state.cells)
             .all(|cell| cell.position_points.iter().all(|value| value.is_finite())));
@@ -1658,6 +2190,199 @@ mod tests {
     }
 
     #[test]
+    fn task8_complete_prop_catalog_matrix_is_deterministic_static_and_scale_independent() {
+        use super::super::{
+            AuthoredDepthSnapshot, EaseCurve, PropAnimationKindSnapshot, PropPresentationMotion,
+            PropTopologySnapshot, PropZoneSnapshot, SemanticRevision,
+        };
+
+        let at_zero = time::OffsetDateTime::UNIX_EPOCH;
+        let at_sprite = at_zero + time::Duration::seconds(4);
+        let at_twinkle = at_zero + time::Duration::seconds(2);
+        let at_motion = at_zero + time::Duration::seconds(10);
+        for (index, spec) in crate::game::habitat::HABITAT_PROP_CATALOG
+            .iter()
+            .enumerate()
+        {
+            let topology = [PropTopologySnapshot {
+                catalog_id: spec.id,
+                stable_order: 0,
+                zone: PropZoneSnapshot::from(spec.zone),
+                authored_depth: AuthoredDepthSnapshot::from(spec.pet_layer),
+                presentation_motion: super::prop_presentation_motion(spec.id),
+            }];
+            let semantic_for = |now| {
+                let state = crate::game::habitat::habitat_prop_animation_state(spec.id, now);
+                PropAnimationSnapshot {
+                    catalog_id: spec.id,
+                    stable_order: 0,
+                    kind: if state.is_static() {
+                        PropAnimationKindSnapshot::Static
+                    } else {
+                        PropAnimationKindSnapshot::Animated
+                    },
+                    sprite_phase: state.sprite_phase,
+                    twinkle_active: state.twinkle_active,
+                    motion_phase: state.motion_phase,
+                    chest_lid_open: state.chest_lid_open,
+                    bloom_active: crate::game::habitat::habitat_prop_supports_bloom(spec.id)
+                        .then_some(false),
+                }
+            };
+            let initial = semantic_for(at_zero);
+            let sprite = semantic_for(at_sprite);
+            let twinkle = semantic_for(at_twinkle);
+            let motion = semantic_for(at_motion);
+            assert_eq!(
+                initial.kind == PropAnimationKindSnapshot::Static,
+                crate::game::habitat::habitat_prop_animation_state(spec.id, at_zero).is_static(),
+                "{}",
+                spec.id,
+            );
+            assert_eq!(topology[0].zone, PropZoneSnapshot::from(spec.zone));
+            assert_eq!(
+                topology[0].authored_depth,
+                AuthoredDepthSnapshot::from(spec.pet_layer)
+            );
+            let semantic_samples = [&initial, &sprite, &twinkle, &motion];
+            let semantic_bytes = serde_json::to_vec(&semantic_samples).unwrap();
+            assert_eq!(
+                semantic_bytes,
+                serde_json::to_vec(&semantic_samples).unwrap(),
+                "unstable semantic content bytes for {} ({:?})",
+                spec.id,
+                spec.kind,
+            );
+            assert_eq!(
+                initial.sprite_phase != sprite.sprite_phase,
+                initial.sprite_phase.is_some()
+            );
+            assert_eq!(
+                initial.twinkle_active != twinkle.twinkle_active,
+                initial.twinkle_active.is_some()
+            );
+            assert_eq!(
+                initial.motion_phase != motion.motion_phase,
+                initial.motion_phase.is_some()
+            );
+
+            let clock = CompanionProjectionClock::new(at_zero, 1_000 + index as u64 * 37);
+            let frames_1x = super::project_prop_frame_states(
+                &topology,
+                std::slice::from_ref(&initial),
+                super::PropFrameProjectionContext {
+                    clock,
+                    layout: CompanionLogicalLayout::round(360.0, 360.0),
+                    asleep: false,
+                    options: super::CompanionPresentationOptions::STANDARD,
+                    semantic_revision: SemanticRevision(7),
+                    previous: None,
+                },
+            );
+            let frames_2x = super::project_prop_frame_states(
+                &topology,
+                std::slice::from_ref(&initial),
+                super::PropFrameProjectionContext {
+                    clock,
+                    layout: CompanionLogicalLayout::round(360.0, 360.0),
+                    asleep: false,
+                    options: super::CompanionPresentationOptions::STANDARD,
+                    semantic_revision: SemanticRevision(7),
+                    previous: None,
+                },
+            );
+            assert_eq!(
+                frames_1x, frames_2x,
+                "logical points changed at 2x for {}",
+                spec.id
+            );
+            let replay = super::project_prop_frame_states(
+                &topology,
+                std::slice::from_ref(&initial),
+                super::PropFrameProjectionContext {
+                    clock,
+                    layout: CompanionLogicalLayout::round(360.0, 360.0),
+                    asleep: false,
+                    options: super::CompanionPresentationOptions::STANDARD,
+                    semantic_revision: SemanticRevision(7),
+                    previous: None,
+                },
+            );
+            assert_eq!(frames_1x, replay, "nondeterministic frame for {}", spec.id);
+
+            let later = super::project_prop_frame_states(
+                &topology,
+                std::slice::from_ref(&initial),
+                super::PropFrameProjectionContext {
+                    clock: CompanionProjectionClock::new(at_zero, clock.elapsed_ms + 777),
+                    layout: CompanionLogicalLayout::round(360.0, 360.0),
+                    asleep: false,
+                    options: super::CompanionPresentationOptions::STANDARD,
+                    semantic_revision: SemanticRevision(7),
+                    previous: Some(&frames_1x),
+                },
+            );
+            if topology[0].presentation_motion == PropPresentationMotion::Static {
+                assert_eq!(
+                    frames_1x[0].origin_points, later[0].origin_points,
+                    "{}",
+                    spec.id
+                );
+                assert_eq!(frames_1x[0].motion_offset_points, [0.0; 2], "{}", spec.id);
+                assert_eq!(later[0].motion_offset_points, [0.0; 2], "{}", spec.id);
+                assert_eq!(
+                    frames_1x[0].opacity.to_bits(),
+                    later[0].opacity.to_bits(),
+                    "{}",
+                    spec.id
+                );
+            }
+
+            let reduced = super::project_prop_frame_states(
+                &topology,
+                std::slice::from_ref(&motion),
+                super::PropFrameProjectionContext {
+                    clock: CompanionProjectionClock::new(at_motion, clock.elapsed_ms + 2_000),
+                    layout: CompanionLogicalLayout::round(360.0, 360.0),
+                    asleep: false,
+                    options: super::CompanionPresentationOptions { reduce_motion: true },
+                    semantic_revision: SemanticRevision(8),
+                    previous: Some(&frames_1x),
+                },
+            );
+            match topology[0].presentation_motion {
+                PropPresentationMotion::TwoPoseEase { curve, .. } => {
+                    assert_eq!(curve, EaseCurve::SmoothStep);
+                    assert_eq!(
+                        reduced[0].motion_offset_points,
+                        super::prop_two_pose_target(spec.id, motion.motion_phase),
+                        "{}",
+                        spec.id
+                    );
+                }
+                PropPresentationMotion::Static
+                | PropPresentationMotion::Sway { .. }
+                | PropPresentationMotion::Hover { .. }
+                | PropPresentationMotion::TwinkleFade { .. } => {
+                    assert_eq!(reduced[0].motion_offset_points, [0.0; 2], "{}", spec.id);
+                }
+            }
+            if matches!(
+                topology[0].presentation_motion,
+                PropPresentationMotion::TwinkleFade { .. }
+            ) {
+                let expected = if motion.twinkle_active.unwrap_or(false) {
+                    1.0
+                } else {
+                    0.55
+                };
+                assert_eq!(reduced[0].opacity, expected, "{}", spec.id);
+            }
+        }
+        assert_eq!(crate::game::habitat::HABITAT_PROP_CATALOG.len(), 21);
+    }
+
+    #[test]
     fn tank_animation_states_are_bounded_identity_stable_and_calm_aware() {
         let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(
             120,
@@ -1751,13 +2476,14 @@ mod tests {
             json.contains("cells"),
             "missing exact visible cells: {json}"
         );
-        assert!(
-            json.contains("bounds"),
-            "missing exact visible bounds: {json}"
-        );
-        for state in &snapshot.content.tank_animation_states {
-            assert_eq!(state.visible, !state.cells.is_empty());
-            assert_eq!(state.bounds.is_some(), state.visible);
+        for (semantic, frame) in snapshot
+            .content
+            .tank_animation_states
+            .iter()
+            .zip(&snapshot.frame.tank_instances)
+        {
+            assert_eq!(semantic.visible, !semantic.cells.is_empty());
+            assert_eq!(frame.bounds_points.is_some(), semantic.visible);
         }
     }
 
@@ -1791,6 +2517,152 @@ mod tests {
             },
         )
         .is_none());
+    }
+
+    #[test]
+    fn task8_complete_tank_catalog_matrix_anchors_routes_and_samples_hidden_time_once() {
+        use super::super::{AuthoredDepthSnapshot, SemanticRevision, TankTopologySnapshot};
+
+        let vm = fixture_with_real_pet_art();
+        let layout = CompanionLogicalLayout::round(360.0, 360.0);
+        let clock_at = |seconds: i64, elapsed_ms: u64| {
+            CompanionProjectionClock::new(
+                time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(seconds),
+                elapsed_ms,
+            )
+        };
+        for spec in crate::game::habitat::TANK_INHABITANT_CATALOG {
+            let topology = [TankTopologySnapshot {
+                catalog_id: spec.id,
+                stable_order: 0,
+                route: spec.route_family.into(),
+                authored_depth: AuthoredDepthSnapshot::from(spec.natural_layer),
+            }];
+            let project_semantic = |clock| {
+                let input = CompanionSceneProjectionInput::round(
+                    clock,
+                    layout,
+                    44,
+                    18,
+                    crate::round::scene::current_round_motion_clearance(18),
+                );
+                let roam = crate::round::motion::companion_roam_motion();
+                let motion = crate::round::motion::project_round_companion_motion(
+                    super::companion_motion_input(&vm, clock.wall_time, &roam),
+                    clock.wall_time,
+                    clock.elapsed_ms,
+                    input.motion_viewport(),
+                    &roam,
+                );
+                let semantics = super::project_tank_animation_states(&vm, &topology, input, motion)
+                    .expect("catalog tank semantic projection");
+                (input, semantics)
+            };
+
+            let (initial_input, initial_semantics) = project_semantic(clock_at(0, 1_000));
+            let (next_input, next_semantics) = project_semantic(clock_at(4, 5_000));
+            assert_eq!(initial_semantics.len(), 1, "{}", spec.id);
+            assert_eq!(next_semantics.len(), 1, "{}", spec.id);
+            let initial_semantic = &initial_semantics[0];
+            let next_semantic = &next_semantics[0];
+            assert_eq!(initial_semantic.catalog_id, spec.id);
+            assert_eq!(initial_semantic.route, topology[0].route);
+            assert_eq!(topology[0].route, spec.route_family.into());
+            assert_eq!(
+                topology[0].authored_depth,
+                AuthoredDepthSnapshot::from(spec.natural_layer),
+                "{} ({:?})",
+                spec.id,
+                spec.kind,
+            );
+            assert_eq!(initial_semantic.cadence_ms, 4_000);
+            assert_eq!(initial_semantic.visible, !initial_semantic.cells.is_empty());
+            assert!(initial_semantic
+                .cells
+                .iter()
+                .all(|cell| { cell.col < 44 && cell.row < 18 }));
+            let initial_content = serde_json::to_vec(initial_semantic).unwrap();
+            let next_content = serde_json::to_vec(next_semantic).unwrap();
+            assert!(!initial_content.is_empty());
+            assert!(!next_content.is_empty());
+            assert_eq!(
+                initial_content,
+                serde_json::to_vec(initial_semantic).unwrap(),
+                "unstable initial tank content bytes for {}",
+                spec.id,
+            );
+            assert_eq!(
+                next_content,
+                serde_json::to_vec(next_semantic).unwrap(),
+                "unstable transitioned tank content bytes for {}",
+                spec.id,
+            );
+
+            let initial_frames =
+                super::project_tank_frame_states(&initial_semantics, initial_input);
+            let replay = super::project_tank_frame_states(&initial_semantics, initial_input);
+            assert_eq!(
+                initial_frames, replay,
+                "nondeterministic initial frame for {}",
+                spec.id
+            );
+            assert_eq!(initial_frames[0].duration_ms, initial_semantic.cadence_ms);
+            assert_eq!(initial_frames[0].semantic_revision, SemanticRevision(1));
+            assert!(initial_frames[0].cells.iter().all(|cell| {
+                cell.source_position_points == cell.position_points
+                    && cell.position_points == cell.target_position_points
+            }));
+
+            let mut anchored = super::project_tank_frame_states(&next_semantics, next_input);
+            anchored[0].semantic_revision = SemanticRevision(2);
+            anchored[0].started_at_monotonic_ms = 5_000;
+            for (cell, previous) in anchored[0].cells.iter_mut().zip(&initial_frames[0].cells) {
+                cell.source_position_points = previous.position_points;
+                cell.position_points = previous.position_points;
+            }
+            let midway = super::project_tank_frame_states_interpolated(&anchored, 7_000, false);
+            let midway_replay =
+                super::project_tank_frame_states_interpolated(&anchored, 7_000, false);
+            assert_eq!(
+                midway, midway_replay,
+                "nondeterministic interpolation for {}",
+                spec.id
+            );
+            assert_eq!(midway[0].semantic_revision, SemanticRevision(2));
+            assert_eq!(midway[0].duration_ms, next_semantic.cadence_ms);
+            assert_eq!(
+                next_semantic
+                    .cells
+                    .iter()
+                    .map(|cell| cell.layer)
+                    .collect::<Vec<_>>(),
+                next_semantics[0]
+                    .cells
+                    .iter()
+                    .map(|cell| cell.layer)
+                    .collect::<Vec<_>>(),
+                "layer semantics changed for {}",
+                spec.id,
+            );
+
+            let reduced = super::project_tank_frame_states_interpolated(&anchored, 5_001, true);
+            assert!(reduced[0]
+                .cells
+                .iter()
+                .all(|cell| cell.position_points == cell.target_position_points));
+            let revealed = super::project_tank_frame_states_interpolated(&anchored, 65_000, false);
+            assert!(revealed[0]
+                .cells
+                .iter()
+                .all(|cell| cell.position_points == cell.target_position_points));
+            assert_eq!(
+                revealed,
+                super::project_tank_frame_states_interpolated(&anchored, 65_000, false),
+                "hidden time replayed history for {}",
+                spec.id,
+            );
+        }
+        assert_eq!(crate::game::habitat::TANK_INHABITANT_CATALOG.len(), 8);
     }
 
     #[test]

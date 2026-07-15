@@ -10,6 +10,61 @@ pub const SCENE_ARTIFACT_SCHEMA_VERSION: u16 = 1;
 pub const COMPANION_CAPTURE_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PresentedCapturePrivacy {
+    ExternalRedacted,
+    SensitiveLiveValues,
+}
+
+/// Renderer-owned proof of the scene/HUD/surface identity that reached the
+/// presentation boundary. The private HUD content is represented only by a
+/// monotonic revision; no exact text or packed glyph material is serialized.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct PresentedSceneVersion {
+    pub schema_version: u16,
+    pub scene_version: SceneVersion,
+    pub surface_epoch: u64,
+    pub logical_points: [f32; 2],
+    pub physical_pixels: [u32; 2],
+    pub backing_scale: f32,
+    pub hud_revision: u64,
+    pub privacy: PresentedCapturePrivacy,
+}
+
+impl PresentedSceneVersion {
+    pub fn try_new(
+        scene_version: SceneVersion,
+        logical_points: [f32; 2],
+        physical_pixels: [u32; 2],
+        backing_scale: f32,
+        hud_revision: u64,
+        privacy: PresentedCapturePrivacy,
+    ) -> Result<Self, CaptureContractError> {
+        CaptureSurfaceArtifact::try_new(
+            logical_points,
+            physical_pixels,
+            backing_scale,
+            CaptureSourceFormat::Bgra8UnormSrgb,
+            CaptureColorSpace::Srgb,
+            CaptureCompositeAlpha::PostMultiplied,
+        )?;
+        if scene_version.surface.0 == 0 || hud_revision == 0 {
+            return Err(CaptureContractError::InvalidPresentationReceipt);
+        }
+        Ok(Self {
+            schema_version: COMPANION_CAPTURE_SCHEMA_VERSION,
+            scene_version,
+            surface_epoch: scene_version.surface.0,
+            logical_points,
+            physical_pixels,
+            backing_scale,
+            hud_revision,
+            privacy,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct CaptureSourceIdentity {
     pub template_checksum: u64,
     pub content_checksum: u64,
@@ -105,6 +160,7 @@ pub enum CaptureContractError {
     ReadbackStrideMismatch,
     ReadbackLengthMismatch,
     PrivacyViolation,
+    InvalidPresentationReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -362,8 +418,10 @@ pub struct CompanionSceneMetricsArtifact {
     pub blended_draw_high_water: u32,
     pub persistent_gpu_objects_created: u64,
     pub static_upload_bytes: u64,
-    pub content_write_bytes: u64,
-    pub frame_write_bytes: u64,
+    /// Aggregate runtime metrics do not distinguish these domains yet. `None`
+    /// is explicit nonapplicability rather than a misleading zero-byte write.
+    pub content_write_bytes: Option<u64>,
+    pub frame_write_bytes: Option<u64>,
 }
 
 impl CompanionSceneMetricsArtifact {
@@ -373,8 +431,8 @@ impl CompanionSceneMetricsArtifact {
         blended_draw_high_water: u32,
         persistent_gpu_objects_created: u64,
         static_upload_bytes: u64,
-        content_write_bytes: u64,
-        frame_write_bytes: u64,
+        content_write_bytes: Option<u64>,
+        frame_write_bytes: Option<u64>,
     ) -> Self {
         Self {
             schema_version: COMPANION_CAPTURE_SCHEMA_VERSION,
@@ -396,6 +454,7 @@ pub struct CompanionCaptureRequest {
     pub source: CaptureSourceIdentity,
     pub logical_state_alias: CompanionCaptureStateAlias,
     pub privacy: PrivacyProjection,
+    pub pixel_privacy: PresentedCapturePrivacy,
     pub surface: CaptureSurfaceArtifact,
     pub readback: CanonicalReadbackRequest,
     pub metrics: CompanionSceneMetricsArtifact,
@@ -408,6 +467,7 @@ impl CompanionCaptureRequest {
         source: CaptureSourceIdentity,
         logical_state_alias: CompanionCaptureStateAlias,
         privacy: PrivacyProjection,
+        pixel_privacy: PresentedCapturePrivacy,
         surface: CaptureSurfaceArtifact,
         readback: CanonicalReadbackRequest,
         metrics: CompanionSceneMetricsArtifact,
@@ -418,6 +478,7 @@ impl CompanionCaptureRequest {
             source,
             logical_state_alias,
             privacy,
+            pixel_privacy,
             surface,
             readback,
             metrics,
@@ -785,9 +846,10 @@ mod tests {
             crate::presentation::privacy::PrivacyProjection::for_surface(
                 crate::presentation::privacy::PresentationSurface::RoundCompanion,
             ),
+            PresentedCapturePrivacy::ExternalRedacted,
             surface,
             CanonicalReadbackRequest::for_physical_pixels(surface.physical_pixels),
-            CompanionSceneMetricsArtifact::new(31, 37, 41, 43, 47, 53, 59),
+            CompanionSceneMetricsArtifact::new(31, 37, 41, 43, 47, Some(53), Some(59)),
         )
         .unwrap()
     }
@@ -1094,6 +1156,45 @@ mod tests {
         assert!(!serde_json::to_string(&CompanionCaptureStateAlias::Normal)
             .unwrap()
             .contains("fault"));
+    }
+
+    #[test]
+    fn presented_scene_receipt_rejects_zero_identity_and_invalid_geometry() {
+        assert_eq!(
+            PresentedSceneVersion::try_new(
+                capture_version(),
+                [360.0, 240.0],
+                [720, 480],
+                2.0,
+                0,
+                PresentedCapturePrivacy::ExternalRedacted,
+            ),
+            Err(CaptureContractError::InvalidPresentationReceipt)
+        );
+        let mut zero_surface = capture_version();
+        zero_surface.surface = super::super::SurfaceEpoch(0);
+        assert_eq!(
+            PresentedSceneVersion::try_new(
+                zero_surface,
+                [360.0, 240.0],
+                [720, 480],
+                2.0,
+                1,
+                PresentedCapturePrivacy::ExternalRedacted,
+            ),
+            Err(CaptureContractError::InvalidPresentationReceipt)
+        );
+        assert_eq!(
+            PresentedSceneVersion::try_new(
+                capture_version(),
+                [360.0, 240.0],
+                [719, 480],
+                2.0,
+                1,
+                PresentedCapturePrivacy::SensitiveLiveValues,
+            ),
+            Err(CaptureContractError::ExtentScaleMismatch)
+        );
     }
 
     #[test]

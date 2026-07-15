@@ -813,13 +813,18 @@ impl PetGlyph {
 pub struct AuthoredGlyph(char);
 
 impl AuthoredGlyph {
+    const REPERTOIRE: &'static str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,:;!?%+-_#*/\\()[]<>|~`'\"@=&^$◆◇◈◉○◌◦◡◑◔◜▲▼◣◢▝▴▱▂▃▓▣☁☼✦✧✺·•∘°˚˙‹›ѱ⁙⌁⌞⌟╭╮╰╯╲╱╵╷╽╿┃│┊─┄╌┬~≈□";
+
     pub fn new(glyph: char) -> Result<Self, ContentValueError> {
-        const REPERTOIRE: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,:;!?%+-_#*/\\()[]<>|~`'\"@=&^$◆◇◈◉○◌◦◡◑◔◜▲▼◣◢▝▴▱▂▃▓▣☁☼✦✧✺·•∘°˚˙‹›ѱ⁙⌁⌞⌟╭╮╰╯╲╱╵╷╽╿┃│┊─┄╌┬~≈□";
-        REPERTOIRE
+        Self::REPERTOIRE
             .chars()
             .any(|candidate| candidate == glyph)
             .then_some(Self(glyph))
             .ok_or(ContentValueError::InvalidAuthoredGlyph)
+    }
+
+    pub(crate) fn declared_repertoire() -> impl Iterator<Item = char> {
+        Self::REPERTOIRE.chars()
     }
 
     pub const fn as_char(self) -> char {
@@ -1320,6 +1325,38 @@ impl SceneFrame {
             lights: Vec::new(),
         }
     }
+
+    /// Returns the canonical pixel input for an external capture without
+    /// mutating the live frame. Exact gauges, activity opacity, and dim amount
+    /// are reduced to the same coarse privacy projection used by capture
+    /// checksums and manifests.
+    pub(crate) fn capture_safe_clone(&self, template: &SceneTemplate) -> Self {
+        let projection = CaptureFramePrivacyProjection::from_frame(self);
+        let mut frame = self.clone();
+        frame.gauges = projection.gauges().map(capture_gauge_fraction);
+        frame.dim_amount = if projection.dimmed() { 1.0 } else { 0.0 };
+
+        for node in &mut frame.nodes {
+            let Some(template_node) = template.nodes.iter().find(|entry| entry.id == node.node)
+            else {
+                continue;
+            };
+            (node.visible, node.opacity) =
+                projection.node_state(template_node.alias.as_str(), node.visible, node.opacity);
+        }
+
+        frame
+    }
+}
+
+const fn capture_gauge_fraction(level: super::GaugeLevelSnapshot) -> f32 {
+    match level {
+        super::GaugeLevelSnapshot::Empty => 0.0,
+        super::GaugeLevelSnapshot::Low => 0.125,
+        super::GaugeLevelSnapshot::Medium => 0.375,
+        super::GaugeLevelSnapshot::High => 0.75,
+        super::GaugeLevelSnapshot::Full => 1.0,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1579,6 +1616,8 @@ impl SceneDeltaScratch {
 }
 
 mod checksum;
+
+pub(crate) use checksum::checksum_content_for_capture;
 mod compiler;
 
 #[cfg(test)]
@@ -1866,7 +1905,8 @@ mod tests {
                 visible_props: Vec::new(),
                 visible_tank_inhabitants: Vec::new(),
                 renderer_schema: super::super::COMPANION_RENDERER_SCHEMA_VERSION,
-            },
+            }
+            .into(),
             content: super::super::ContentSnapshot {
                 mood: Mood::Content,
                 room_weather: "clear",
@@ -1893,7 +1933,8 @@ mod tests {
                         glyph: None,
                     })
                     .collect(),
-            },
+            }
+            .into(),
             frame: super::super::FrameSnapshot {
                 elapsed_ms: 1_000,
                 pet_anchor_points: [120.0, 140.0],
@@ -1912,6 +1953,8 @@ mod tests {
                 dimmed: false,
                 dim_amount: 0.0,
                 room_glyphs: Vec::new(),
+                prop_instances: Vec::new(),
+                tank_instances: Vec::new(),
                 ambient_instances: (0..MAX_AMBIENT_INSTANCES)
                     .map(|slot| super::super::AmbientFrameSnapshot {
                         slot: slot as u8,
@@ -1920,16 +1963,37 @@ mod tests {
                         opacity: 0.0,
                     })
                     .collect(),
+                pet_motion_input: crate::round::motion::CompanionMotionInput {
+                    asleep: false,
+                    calm: false,
+                    rate_per_hour: 0.0,
+                    current_facing: 1,
+                    resolved_wander_offset_x: 0,
+                    resolved_wander_facing: 1,
+                    breath_offset_y_cells: 0,
+                },
+                pet_depth_override: None,
             },
         }
     }
 
+    fn prop_frame(
+        slot: u8,
+        origin_points: [f32; 2],
+        motion_offset_points: [f32; 2],
+    ) -> super::super::PropFrameSnapshot {
+        super::super::PropFrameSnapshot {
+            slot,
+            origin_points,
+            motion_offset_points,
+            opacity: 1.0,
+            transition: None,
+        }
+    }
+
     #[test]
-    fn token_lantern_scene_glyphs_stay_in_the_active_species_repertoire() {
+    fn token_lantern_variants_are_closed_authored_content() {
         for species in Species::all() {
-            let repertoire = crate::round::smooth::collect_companion_glyph_repertoire(
-                &crate::round::smooth::CompanionContentIdentity::for_pet(species),
-            );
             for twinkle in [false, true] {
                 let glyphs = compiler::prop_glyphs(
                     crate::game::habitat::TOKEN_LANTERN_10M,
@@ -1941,12 +2005,11 @@ mod tests {
                 )
                 .expect("the token lantern is valid authored scene content");
                 for glyph in glyphs.iter().filter_map(|cell| cell.glyph) {
-                    let sequence = glyph.as_char().to_string();
                     assert!(
-                        repertoire
-                            .iter()
-                            .any(|declared| !declared.bold && declared.sequence == sequence),
-                        "{species:?} token lantern emitted undeclared glyph {sequence:?} with twinkle={twinkle}"
+                        AuthoredGlyph::declared_repertoire()
+                            .any(|declared| declared == glyph.as_char()),
+                        "{species:?} token lantern emitted non-authored glyph {:?} with twinkle={twinkle}",
+                        glyph.as_char(),
                     );
                 }
             }
@@ -2293,6 +2356,9 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            presentation_motion: super::super::input::prop_presentation_motion(
+                crate::game::habitat::TOKEN_PEBBLE_25K,
+            ),
         }];
         initial.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
             catalog_id: crate::game::habitat::TOKEN_PEBBLE_25K,
@@ -2303,8 +2369,8 @@ mod tests {
             motion_phase: None,
             chest_lid_open: None,
             bloom_active: None,
-            origin_points: [180.0, 280.0],
         }];
+        initial.frame.prop_instances = vec![prop_frame(0, [180.0, 280.0], [0.0; 2])];
         let initial = std::sync::Arc::new(initial);
         let mut built = build_scene_generation_owned(
             std::sync::Arc::clone(&initial),
@@ -2354,7 +2420,10 @@ mod tests {
         assert_eq!(built.content_checksum, rebuilt.content_checksum);
         assert_eq!(built.frame_checksum, rebuilt.frame_checksum);
         assert_eq!(built.frame.prop_slots, rebuilt.frame.prop_slots);
-        assert_eq!(built.frame.prop_slots[0].opacity, 0.72);
+        assert_eq!(
+            built.frame.prop_slots[0].opacity,
+            asleep.frame.prop_instances[0].opacity
+        );
 
         let before = built.clone();
         assert_eq!(
@@ -2507,7 +2576,6 @@ mod tests {
                 motion_phase: None,
                 chest_lid_open: None,
                 bloom_active: None,
-                origin_points: [0.0; 2],
             });
         assert!(build_scene_generation(&mismatch, generation_key(1)).is_err());
 
@@ -2572,6 +2640,9 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            presentation_motion: super::super::input::prop_presentation_motion(
+                crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            ),
         }];
         snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
             catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
@@ -2582,8 +2653,8 @@ mod tests {
             motion_phase: None,
             chest_lid_open: Some(true),
             bloom_active: None,
-            origin_points: [180.0, 280.0],
         }];
+        snapshot.frame.prop_instances = vec![prop_frame(0, [180.0, 280.0], [0.0; 2])];
         let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
         let base = crate::game::habitat::catalog_prop_by_str(
             crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
@@ -2637,7 +2708,7 @@ mod tests {
         )
         .unwrap();
         let mut moved = (*initial).clone();
-        moved.content.prop_animation_states[0].origin_points[0] += 5.0;
+        moved.frame.prop_instances[0].origin_points[0] += 5.0;
         let moved = std::sync::Arc::new(moved);
         let changes = super::super::runtime::classify_snapshot_changes(&initial, &moved);
         built
@@ -2657,7 +2728,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_prop_motion_uses_authored_cell_scale_and_direction() {
+    fn retained_prop_motion_uses_explicit_presentation_offsets() {
         let offset_for = |catalog_id, motion_phase| {
             let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
             snapshot.topology.visible_props = vec![super::super::PropTopologySnapshot {
@@ -2665,6 +2736,7 @@ mod tests {
                 stable_order: 0,
                 zone: super::super::PropZoneSnapshot::FloorMid,
                 authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+                presentation_motion: super::super::input::prop_presentation_motion(catalog_id),
             }];
             snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
                 catalog_id,
@@ -2675,9 +2747,15 @@ mod tests {
                 motion_phase: Some(motion_phase),
                 chest_lid_open: None,
                 bloom_active: None,
-                origin_points: [180.0, 280.0],
             }];
             let cell_extent = snapshot.topology.glyph_grid.cell_extent_points;
+            let motion_offset = match (catalog_id, motion_phase) {
+                (crate::game::habitat::TOKEN_PEBBLE_25K, 1)
+                | (crate::game::habitat::TOKEN_LANTERN_10M, 0) => [0.0, cell_extent[1]],
+                (crate::game::habitat::TOKEN_ORBIT_5M, 1) => [cell_extent[0], 0.0],
+                _ => [0.0; 2],
+            };
+            snapshot.frame.prop_instances = vec![prop_frame(0, [180.0, 280.0], motion_offset)];
             let built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
             (built.frame.prop_slots[0].motion_offset_points, cell_extent)
         };
@@ -2721,6 +2799,9 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            presentation_motion: super::super::input::prop_presentation_motion(
+                crate::game::habitat::HEAVY_SESSION_PLANTER,
+            ),
         }];
         snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
             catalog_id: crate::game::habitat::HEAVY_SESSION_PLANTER,
@@ -2731,8 +2812,8 @@ mod tests {
             motion_phase: None,
             chest_lid_open: None,
             bloom_active: Some(true),
-            origin_points: [180.0, 280.0],
         }];
+        snapshot.frame.prop_instances = vec![prop_frame(0, [180.0, 280.0], [0.0; 2])];
         let built = build_scene_generation(&snapshot, generation_key(44)).unwrap();
         let content = built.content().prop_slots[0].content.unwrap();
         let paints = built.content().prop_paint_slots[0].paints;
@@ -2774,6 +2855,7 @@ mod tests {
                     stable_order: 0,
                     zone: super::super::PropZoneSnapshot::FloorMid,
                     authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+                    presentation_motion: super::super::input::prop_presentation_motion(catalog_id),
                 }];
                 snapshot.content.prop_animation_states =
                     vec![super::super::PropAnimationSnapshot {
@@ -2785,8 +2867,8 @@ mod tests {
                         motion_phase: None,
                         chest_lid_open: None,
                         bloom_active: Some(bloom_active),
-                        origin_points: [180.0, 280.0],
                     }];
+                snapshot.frame.prop_instances = vec![prop_frame(0, [180.0, 280.0], [0.0; 2])];
                 let built = build_scene_generation(&snapshot, generation_key(45)).unwrap();
                 let content = built.content().prop_slots[0].content.unwrap();
                 let paints = built.content().prop_paint_slots[0].paints;
@@ -2820,6 +2902,7 @@ mod tests {
                 stable_order: 0,
                 zone: super::super::PropZoneSnapshot::FloorMid,
                 authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+                presentation_motion: super::super::input::prop_presentation_motion(catalog_id),
             }];
             snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
                 catalog_id,
@@ -2830,8 +2913,8 @@ mod tests {
                 motion_phase: None,
                 chest_lid_open: None,
                 bloom_active: Some(true),
-                origin_points: [180.0, 280.0],
             }];
+            snapshot.frame.prop_instances = vec![prop_frame(0, [180.0, 280.0], [0.0; 2])];
             assert_eq!(
                 build_scene_generation(&snapshot, generation_key(46)),
                 Err(SceneGenerationError::SnapshotRejected(
@@ -2961,6 +3044,9 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            presentation_motion: super::super::input::prop_presentation_motion(
+                crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            ),
         }];
         snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
             catalog_id: crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
@@ -2971,8 +3057,8 @@ mod tests {
             motion_phase: None,
             chest_lid_open: Some(true),
             bloom_active: None,
-            origin_points: [10.0, 20.0],
         }];
+        snapshot.frame.prop_instances = vec![prop_frame(0, [10.0, 20.0], [0.0; 2])];
         let mut built = build_scene_generation(&snapshot, generation_key(1)).unwrap();
         let attachment = built.template.attachments[0].clone();
         let source = built
@@ -3532,6 +3618,7 @@ mod tests {
                 stable_order: index as u8,
                 zone: spec.zone.into(),
                 authored_depth: spec.pet_layer.into(),
+                presentation_motion: super::super::input::prop_presentation_motion(spec.id),
             })
             .collect();
         base.content.prop_animation_states = base
@@ -3549,7 +3636,18 @@ mod tests {
                     .then_some(false),
                 bloom_active: crate::game::habitat::habitat_prop_supports_bloom(prop.catalog_id)
                     .then_some(false),
-                origin_points: [20.0 + f32::from(prop.stable_order) * 24.0, 280.0],
+            })
+            .collect();
+        base.frame.prop_instances = base
+            .topology
+            .visible_props
+            .iter()
+            .map(|prop| {
+                prop_frame(
+                    prop.stable_order,
+                    [20.0 + f32::from(prop.stable_order) * 24.0, 280.0],
+                    [0.0; 2],
+                )
             })
             .collect();
         base.topology.visible_tank_inhabitants = crate::game::habitat::TANK_INHABITANT_CATALOG
@@ -3574,7 +3672,6 @@ mod tests {
                 visible: true,
                 origin_col: 1,
                 origin_row: 1,
-                origin_points: [40.0 + f32::from(tank.stable_order) * 40.0, 120.0],
                 side: None,
                 layer: super::super::TankLayerSnapshot::Behind,
                 sprite_variant: 0,
@@ -3593,10 +3690,26 @@ mod tests {
                     row: 1,
                     glyph: if tank.stable_order == 0 { '╭' } else { '‹' },
                     layer: super::super::TankLayerSnapshot::Behind,
-                    position_points: [40.0, 120.0],
                 }],
-                bounds: Some(super::super::TankBoundsSnapshot { x: 1, y: 1, width: 1, height: 1 }),
+            })
+            .collect();
+        base.frame.tank_instances = base
+            .topology
+            .visible_tank_inhabitants
+            .iter()
+            .map(|tank| super::super::TankFrameSnapshot {
+                slot: tank.stable_order,
+                visible: true,
+                origin_points: [40.0 + f32::from(tank.stable_order) * 40.0, 120.0],
+                cells: vec![super::super::TankCellFrameSnapshot {
+                    source_position_points: [40.0, 120.0],
+                    position_points: [40.0, 120.0],
+                    target_position_points: [40.0, 120.0],
+                }],
                 bounds_points: Some([40.0, 120.0, 8.0, 12.0]),
+                semantic_revision: super::super::SemanticRevision(1),
+                started_at_monotonic_ms: 0,
+                duration_ms: 4_000,
             })
             .collect();
 
@@ -4347,6 +4460,42 @@ mod tests {
         snapshot.frame.dimmed = dim > 0.0;
         snapshot.frame.dim_amount = dim;
         snapshot
+    }
+
+    fn snapshot_with_private_capture_frame(
+        gauge: f32,
+        dim: f32,
+        activity_opacity: f32,
+    ) -> CompanionSceneSnapshot {
+        let mut snapshot = snapshot_with_private_frame(gauge, dim);
+        snapshot.frame.activity_recent = true;
+        snapshot.frame.activity_opacity = activity_opacity;
+        snapshot
+    }
+
+    #[test]
+    fn capture_safe_frame_canonicalizes_private_pixels_without_mutating_live_frame() {
+        let first = build_scene_generation(
+            &snapshot_with_private_capture_frame(0.312_345_68, 0.567_890_1, 0.312_345_68),
+            generation_key(72),
+        )
+        .unwrap();
+        let second = build_scene_generation(
+            &snapshot_with_private_capture_frame(0.423_456_8, 0.678_901_2, 0.678_901_2),
+            generation_key(72),
+        )
+        .unwrap();
+        let first_live = first.frame().clone();
+        let second_live = second.frame().clone();
+
+        let first_capture = first_live.capture_safe_clone(first.template());
+        let second_capture = second_live.capture_safe_clone(second.template());
+
+        assert_eq!(first_capture, second_capture);
+        assert_eq!(first_capture.gauges, [0.375; 4]);
+        assert_eq!(first_capture.dim_amount, 1.0);
+        assert_eq!(first.frame(), &first_live);
+        assert_eq!(second.frame(), &second_live);
     }
 
     #[test]

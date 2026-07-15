@@ -77,7 +77,7 @@ fn live_scene_tick_preparation_stays_out_of_the_smooth_plan_path() {
         "\nfn prepare_scene_runtime_tick(",
         "\nfn service_scene_runtime(",
     );
-    assert!(prepare_scene.contains("CompanionSceneSnapshot::project_with_input("));
+    assert!(prepare_scene.contains("CompanionSceneSnapshot::project_with_input_and_options("));
     for forbidden in [
         "derive_round_scene_model(",
         "prepare_companion_frame(",

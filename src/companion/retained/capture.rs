@@ -386,6 +386,13 @@ impl SceneReadbackCache {
     pub(super) const fn creation_events(&self) -> u64 {
         self.creation_events
     }
+
+    pub(super) const fn current_buffer_size(&self) -> u64 {
+        match &self.current {
+            Some(readback) => readback.layout.buffer_size(),
+            None => 0,
+        }
+    }
 }
 
 /// Removes copy-row padding and converts the scene intermediate into canonical
@@ -657,13 +664,17 @@ impl<'host> RetainedCaptureTarget<'host> {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
-        self.host
+        let poll = self
+            .host
             .device
             .poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),
                 timeout: Some(Duration::from_secs(5)),
             })
-            .map_err(|_| RetainedFailureCategory::CapturePollTimeout)?;
+            .map_err(|_| RetainedFailureCategory::CapturePollTimeout);
+        let mailbox = self.host.drain_current_gpu_error();
+        poll?;
+        mailbox?;
         receiver
             .recv_timeout(Duration::from_millis(100))
             .map_err(|_| RetainedFailureCategory::CaptureMapFailed)?

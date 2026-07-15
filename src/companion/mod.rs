@@ -2,6 +2,8 @@
 
 pub mod app;
 #[cfg(feature = "retained-renderer")]
+mod direct_capture;
+#[cfg(feature = "retained-renderer")]
 pub mod paired_review;
 pub mod pixel;
 pub mod render;

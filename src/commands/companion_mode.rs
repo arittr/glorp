@@ -14,6 +14,10 @@ pub struct CompanionReviewOptions {
     /// Hidden automation output for a redacted runtime-metrics snapshot. This
     /// never contains pet names, HUD values, helper output, or usage data.
     pub runtime_metrics_out: Option<PathBuf>,
+    /// Hidden native qualification request. Runs the exact direct retained scene
+    /// through an equal warmup/measured dual-cadence virtual schedule before the
+    /// terminal direct capture and metrics write.
+    pub review_lifetime_frames: Option<u64>,
     /// Pins the pet's depth plane for deterministic captures. Never persisted, and
     /// consumed only by Smooth scene preparation.
     pub depth: Option<CompanionReviewDepth>,
@@ -27,8 +31,10 @@ pub struct CompanionReviewOptions {
     /// variant); never persisted.
     pub force_dim_overlay: bool,
     /// Hidden retained-scene rollout override. `None` preserves the shipping
-    /// retained translator; explicit `off`, `shadow`, and `live` values are
-    /// forwarded to the native companion process for bounded review only.
+    /// policy: direct Live while the Gate D switch is enabled, or the legacy
+    /// translator after the one-line rollback. Explicit `off`, `shadow`, and
+    /// `live` values are forwarded to the native companion process for bounded
+    /// review only.
     pub retained_scene_runtime: Option<SceneRuntimeRollout>,
     /// Dev/test-only bounded retained fault injection. Threaded from the hidden
     /// `--review-inject-retained-fault` flag, compiled only with the retained
@@ -41,6 +47,115 @@ pub struct CompanionReviewOptions {
         feature = "dev-preview"
     ))]
     pub retained_fault_injection: Option<RetainedFaultInjection>,
+}
+
+/// One deterministic retained-host lifecycle or fault case. This automation is
+/// compiled only into local dev-preview builds; release companion binaries have
+/// neither the CLI value nor the harness entrypoint.
+#[cfg(all(
+    target_os = "macos",
+    feature = "retained-renderer",
+    feature = "dev-preview"
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReviewSceneSoakScenario {
+    ResizePreparing,
+    ResizeReady,
+    ResizeActivating,
+    ResizeStorm,
+    BackingScale,
+    HiddenSemanticReveal,
+    CaptureSwap,
+    ShutdownWorker,
+    ShutdownActivation,
+    TrackingRunLoop,
+    SlowTick,
+    SurfaceOutdated,
+    SurfaceTimeout,
+    SurfaceOccluded,
+    SurfaceLost,
+    SurfaceValidation,
+    DeviceLoss,
+    DeviceValidation,
+    DeviceOutOfMemory,
+}
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "retained-renderer",
+    feature = "dev-preview"
+))]
+impl ReviewSceneSoakScenario {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ResizePreparing => "resize-preparing",
+            Self::ResizeReady => "resize-ready",
+            Self::ResizeActivating => "resize-activating",
+            Self::ResizeStorm => "resize-storm",
+            Self::BackingScale => "backing-scale",
+            Self::HiddenSemanticReveal => "hidden-semantic-reveal",
+            Self::CaptureSwap => "capture-swap",
+            Self::ShutdownWorker => "shutdown-worker",
+            Self::ShutdownActivation => "shutdown-activation",
+            Self::TrackingRunLoop => "tracking-run-loop",
+            Self::SlowTick => "slow-tick",
+            Self::SurfaceOutdated => "surface-outdated",
+            Self::SurfaceTimeout => "surface-timeout",
+            Self::SurfaceOccluded => "surface-occluded",
+            Self::SurfaceLost => "surface-lost",
+            Self::SurfaceValidation => "surface-validation",
+            Self::DeviceLoss => "device-loss",
+            Self::DeviceValidation => "device-validation",
+            Self::DeviceOutOfMemory => "device-out-of-memory",
+        }
+    }
+}
+
+/// Sanitized counters emitted by one deterministic host soak. They describe
+/// only transitions actually driven by the typed harness; they never claim that
+/// a native AppKit gesture or a real GPU fault occurred.
+#[cfg(all(
+    target_os = "macos",
+    feature = "retained-renderer",
+    feature = "dev-preview"
+))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ReviewSceneSoakCounters {
+    pub ticks_attempted: u64,
+    pub ticks_completed: u64,
+    pub ticks_suppressed: u64,
+    pub virtual_elapsed_ms: u64,
+    pub resize_requests: u64,
+    pub surface_reconfigurations: u64,
+    pub presents: u64,
+    pub skips: u64,
+    pub fallbacks: u64,
+    pub capture_bound: u64,
+    pub capture_deferred: u64,
+    pub worker_cancel_requests: u64,
+    pub hidden_updates_coalesced: u64,
+    pub reveals: u64,
+    pub shutdowns: u64,
+}
+
+/// Machine-readable result for one deterministic soak case. All strings come
+/// from closed enums or static failure categories; no live state is serialized.
+#[cfg(all(
+    target_os = "macos",
+    feature = "retained-renderer",
+    feature = "dev-preview"
+))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReviewSceneSoakReport {
+    pub schema_version: u32,
+    pub scenario: &'static str,
+    pub execution_mode: &'static str,
+    pub expected_outcome: &'static str,
+    pub observed_outcome: &'static str,
+    pub sanitized_category: Option<&'static str>,
+    pub counters: ReviewSceneSoakCounters,
+    pub native_interactions_deferred: &'static [&'static str],
+    pub passed: bool,
 }
 
 /// A bounded, static retained fault the dev/test harness can inject to exercise
@@ -180,6 +295,7 @@ impl CompanionReviewOptions {
             || self.duration_ms.is_some()
             || self.capture_dir.is_some()
             || self.runtime_metrics_out.is_some()
+            || self.review_lifetime_frames.is_some()
             || self.depth.is_some()
             || self.retained_scene_runtime.is_some()
     }
@@ -204,8 +320,10 @@ impl SceneRuntimeRollout {
     }
 }
 
-/// One-line rollback for any future automatic direct-scene route. Task 14 keeps
-/// it disabled: only the hidden explicit review flag can enter Live.
+/// One-line rollback for the direct Retained scene route during the Gate D
+/// canary. This remains `false` after the release-candidate hold hit the progress
+/// watchdog; Auto Retained uses `Off` and explicit Retained uses `Shadow`, so
+/// both present through the legacy translator until the blocker is fixed.
 pub const AUTO_SCENE_RUNTIME_ON_APPLE_SILICON: bool = false;
 
 pub const fn resolve_scene_rollout(
@@ -218,6 +336,60 @@ pub const fn resolve_scene_rollout(
         SceneRuntimeRollout::Live
     } else {
         SceneRuntimeRollout::Shadow
+    }
+}
+
+/// The scene path that actually presents the selected renderer. `Shadow` still
+/// presents through the legacy retained translator; only `Live` presents the
+/// direct scene runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveSceneRoute {
+    Direct,
+    Legacy,
+    NotApplicable,
+}
+
+impl EffectiveSceneRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Legacy => "legacy",
+            Self::NotApplicable => "not-applicable",
+        }
+    }
+}
+
+/// The authoritative retained scene-runtime policy used by both app startup and
+/// capability reporting. An explicit review override wins; otherwise automatic
+/// direct routing remains guarded by the one-line rollout constant.
+pub const fn resolve_scene_runtime_rollout(
+    request: CompanionRendererRequest,
+    effective: EffectiveCompanionRenderer,
+    retained_scene_runtime: Option<SceneRuntimeRollout>,
+    auto_scene_runtime_enabled: bool,
+) -> SceneRuntimeRollout {
+    if !effective.is_retained() {
+        return SceneRuntimeRollout::Off;
+    }
+    match retained_scene_runtime {
+        Some(SceneRuntimeRollout::Off) => SceneRuntimeRollout::Off,
+        Some(SceneRuntimeRollout::Shadow) => resolve_scene_rollout(true, false),
+        Some(SceneRuntimeRollout::Live) => resolve_scene_rollout(true, true),
+        None if auto_scene_runtime_enabled => SceneRuntimeRollout::Live,
+        None => resolve_scene_rollout(request.is_explicit_retained(), false),
+    }
+}
+
+pub const fn effective_scene_route(
+    effective: EffectiveCompanionRenderer,
+    rollout: SceneRuntimeRollout,
+) -> EffectiveSceneRoute {
+    if !effective.is_retained() {
+        EffectiveSceneRoute::NotApplicable
+    } else if matches!(rollout, SceneRuntimeRollout::Live) {
+        EffectiveSceneRoute::Direct
+    } else {
+        EffectiveSceneRoute::Legacy
     }
 }
 
@@ -270,9 +442,10 @@ impl CompanionReviewState {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_renderer, resolve_scene_rollout, CompanionRendererRequest, CompanionRendererTarget,
+        effective_scene_route, resolve_renderer, resolve_scene_rollout,
+        resolve_scene_runtime_rollout, CompanionRendererRequest, CompanionRendererTarget,
         CompanionReviewOptions, CompanionReviewSize, CompanionReviewState,
-        EffectiveCompanionRenderer, RendererRuntimeState, SceneRuntimeRollout,
+        EffectiveCompanionRenderer, EffectiveSceneRoute, RendererRuntimeState, SceneRuntimeRollout,
         AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
     };
     use std::str::FromStr;
@@ -348,11 +521,79 @@ mod tests {
     }
 
     #[test]
-    fn scene_runtime_rollout_one_line_rollback_disables_auto_live_path() {
+    fn scene_runtime_rollout_one_line_rollback_disables_direct_retained_paths() {
         const { assert!(!AUTO_SCENE_RUNTIME_ON_APPLE_SILICON) };
         assert_eq!(
             resolve_scene_rollout(true, AUTO_SCENE_RUNTIME_ON_APPLE_SILICON),
             SceneRuntimeRollout::Shadow
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    #[test]
+    fn scene_runtime_one_line_rollback_rehearsal_restores_legacy_paths() {
+        let auto = resolve_scene_runtime_rollout(
+            CompanionRendererRequest::Auto,
+            EffectiveCompanionRenderer::Retained,
+            None,
+            false,
+        );
+        assert_eq!(auto, SceneRuntimeRollout::Off);
+        assert_eq!(
+            effective_scene_route(EffectiveCompanionRenderer::Retained, auto),
+            EffectiveSceneRoute::Legacy
+        );
+
+        let explicit = resolve_scene_runtime_rollout(
+            CompanionRendererRequest::Retained,
+            EffectiveCompanionRenderer::Retained,
+            None,
+            false,
+        );
+        assert_eq!(explicit, SceneRuntimeRollout::Shadow);
+        assert_eq!(
+            effective_scene_route(EffectiveCompanionRenderer::Retained, explicit),
+            EffectiveSceneRoute::Legacy
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    #[test]
+    fn effective_scene_route_uses_the_app_startup_rollout_policy() {
+        let auto_rollout = resolve_scene_runtime_rollout(
+            CompanionRendererRequest::Auto,
+            EffectiveCompanionRenderer::Retained,
+            None,
+            AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+        );
+        assert_eq!(auto_rollout, SceneRuntimeRollout::Off);
+        assert_eq!(
+            effective_scene_route(EffectiveCompanionRenderer::Retained, auto_rollout),
+            EffectiveSceneRoute::Legacy
+        );
+
+        let explicit_retained = resolve_scene_runtime_rollout(
+            CompanionRendererRequest::Retained,
+            EffectiveCompanionRenderer::Retained,
+            None,
+            AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+        );
+        assert_eq!(explicit_retained, SceneRuntimeRollout::Shadow);
+        assert_eq!(
+            effective_scene_route(EffectiveCompanionRenderer::Retained, explicit_retained),
+            EffectiveSceneRoute::Legacy
+        );
+
+        let explicit_live = resolve_scene_runtime_rollout(
+            CompanionRendererRequest::Auto,
+            EffectiveCompanionRenderer::Retained,
+            Some(SceneRuntimeRollout::Live),
+            AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+        );
+        assert_eq!(explicit_live, SceneRuntimeRollout::Live);
+        assert_eq!(
+            effective_scene_route(EffectiveCompanionRenderer::Retained, explicit_live),
+            EffectiveSceneRoute::Direct
         );
     }
 
@@ -528,6 +769,41 @@ mod tests {
         }
     }
 
+    #[cfg(all(
+        target_os = "macos",
+        feature = "retained-renderer",
+        feature = "dev-preview"
+    ))]
+    #[test]
+    fn review_scene_soak_names_are_stable_and_complete() {
+        use super::ReviewSceneSoakScenario as Scenario;
+
+        let names = [
+            (Scenario::ResizePreparing, "resize-preparing"),
+            (Scenario::ResizeReady, "resize-ready"),
+            (Scenario::ResizeActivating, "resize-activating"),
+            (Scenario::ResizeStorm, "resize-storm"),
+            (Scenario::BackingScale, "backing-scale"),
+            (Scenario::HiddenSemanticReveal, "hidden-semantic-reveal"),
+            (Scenario::CaptureSwap, "capture-swap"),
+            (Scenario::ShutdownWorker, "shutdown-worker"),
+            (Scenario::ShutdownActivation, "shutdown-activation"),
+            (Scenario::TrackingRunLoop, "tracking-run-loop"),
+            (Scenario::SlowTick, "slow-tick"),
+            (Scenario::SurfaceOutdated, "surface-outdated"),
+            (Scenario::SurfaceTimeout, "surface-timeout"),
+            (Scenario::SurfaceOccluded, "surface-occluded"),
+            (Scenario::SurfaceLost, "surface-lost"),
+            (Scenario::SurfaceValidation, "surface-validation"),
+            (Scenario::DeviceLoss, "device-loss"),
+            (Scenario::DeviceValidation, "device-validation"),
+            (Scenario::DeviceOutOfMemory, "device-out-of-memory"),
+        ];
+        for (scenario, expected) in names {
+            assert_eq!(scenario.as_str(), expected);
+        }
+    }
+
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
     #[test]
     fn explicit_retained_requires_compiled_support() {
@@ -598,6 +874,14 @@ mod tests {
             text.contains(&format!("effective-renderer={}", expected.as_str())),
             "{text}"
         );
+        if expected.is_retained() {
+            assert!(text.contains("effective-scene-route=legacy"), "{text}");
+        } else {
+            assert!(
+                text.contains("effective-scene-route=not-applicable"),
+                "{text}"
+            );
+        }
     }
 
     #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
@@ -608,9 +892,25 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("requested-renderer=retained"), "{text}");
         assert!(text.contains("retained-compiled=true"), "{text}");
-        // Explicit Retained resolves to Retained whenever it is compiled in,
-        // proving the shipped capability before the Auto policy flip.
+        // Explicit Retained remains available, but the failed hold triggered the
+        // one-line scene-route rollback to the legacy translator.
         assert!(text.contains("effective-renderer=retained"), "{text}");
+        assert!(text.contains("effective-scene-route=legacy"), "{text}");
+    }
+
+    #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+    #[test]
+    fn capabilities_metadata_honors_explicit_live_scene_runtime() {
+        let mut out = Vec::new();
+        super::print_companion_capabilities_with_scene_runtime(
+            CompanionRendererRequest::Retained,
+            Some(SceneRuntimeRollout::Live),
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("effective-renderer=retained"), "{text}");
+        assert!(text.contains("effective-scene-route=direct"), "{text}");
     }
 }
 
@@ -628,6 +928,19 @@ pub enum CompanionRendererRequest {
 }
 
 impl CompanionRendererRequest {
+    /// Whether this request explicitly selected the retained backend. Kept
+    /// feature-neutral so capability code also compiles in Smooth-only builds.
+    pub const fn is_explicit_retained(self) -> bool {
+        #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+        {
+            matches!(self, Self::Retained)
+        }
+        #[cfg(not(all(target_os = "macos", feature = "retained-renderer")))]
+        {
+            false
+        }
+    }
+
     /// The `--renderer` value to forward when the `companion` command spawns the
     /// native `companion-app` process. `Auto` forwards nothing so the child
     /// re-resolves the default itself.
@@ -755,6 +1068,16 @@ pub fn print_companion_capabilities(
     request: CompanionRendererRequest,
     out: &mut impl std::io::Write,
 ) -> std::io::Result<()> {
+    print_companion_capabilities_with_scene_runtime(request, None, out)
+}
+
+/// Capability reporting variant used by CLI dispatch so the bounded metadata
+/// command evaluates the same explicit scene-runtime override as app startup.
+pub fn print_companion_capabilities_with_scene_runtime(
+    request: CompanionRendererRequest,
+    retained_scene_runtime: Option<SceneRuntimeRollout>,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
     let target = CompanionRendererTarget::current();
     let effective = resolve_renderer(
         request,
@@ -765,8 +1088,24 @@ pub fn print_companion_capabilities(
     writeln!(out, "glorp-companion-capabilities: v1")?;
     writeln!(out, "requested-renderer={}", request.label())?;
     match effective {
-        Ok(effective) => writeln!(out, "effective-renderer={}", effective.as_str())?,
-        Err(error) => writeln!(out, "effective-renderer=unavailable:{}", error.category())?,
+        Ok(effective) => {
+            writeln!(out, "effective-renderer={}", effective.as_str())?;
+            let rollout = resolve_scene_runtime_rollout(
+                request,
+                effective,
+                retained_scene_runtime,
+                AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+            );
+            writeln!(
+                out,
+                "effective-scene-route={}",
+                effective_scene_route(effective, rollout).as_str()
+            )?;
+        }
+        Err(error) => {
+            writeln!(out, "effective-renderer=unavailable:{}", error.category())?;
+            writeln!(out, "effective-scene-route=unavailable")?;
+        }
     }
     writeln!(out, "retained-compiled={RETAINED_COMPILED}")?;
     writeln!(

@@ -147,9 +147,10 @@ describe("macOS app packaging", () => {
   it("runs staged capability smokes proving the shipped matrix before upload", () => {
     const workflow = readPublishWorkflow();
 
-    // Apple Silicon: retained compiled in and Auto now resolves to Retained
-    // (the cutover constant is on); explicit Retained still proves the matrix.
-    const armSmoke = "staged retained capability smoke (Apple Silicon)";
+    // Apple Silicon: use the exact app-bundle executable on a native logged-in
+    // host. Auto stays on the legacy route while the Gate D rollback is active;
+    // explicit Live still proves and captures the direct path.
+    const armSmoke = "staged direct route proof (Apple Silicon)";
     assert(workflow.includes(armSmoke));
     const armSmokeBlock = workflow.slice(
       workflow.indexOf(armSmoke),
@@ -159,11 +160,35 @@ describe("macOS app packaging", () => {
     assert.match(armSmokeBlock, /retained-compiled=true/);
     assert.match(armSmokeBlock, /auto-retained-on-apple-silicon=true/);
     assert.match(armSmokeBlock, /effective-renderer=retained/);
+    assert.match(armSmokeBlock, /effective-scene-route=legacy/);
     assert.match(
       armSmokeBlock,
-      /companion-app --renderer retained --print-capabilities/,
+      /companion-app --renderer retained --retained-scene-runtime live --print-capabilities/,
     );
-    assert.match(armSmokeBlock, /effective-renderer=retained/);
+    assert.match(armSmokeBlock, /effective-scene-route=direct/);
+    assert.match(
+      armSmokeBlock,
+      /app_bin="target\/macos\/Glorp\.app\/Contents\/MacOS\/glorp"/,
+    );
+    assert.match(armSmokeBlock, /test "\$\(uname -m\)" = "arm64"/);
+    assert.match(armSmokeBlock, /stat -f '%Su' \/dev\/console/);
+    assert.match(armSmokeBlock, /test "\$\(id -un\)" = "\$console_user"/);
+    assert.match(
+      armSmokeBlock,
+      /capture_path="\$capture_dir\/scene\.png"/,
+    );
+    assert.match(
+      armSmokeBlock,
+      /--renderer retained \\\n+\s+--retained-scene-runtime live \\\n+\s+--review-size 360x360/,
+    );
+    assert.match(armSmokeBlock, /test -f "\$capture_path"/);
+    assert.match(armSmokeBlock, /for artifact in scene-manifest\.json scene-snapshot\.json scene-version\.json scene-metrics\.json scene-artifacts\.json/);
+    assert.match(armSmokeBlock, /test -s "\$capture_dir\/\$artifact"/);
+    assert.match(armSmokeBlock, /direct-retained-scene/);
+    assert.match(armSmokeBlock, /nonblank_validation/);
+    assert.match(armSmokeBlock, /CAPTURE_PATH="\$capture_path" swift/);
+    assert.match(armSmokeBlock, /visibleNonblack/);
+    assert.match(armSmokeBlock, /colors\.count > 1/);
 
     // Intel: retained unavailable, so Auto stays Smooth even though the cutover
     // constant is on; explicit Retained is rejected.

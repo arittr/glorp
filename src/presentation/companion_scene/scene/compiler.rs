@@ -710,40 +710,17 @@ fn project_prop_frame_delta(
     snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
     output: &mut Vec<PropFrameSlot>,
 ) {
-    for source in &snapshot.content.prop_animation_states {
+    for source in &snapshot.frame.prop_instances {
         output.push(PropFrameSlot {
-            slot: source.stable_order,
+            slot: source.slot,
             visible: true,
             origin_points: [
                 source.origin_points[0],
                 snapshot.topology.layout.height_points - source.origin_points[1],
             ],
-            motion_offset_points: prop_motion_offset_points(snapshot, source),
-            opacity: if snapshot.frame.asleep { 0.72 } else { 1.0 },
+            motion_offset_points: source.motion_offset_points,
+            opacity: source.opacity,
         });
-    }
-}
-
-fn prop_motion_offset_points(
-    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
-    source: &crate::presentation::companion_scene::PropAnimationSnapshot,
-) -> [f32; 2] {
-    let cell = snapshot.topology.glyph_grid.cell_extent_points;
-    let shifted = source
-        .motion_phase
-        .is_some_and(|phase| !phase.is_multiple_of(2));
-    let initial_phase = source
-        .motion_phase
-        .is_some_and(|phase| phase.is_multiple_of(2));
-    match source.catalog_id {
-        crate::game::habitat::TOKEN_PEBBLE_25K | crate::game::habitat::TOKEN_SHELL_100K
-            if shifted =>
-        {
-            [0.0, cell[1]]
-        }
-        crate::game::habitat::TOKEN_ORBIT_5M if shifted => [cell[0], 0.0],
-        crate::game::habitat::TOKEN_LANTERN_10M if initial_phase => [0.0, cell[1]],
-        _ => [0.0; 2],
     }
 }
 
@@ -752,14 +729,19 @@ fn project_tank_frame_delta(
     snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
     output: &mut Vec<TankFrameSlot>,
 ) -> Result<(), SceneGenerationError> {
-    for source in &snapshot.content.tank_animation_states {
+    for (semantic, source) in snapshot
+        .content
+        .tank_animation_states
+        .iter()
+        .zip(&snapshot.frame.tank_instances)
+    {
         let mut cells = [TankCellFrame {
             visible: false,
             position_points: [0.0; 2],
             layer: InstanceLayer::Behind,
             bounds_points: [0.0; 4],
         }; MAX_TANK_GLYPHS_PER_SLOT];
-        for (index, cell) in source.cells.iter().enumerate() {
+        for (index, (cell, semantic_cell)) in source.cells.iter().zip(&semantic.cells).enumerate() {
             if index >= MAX_TANK_GLYPHS_PER_SLOT {
                 return Err(SceneGenerationError::FixedCapacity);
             }
@@ -775,7 +757,7 @@ fn project_tank_frame_delta(
                     cell.position_points[0],
                     snapshot.topology.layout.height_points - cell.position_points[1],
                 ],
-                layer: match cell.layer {
+                layer: match semantic_cell.layer {
                     crate::presentation::companion_scene::TankLayerSnapshot::Behind => {
                         InstanceLayer::Behind
                     }
@@ -790,7 +772,7 @@ fn project_tank_frame_delta(
             };
         }
         output.push(TankFrameSlot {
-            slot: source.stable_order,
+            slot: source.slot,
             visible: source.visible,
             origin_points: [
                 source.origin_points[0],
@@ -2544,42 +2526,47 @@ fn build_frame(
         Some(snapshot.frame.dim_amount),
     )?;
 
-    for semantic in &snapshot.content.prop_animation_states {
-        let slot = usize::from(semantic.stable_order);
+    for source in &snapshot.frame.prop_instances {
+        let slot = usize::from(source.slot);
         let origin = [
-            semantic.origin_points[0],
-            layout.height_points - semantic.origin_points[1],
+            source.origin_points[0],
+            layout.height_points - source.origin_points[1],
         ];
         frame.prop_slots[slot] = PropFrameSlot {
-            slot: semantic.stable_order,
+            slot: source.slot,
             visible: true,
             origin_points: origin,
-            motion_offset_points: prop_motion_offset_points(snapshot, semantic),
-            opacity: if snapshot.frame.asleep { 0.72 } else { 1.0 },
+            motion_offset_points: source.motion_offset_points,
+            opacity: source.opacity,
         };
     }
-    for semantic in &snapshot.content.tank_animation_states {
-        let slot = usize::from(semantic.stable_order);
+    for (semantic, source) in snapshot
+        .content
+        .tank_animation_states
+        .iter()
+        .zip(&snapshot.frame.tank_instances)
+    {
+        let slot = usize::from(source.slot);
         let mut cells = [TankCellFrame {
             visible: false,
             position_points: [0.0; 2],
             layer: InstanceLayer::Behind,
             bounds_points: [0.0; 4],
         }; MAX_TANK_GLYPHS_PER_SLOT];
-        for (index, cell) in semantic.cells.iter().enumerate() {
-            let layer = match cell.layer {
+        for (index, (semantic_cell, cell)) in semantic.cells.iter().zip(&source.cells).enumerate() {
+            let layer = match semantic_cell.layer {
                 crate::presentation::companion_scene::TankLayerSnapshot::Behind => InstanceLayer::Behind,
                 crate::presentation::companion_scene::TankLayerSnapshot::Foreground
                 | crate::presentation::companion_scene::TankLayerSnapshot::BehindAnchorForegroundHost => InstanceLayer::Foreground,
             };
-            let bounds = semantic.bounds_points.unwrap_or([
+            let bounds = source.bounds_points.unwrap_or([
                 cell.position_points[0],
                 cell.position_points[1],
                 0.0,
                 0.0,
             ]);
             cells[index] = TankCellFrame {
-                visible: semantic.visible,
+                visible: source.visible,
                 position_points: [
                     cell.position_points[0],
                     layout.height_points - cell.position_points[1],
@@ -2594,11 +2581,11 @@ fn build_frame(
             };
         }
         frame.tank_slots[slot] = TankFrameSlot {
-            slot: semantic.stable_order,
-            visible: semantic.visible,
+            slot: source.slot,
+            visible: source.visible,
             origin_points: [
-                semantic.origin_points[0],
-                layout.height_points - semantic.origin_points[1],
+                source.origin_points[0],
+                layout.height_points - source.origin_points[1],
             ],
             cells,
         };

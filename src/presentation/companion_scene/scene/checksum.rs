@@ -436,6 +436,12 @@ pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGener
     Ok(hash.finish())
 }
 
+pub(crate) fn checksum_content_for_capture(
+    content: &SceneContent,
+) -> Result<u64, SceneGenerationError> {
+    checksum_content(content)
+}
+
 pub(super) fn checksum_frame(
     template: &SceneTemplate,
     frame: &SceneFrame,

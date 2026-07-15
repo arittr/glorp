@@ -255,6 +255,7 @@ fn prop_topology_changed(
         || previous.stable_order != newest.stable_order
         || previous.zone != newest.zone
         || previous.authored_depth != newest.authored_depth
+        || previous.presentation_motion != newest.presentation_motion
 }
 
 fn tank_topology_changed(
@@ -272,7 +273,8 @@ fn classify_tank_changes(
     newest: &TankAnimationSnapshot,
     changes: &mut SnapshotChangeSet,
 ) {
-    if previous.sprite_variant != newest.sprite_variant
+    if previous.visible != newest.visible
+        || previous.sprite_variant != newest.sprite_variant
         || previous.anemone_morph != newest.anemone_morph
         || previous.color_srgb8 != newest.color_srgb8
         || previous.bold != newest.bold
@@ -281,20 +283,17 @@ fn classify_tank_changes(
             .cells
             .iter()
             .zip(&newest.cells)
-            .any(|(left, right)| left.glyph != right.glyph)
+            .any(|(left, right)| left.glyph != right.glyph || left.layer != right.layer)
     {
         changes.semantic.insert(SemanticChangeMask::TANK);
-    }
-    if canonical_tank_frame_changed(previous, newest) {
-        changes.frame.insert(FrameChangeMask::TANK_INSTANCES);
     }
     // cadence_ms and calm are producer inputs already reflected in the resolved
     // cells/placement. They are not independent render state.
 }
 
 fn canonical_tank_frame_changed(
-    previous: &TankAnimationSnapshot,
-    newest: &TankAnimationSnapshot,
+    previous: &super::TankFrameSnapshot,
+    newest: &super::TankFrameSnapshot,
 ) -> bool {
     if previous.visible != newest.visible
         || previous.origin_points != newest.origin_points
@@ -319,14 +318,8 @@ fn canonical_tank_frame_changed(
                 0.0,
                 0.0,
             ]);
-            left.layer != right.layer
-                || left.position_points != right.position_points
-                || left_bounds != right_bounds
+            left.position_points != right.position_points || left_bounds != right_bounds
         })
-}
-
-fn prop_motion_is_offset(phase: Option<u8>) -> bool {
-    phase.is_some_and(|phase| !phase.is_multiple_of(2))
 }
 
 fn visible_pet_roles_changed(
@@ -485,18 +478,19 @@ pub(crate) fn classify_snapshot_changes(
         .iter()
         .zip(&newest.content.prop_animation_states)
     {
-        if left.sprite_phase != right.sprite_phase
+        if left.kind != right.kind
+            || left.sprite_phase != right.sprite_phase
             || left.twinkle_active != right.twinkle_active
+            || left.motion_phase != right.motion_phase
             || left.chest_lid_open != right.chest_lid_open
             || left.bloom_active != right.bloom_active
         {
             changes.semantic.insert(SemanticChangeMask::PROP);
         }
-        if prop_motion_is_offset(left.motion_phase) != prop_motion_is_offset(right.motion_phase)
-            || left.origin_points != right.origin_points
-        {
-            changes.frame.insert(FrameChangeMask::PROP_TRANSFORMS);
-        }
+    }
+
+    if previous.frame.prop_instances != newest.frame.prop_instances {
+        changes.frame.insert(FrameChangeMask::PROP_TRANSFORMS);
     }
 
     if previous.content.tank_animation_states.len() != newest.content.tank_animation_states.len() {
@@ -510,6 +504,16 @@ pub(crate) fn classify_snapshot_changes(
         .zip(&newest.content.tank_animation_states)
     {
         classify_tank_changes(left, right, &mut changes);
+    }
+    if previous.frame.tank_instances.len() != newest.frame.tank_instances.len()
+        || previous
+            .frame
+            .tank_instances
+            .iter()
+            .zip(&newest.frame.tank_instances)
+            .any(|(left, right)| canonical_tank_frame_changed(left, right))
+    {
+        changes.frame.insert(FrameChangeMask::TANK_INSTANCES);
     }
 
     if previous.content.ambient_semantics != newest.content.ambient_semantics {
@@ -554,6 +558,111 @@ pub(crate) fn classify_snapshot_changes(
     // revision, so changing redundant metadata with identical output is a no-op.
 
     changes
+}
+
+fn rebase_semantic_transition_frames(
+    previous: &CompanionSceneSnapshot,
+    newest: &mut CompanionSceneSnapshot,
+    semantic_revision: SemanticRevision,
+) {
+    for newest_frame in &mut newest.frame.prop_instances {
+        let Some(topology) = newest
+            .topology
+            .visible_props
+            .iter()
+            .find(|prop| prop.stable_order == newest_frame.slot)
+        else {
+            continue;
+        };
+        let Some(previous_frame) = previous
+            .frame
+            .prop_instances
+            .iter()
+            .find(|frame| frame.slot == newest_frame.slot)
+        else {
+            continue;
+        };
+        let previous_semantic = previous
+            .content
+            .prop_animation_states
+            .iter()
+            .find(|state| state.stable_order == newest_frame.slot);
+        let newest_semantic = newest
+            .content
+            .prop_animation_states
+            .iter()
+            .find(|state| state.stable_order == newest_frame.slot);
+        let transitioned = previous_semantic
+            .zip(newest_semantic)
+            .is_some_and(|(left, right)| {
+                left.motion_phase != right.motion_phase
+                    || left.chest_lid_open != right.chest_lid_open
+                    || left.sprite_phase != right.sprite_phase
+                    || left.twinkle_active != right.twinkle_active
+            });
+        if transitioned {
+            match topology.presentation_motion {
+                super::PropPresentationMotion::TwoPoseEase { duration_ms, curve } => {
+                    let target_pose = newest_frame.motion_offset_points;
+                    newest_frame.motion_offset_points = previous_frame.motion_offset_points;
+                    newest_frame.transition = Some(super::PropTransitionAnchor {
+                        source_pose: previous_frame.motion_offset_points,
+                        target_pose,
+                        source_opacity: newest_frame.opacity,
+                        target_opacity: newest_frame.opacity,
+                        semantic_revision,
+                        started_at_monotonic_ms: newest.frame.elapsed_ms,
+                        duration_ms,
+                        curve,
+                    });
+                }
+                super::PropPresentationMotion::TwinkleFade { attack_ms, release_ms } => {
+                    let target_opacity = newest_frame.opacity;
+                    newest_frame.opacity = previous_frame.opacity;
+                    newest_frame.transition = Some(super::PropTransitionAnchor {
+                        source_pose: [0.0; 2],
+                        target_pose: [0.0; 2],
+                        source_opacity: previous_frame.opacity,
+                        target_opacity,
+                        semantic_revision,
+                        started_at_monotonic_ms: newest.frame.elapsed_ms,
+                        duration_ms: if target_opacity >= previous_frame.opacity {
+                            attack_ms
+                        } else {
+                            release_ms
+                        },
+                        curve: super::EaseCurve::SmoothStep,
+                    });
+                }
+                super::PropPresentationMotion::Static
+                | super::PropPresentationMotion::Sway { .. }
+                | super::PropPresentationMotion::Hover { .. } => {}
+            }
+        } else {
+            newest_frame.motion_offset_points = previous_frame.motion_offset_points;
+            newest_frame.opacity = previous_frame.opacity;
+            newest_frame.transition = previous_frame.transition;
+        }
+    }
+
+    for newest_frame in &mut newest.frame.tank_instances {
+        let Some(previous_frame) = previous
+            .frame
+            .tank_instances
+            .iter()
+            .find(|frame| frame.slot == newest_frame.slot)
+        else {
+            continue;
+        };
+        for (newest_cell, previous_cell) in newest_frame.cells.iter_mut().zip(&previous_frame.cells)
+        {
+            newest_cell.target_position_points = newest_cell.position_points;
+            newest_cell.source_position_points = previous_cell.position_points;
+            newest_cell.position_points = previous_cell.position_points;
+        }
+        newest_frame.semantic_revision = semantic_revision;
+        newest_frame.started_at_monotonic_ms = newest.frame.elapsed_ms;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -608,17 +717,33 @@ pub(crate) fn validate_snapshot(
         || !snapshot.frame.breath_offset_y_points.is_finite()
         || !snapshot.frame.bob_offset_y_points.is_finite()
         || !snapshot.frame.dim_amount.is_finite()
-        || snapshot
-            .content
-            .prop_animation_states
-            .iter()
-            .any(|state| !state.origin_points.iter().all(|value| value.is_finite()))
-        || snapshot.content.tank_animation_states.iter().any(|state| {
+        || snapshot.frame.prop_instances.iter().any(|state| {
             !state.origin_points.iter().all(|value| value.is_finite())
-                || state
-                    .cells
+                || !state
+                    .motion_offset_points
                     .iter()
-                    .any(|cell| !cell.position_points.iter().all(|value| value.is_finite()))
+                    .all(|value| value.is_finite())
+                || !state.opacity.is_finite()
+                || state.transition.is_some_and(|anchor| {
+                    !anchor.source_pose.iter().all(|value| value.is_finite())
+                        || !anchor.target_pose.iter().all(|value| value.is_finite())
+                        || !anchor.source_opacity.is_finite()
+                        || !anchor.target_opacity.is_finite()
+                })
+        })
+        || snapshot.frame.tank_instances.iter().any(|state| {
+            !state.origin_points.iter().all(|value| value.is_finite())
+                || state.cells.iter().any(|cell| {
+                    !cell
+                        .source_position_points
+                        .iter()
+                        .all(|value| value.is_finite())
+                        || !cell.position_points.iter().all(|value| value.is_finite())
+                        || !cell
+                            .target_position_points
+                            .iter()
+                            .all(|value| value.is_finite())
+                })
                 || state
                     .bounds_points
                     .is_some_and(|bounds| !bounds.iter().all(|value| value.is_finite()))
@@ -684,6 +809,8 @@ pub(crate) fn validate_snapshot(
     if snapshot.content.prop_animation_states.len() != snapshot.topology.visible_props.len()
         || snapshot.content.tank_animation_states.len()
             != snapshot.topology.visible_tank_inhabitants.len()
+        || snapshot.frame.prop_instances.len() != snapshot.topology.visible_props.len()
+        || snapshot.frame.tank_instances.len() != snapshot.topology.visible_tank_inhabitants.len()
     {
         return Err(SnapshotRejection::InconsistentIdentity);
     }
@@ -787,6 +914,22 @@ pub(crate) fn validate_snapshot(
         {
             return Err(SnapshotRejection::InconsistentIdentity);
         }
+        let frame = &snapshot.frame.prop_instances[index];
+        if frame.slot != topology.stable_order
+            || !(0.0..=1.0).contains(&frame.opacity)
+            || frame.transition.is_some_and(|anchor| {
+                anchor.duration_ms == 0
+                    || !(0.0..=1.0).contains(&anchor.source_opacity)
+                    || !(0.0..=1.0).contains(&anchor.target_opacity)
+                    || !matches!(
+                        topology.presentation_motion,
+                        super::PropPresentationMotion::TwoPoseEase { .. }
+                            | super::PropPresentationMotion::TwinkleFade { .. }
+                    )
+            })
+        {
+            return Err(SnapshotRejection::InconsistentIdentity);
+        }
     }
     for (index, (topology, content)) in snapshot
         .topology
@@ -805,6 +948,15 @@ pub(crate) fn validate_snapshot(
             || usize::from(topology.stable_order) != index
             || usize::from(topology.stable_order) >= super::MAX_VISIBLE_TANK_INHABITANTS
             || content.cells.len() > super::scene::MAX_TANK_GLYPHS_PER_SLOT
+        {
+            return Err(SnapshotRejection::InconsistentIdentity);
+        }
+        let frame = &snapshot.frame.tank_instances[index];
+        if frame.slot != topology.stable_order
+            || frame.visible != content.visible
+            || frame.cells.len() != content.cells.len()
+            || frame.duration_ms != content.cadence_ms
+            || frame.duration_ms == 0
         {
             return Err(SnapshotRejection::InconsistentIdentity);
         }
@@ -842,7 +994,7 @@ pub(crate) fn validate_snapshot(
             return Err(SnapshotRejection::InvalidValue);
         }
     }
-    for state in &snapshot.content.tank_animation_states {
+    for state in &snapshot.frame.tank_instances {
         if state
             .bounds_points
             .is_some_and(|bounds| bounds[2] < 0.0 || bounds[3] < 0.0)
@@ -891,6 +1043,10 @@ pub(crate) enum CounterKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeError {
     SnapshotRejected(SnapshotRejection),
+    StaleSemanticBase {
+        expected: SemanticRevision,
+        actual: SemanticRevision,
+    },
     CounterOverflow(CounterKind),
     RecoveryActionRejected,
     Shutdown,
@@ -998,6 +1154,17 @@ impl PreparedSnapshotUpdate {
 
     pub(crate) const fn frame_revision(&self) -> FrameRevision {
         self.applied.frame
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedFrameProjection {
+    update: PreparedSnapshotUpdate,
+}
+
+impl PreparedFrameProjection {
+    pub(crate) const fn frame_revision(&self) -> FrameRevision {
+        self.update.applied.frame
     }
 }
 
@@ -1509,6 +1676,13 @@ pub(crate) struct CompanionSceneRuntimeState {
 
 impl CompanionSceneRuntimeState {
     pub(crate) fn cold_start(snapshot: Arc<CompanionSceneSnapshot>) -> Result<Self, RuntimeError> {
+        Self::cold_start_on_surface(snapshot, SurfaceEpoch(1))
+    }
+
+    pub(crate) fn cold_start_on_surface(
+        snapshot: Arc<CompanionSceneSnapshot>,
+        surface_epoch: SurfaceEpoch,
+    ) -> Result<Self, RuntimeError> {
         let reconciler = CompanionSceneReconciler::new(snapshot)?;
         Ok(Self {
             active: None,
@@ -1518,7 +1692,7 @@ impl CompanionSceneRuntimeState {
             hidden_latest: None,
             reconciler,
             device_epoch: DeviceEpoch(1),
-            surface_epoch: SurfaceEpoch(1),
+            surface_epoch,
             resource_generation: ResourceGeneration(1),
             next_request_id: RequestId(1),
             next_activation_attempt_id: ActivationAttemptId(1),
@@ -1553,6 +1727,10 @@ impl CompanionSceneRuntimeState {
 
     pub(crate) fn snapshot(&self) -> &Arc<CompanionSceneSnapshot> {
         self.reconciler.snapshot()
+    }
+
+    pub(crate) const fn applied_revisions(&self) -> AppliedRevisions {
+        self.reconciler.applied_revisions()
     }
 
     pub(crate) fn active_version(&self) -> Option<SceneVersion> {
@@ -1590,6 +1768,14 @@ impl CompanionSceneRuntimeState {
         &self,
         snapshot: Arc<CompanionSceneSnapshot>,
     ) -> Result<PreparedSnapshotUpdate, RuntimeError> {
+        self.prepare_snapshot_with_resource_invalidation(snapshot, None)
+    }
+
+    pub(crate) fn prepare_snapshot_with_resource_invalidation(
+        &self,
+        snapshot: Arc<CompanionSceneSnapshot>,
+        invalidation: Option<ResourceInvalidation>,
+    ) -> Result<PreparedSnapshotUpdate, RuntimeError> {
         self.ensure_running()?;
         if self.visibility == RuntimeVisibility::Hidden {
             return Err(RuntimeError::SnapshotRejected(
@@ -1597,8 +1783,69 @@ impl CompanionSceneRuntimeState {
             ));
         }
         validate_snapshot(&snapshot)?;
-        let changes = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
+        let mut changes = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
+        if let Some(invalidation) = invalidation {
+            changes.resources.insert(invalidation.mask());
+        }
+        let mut snapshot = snapshot;
+        if changes.has_semantic() {
+            let semantic = SemanticRevision(increment(
+                self.reconciler.semantic_revision.0,
+                CounterKind::SemanticRevision,
+            )?);
+            rebase_semantic_transition_frames(
+                self.reconciler.snapshot(),
+                Arc::make_mut(&mut snapshot),
+                semantic,
+            );
+            changes = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
+            if let Some(invalidation) = invalidation {
+                changes.resources.insert(invalidation.mask());
+            }
+        }
         self.prepare_with_changes(snapshot, changes, false)
+    }
+
+    pub(crate) fn prepare_frame_projection(
+        &self,
+        projection: super::CompanionFrameProjection,
+    ) -> Result<PreparedFrameProjection, RuntimeError> {
+        self.ensure_running()?;
+        if self.visibility == RuntimeVisibility::Hidden {
+            return Err(RuntimeError::SnapshotRejected(
+                SnapshotRejection::InvalidValue,
+            ));
+        }
+        let actual = self.reconciler.applied_revisions().semantic;
+        if projection.semantic_base != actual {
+            return Err(RuntimeError::StaleSemanticBase {
+                expected: projection.semantic_base,
+                actual,
+            });
+        }
+        let snapshot = Arc::new(CompanionSceneSnapshot {
+            schema_version: self.reconciler.snapshot().schema_version,
+            privacy: self.reconciler.snapshot().privacy,
+            topology: self.reconciler.snapshot().topology.clone(),
+            content: self.reconciler.snapshot().content.clone(),
+            frame: projection.frame,
+        });
+        validate_snapshot(&snapshot)?;
+        let changes = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
+        if changes.requires_generation() || changes.has_semantic() {
+            return Err(RuntimeError::SnapshotRejected(
+                SnapshotRejection::InconsistentIdentity,
+            ));
+        }
+        self.prepare_with_changes(snapshot, changes, false)
+            .map(|update| PreparedFrameProjection { update })
+    }
+
+    pub(crate) fn commit_frame_projection(
+        &mut self,
+        prepared: PreparedFrameProjection,
+    ) -> Result<RuntimeEffects, PreparedCommitError> {
+        self.commit_prepared(prepared.update)
     }
 
     fn prepare_hidden_latest(&self) -> Result<Option<PreparedSnapshotUpdate>, RuntimeError> {
@@ -2264,14 +2511,25 @@ impl CompanionSceneRuntimeState {
         Ok(effects)
     }
 
+    #[cfg(test)]
     pub(crate) fn acknowledge_operational_surface_rebound(
         &mut self,
+    ) -> Result<RuntimeEffects, RuntimeError> {
+        let next = SurfaceEpoch(increment(self.surface_epoch.0, CounterKind::SurfaceEpoch)?);
+        self.acknowledge_operational_surface_rebound_to(next)
+    }
+
+    pub(crate) fn acknowledge_operational_surface_rebound_to(
+        &mut self,
+        next: SurfaceEpoch,
     ) -> Result<RuntimeEffects, RuntimeError> {
         self.ensure_running()?;
         if self.recovery != RecoveryState::Operational {
             return Err(RuntimeError::RecoveryActionRejected);
         }
-        let next = SurfaceEpoch(increment(self.surface_epoch.0, CounterKind::SurfaceEpoch)?);
+        if next.0 != increment(self.surface_epoch.0, CounterKind::SurfaceEpoch)? {
+            return Err(RuntimeError::RecoveryActionRejected);
+        }
         self.surface_epoch = next;
         if let Some(active) = &mut self.active {
             active.version.surface = next;
@@ -2285,6 +2543,31 @@ impl CompanionSceneRuntimeState {
         Ok(RuntimeEffects::new(RuntimeDisposition::SurfaceRebound(
             next,
         )))
+    }
+
+    pub(crate) fn retry_current_generation(&mut self) -> Result<RuntimeEffects, RuntimeError> {
+        self.ensure_running()?;
+        if self.visibility != RuntimeVisibility::Visible
+            || self.recovery != RecoveryState::Operational
+        {
+            return Err(RuntimeError::RecoveryActionRejected);
+        }
+        let request_id = self.next_request_id;
+        self.next_request_id =
+            RequestId(increment(self.next_request_id.0, CounterKind::RequestId)?);
+        let request = GenerationRequest {
+            request_id,
+            key: SceneGenerationKey {
+                device: self.device_epoch,
+                layout: self.reconciler.layout_generation,
+                resources: self.resource_generation,
+            },
+            surface: self.surface_epoch,
+            source: self.reconciler.applied_revisions(),
+            snapshot: Arc::clone(self.reconciler.snapshot()),
+            seal: Arc::new(()),
+        };
+        Ok(self.queue_request(request))
     }
 
     pub(crate) fn acknowledge_device_recreated(&mut self) -> Result<RuntimeEffects, RuntimeError> {
@@ -2404,20 +2687,32 @@ impl CompanionSceneRuntimeState {
     }
 
     pub(crate) fn prepare_reveal(&self) -> Result<PreparedReveal, RuntimeError> {
+        self.prepare_reveal_with_resource_invalidation(None)
+    }
+
+    pub(crate) fn prepare_reveal_with_resource_invalidation(
+        &self,
+        invalidation: Option<ResourceInvalidation>,
+    ) -> Result<PreparedReveal, RuntimeError> {
         self.ensure_running()?;
         if self.visibility != RuntimeVisibility::Hidden {
             return Err(RuntimeError::SnapshotRejected(
                 SnapshotRejection::InvalidValue,
             ));
         }
-        let update = if let Some(prepared) = self.prepare_hidden_latest()? {
-            prepared
+        let update = if let Some(snapshot) = &self.hidden_latest {
+            validate_snapshot(snapshot)?;
+            let mut changes = classify_snapshot_changes(self.reconciler.snapshot(), snapshot);
+            if let Some(invalidation) = invalidation {
+                changes.resources.insert(invalidation.mask());
+            }
+            self.prepare_with_changes(Arc::clone(snapshot), changes, true)?
         } else {
-            self.prepare_with_changes(
-                Arc::clone(self.reconciler.snapshot()),
-                SnapshotChangeSet::NONE,
-                false,
-            )?
+            let mut changes = SnapshotChangeSet::NONE;
+            if let Some(invalidation) = invalidation {
+                changes.resources.insert(invalidation.mask());
+            }
+            self.prepare_with_changes(Arc::clone(self.reconciler.snapshot()), changes, false)?
         };
         Ok(PreparedReveal { update })
     }
@@ -2511,8 +2806,9 @@ mod tests {
         CompanionSceneSnapshot, ContentSnapshot, DepthCue, FrameSnapshot, GaugeLevelSnapshot,
         LogicalGlyphAnchor, LogicalGlyphScale, PaletteSnapshot, PetLatticeSnapshot,
         PetRoleSpanSnapshot, PetTopologySnapshot, PropAnimationKindSnapshot, PropAnimationSnapshot,
-        PropTopologySnapshot, PropZoneSnapshot, RoomGlyphContentSnapshot, RoomGlyphFrameSnapshot,
-        RoomTopologySnapshot, TankAnimationSnapshot, TankBoundsSnapshot, TankCellSnapshot,
+        PropFrameSnapshot, PropPresentationMotion, PropTopologySnapshot, PropZoneSnapshot,
+        RoomGlyphContentSnapshot, RoomGlyphFrameSnapshot, RoomTopologySnapshot,
+        TankAnimationSnapshot, TankCellFrameSnapshot, TankCellSnapshot, TankFrameSnapshot,
         TankLayerSnapshot, TankRouteSnapshot, TankSideSnapshot, TankTopologySnapshot,
         TopologySnapshot, COMPANION_RENDERER_SCHEMA_VERSION, COMPANION_SCENE_SCHEMA_VERSION,
         PET_LATTICE_HEIGHT, PET_LATTICE_SLOTS, PET_LATTICE_WIDTH,
@@ -2556,6 +2852,7 @@ mod tests {
                     stable_order: 0,
                     zone: PropZoneSnapshot::FloorRight,
                     authored_depth: AuthoredDepthSnapshot::Foreground,
+                    presentation_motion: PropPresentationMotion::Static,
                 }],
                 visible_tank_inhabitants: vec![TankTopologySnapshot {
                     catalog_id: crate::game::habitat::NEEDLEFISH,
@@ -2564,7 +2861,8 @@ mod tests {
                     authored_depth: AuthoredDepthSnapshot::BehindPet,
                 }],
                 renderer_schema: COMPANION_RENDERER_SCHEMA_VERSION,
-            },
+            }
+            .into(),
             content: ContentSnapshot {
                 mood: Mood::Happy,
                 room_weather: "clear",
@@ -2596,7 +2894,6 @@ mod tests {
                     motion_phase: Some(0),
                     chest_lid_open: Some(false),
                     bloom_active: None,
-                    origin_points: [120.0, 140.0],
                 }],
                 tank_animation_states: vec![TankAnimationSnapshot {
                     catalog_id: crate::game::habitat::NEEDLEFISH,
@@ -2605,7 +2902,6 @@ mod tests {
                     visible: true,
                     origin_col: 4,
                     origin_row: 5,
-                    origin_points: [40.0, 50.0],
                     side: Some(TankSideSnapshot::Left),
                     layer: TankLayerSnapshot::Behind,
                     sprite_variant: 0,
@@ -2620,15 +2916,13 @@ mod tests {
                         row: 5,
                         glyph: '<',
                         layer: TankLayerSnapshot::Behind,
-                        position_points: [40.0, 50.0],
                     }],
-                    bounds: Some(TankBoundsSnapshot { x: 4, y: 5, width: 1, height: 1 }),
-                    bounds_points: Some([40.0, 50.0, 10.0, 10.0]),
                 }],
                 ambient_semantics: (0..64)
                     .map(|slot| AmbientSemanticSnapshot { slot, kind: None, glyph: None })
                     .collect(),
-            },
+            }
+            .into(),
             frame: FrameSnapshot {
                 elapsed_ms: 1_000,
                 pet_anchor_points: [120.0, 140.0],
@@ -2652,6 +2946,27 @@ mod tests {
                 dimmed: false,
                 dim_amount: 0.0,
                 room_glyphs: Vec::new(),
+                prop_instances: vec![PropFrameSnapshot {
+                    slot: 0,
+                    origin_points: [120.0, 140.0],
+                    motion_offset_points: [0.0; 2],
+                    opacity: 1.0,
+                    transition: None,
+                }],
+                tank_instances: vec![TankFrameSnapshot {
+                    slot: 0,
+                    visible: true,
+                    origin_points: [40.0, 50.0],
+                    cells: vec![TankCellFrameSnapshot {
+                        source_position_points: [40.0, 50.0],
+                        position_points: [40.0, 50.0],
+                        target_position_points: [40.0, 50.0],
+                    }],
+                    bounds_points: Some([40.0, 50.0, 10.0, 10.0]),
+                    semantic_revision: SemanticRevision(1),
+                    started_at_monotonic_ms: 1_000,
+                    duration_ms: 400,
+                }],
                 ambient_instances: (0..64)
                     .map(|slot| AmbientFrameSnapshot {
                         slot,
@@ -2660,6 +2975,16 @@ mod tests {
                         opacity: 0.0,
                     })
                     .collect(),
+                pet_motion_input: crate::round::motion::CompanionMotionInput {
+                    asleep: false,
+                    calm: false,
+                    rate_per_hour: 0.0,
+                    current_facing: 1,
+                    resolved_wander_offset_x: 0,
+                    resolved_wander_facing: 1,
+                    breath_offset_y_cells: 0,
+                },
+                pet_depth_override: None,
             },
         };
         set_pet_depth(&mut snapshot, 0.5);
@@ -2811,10 +3136,9 @@ mod tests {
             [0]
         .role = "eye");
         assert_class!(palette, semantic, |s| s.content.palette.body[0] += 1);
-        assert_class!(prop_kind, ChangeFamilies::NONE, |s| s
-            .content
-            .prop_animation_states[0]
-            .kind =
+        assert_class!(prop_kind, semantic, |s| s.content.prop_animation_states
+            [0]
+        .kind =
             PropAnimationKindSnapshot::Static);
         assert_class!(prop_sprite, semantic, |s| s.content.prop_animation_states
             [0]
@@ -2823,21 +3147,21 @@ mod tests {
             .content
             .prop_animation_states[0]
             .twinkle_active = Some(true));
-        assert_class!(prop_motion, frame, |s| s.content.prop_animation_states[0]
-            .motion_phase = Some(1));
+        assert_class!(prop_motion, semantic, |s| s.content.prop_animation_states
+            [0]
+        .motion_phase = Some(1));
         assert_class!(prop_lid, semantic, |s| s.content.prop_animation_states[0]
             .chest_lid_open = Some(true));
         assert_class!(prop_bloom, semantic, |s| s.content.prop_animation_states
             [0]
         .bloom_active = Some(true));
-        assert_class!(prop_resolved_origin, frame, |s| s
-            .content
-            .prop_animation_states[0]
-            .origin_points[0] +=
-            1.0);
-        assert_class!(tank_visible, frame, |s| s.content.tank_animation_states
+        assert_class!(prop_resolved_origin, frame, |s| s.frame.prop_instances
             [0]
-        .visible = false);
+        .origin_points[0] += 1.0);
+        assert_class!(tank_visible, semantic, |s| s
+            .content
+            .tank_animation_states[0]
+            .visible = false);
         assert_class!(tank_origin_col, ChangeFamilies::NONE, |s| s
             .content
             .tank_animation_states[0]
@@ -2848,9 +3172,7 @@ mod tests {
             .tank_animation_states[0]
             .origin_row +=
             1);
-        assert_class!(tank_origin_points, frame, |s| s
-            .content
-            .tank_animation_states[0]
+        assert_class!(tank_origin_points, frame, |s| s.frame.tank_instances[0]
             .origin_points[0] += 1.0);
         assert_class!(tank_side, ChangeFamilies::NONE, |s| s
             .content
@@ -2884,27 +3206,16 @@ mod tests {
             .tank_animation_states[0]
             .cells[0]
             .glyph = '>');
-        assert_class!(tank_cell_layer, frame, |s| s
+        assert_class!(tank_cell_layer, semantic, |s| s
             .content
             .tank_animation_states[0]
             .cells[0]
             .layer =
             TankLayerSnapshot::Foreground);
-        assert_class!(tank_bounds, ChangeFamilies::NONE, |s| s
-            .content
-            .tank_animation_states[0]
-            .bounds
-            .as_mut()
-            .unwrap()
-            .x += 1);
-        assert_class!(tank_cell_points, frame, |s| s
-            .content
-            .tank_animation_states[0]
+        assert_class!(tank_cell_points, frame, |s| s.frame.tank_instances[0]
             .cells[0]
             .position_points[0] += 1.0);
-        assert_class!(tank_bounds_points, frame, |s| s
-            .content
-            .tank_animation_states[0]
+        assert_class!(tank_bounds_points, frame, |s| s.frame.tank_instances[0]
             .bounds_points
             .as_mut()
             .unwrap()[0] += 1.0);
@@ -2976,18 +3287,8 @@ mod tests {
     fn redundant_raw_inputs_are_accepted_noops_with_identical_compiled_mirrors() {
         let mut cases: Vec<SnapshotMutation> = vec![
             (
-                "prop kind",
-                Box::new(|s| {
-                    s.content.prop_animation_states[0].kind = PropAnimationKindSnapshot::Static
-                }),
-            ),
-            (
                 "role over empty pet cell",
                 Box::new(|s| s.content.pet_roles[0].role = "eye"),
-            ),
-            (
-                "equivalent prop motion phase",
-                Box::new(|s| s.content.prop_animation_states[0].motion_phase = Some(2)),
             ),
             (
                 "tank origin col",
@@ -3020,16 +3321,6 @@ mod tests {
             (
                 "tank cell row",
                 Box::new(|s| s.content.tank_animation_states[0].cells[0].row += 1),
-            ),
-            (
-                "tank raw bounds",
-                Box::new(|s| {
-                    s.content.tank_animation_states[0]
-                        .bounds
-                        .as_mut()
-                        .unwrap()
-                        .x += 1
-                }),
             ),
             (
                 "retained breath offset",
@@ -3075,12 +3366,14 @@ mod tests {
 
         let mut empty_cells = (*base).clone();
         empty_cells.content.tank_animation_states[0].cells.clear();
+        empty_cells.frame.tank_instances[0].cells.clear();
+        empty_cells.frame.tank_instances[0].bounds_points = None;
         let empty_cells = Arc::new(empty_cells);
         let baseline =
             super::super::scene::build_scene_generation(&empty_cells, baseline.generation_key())
                 .unwrap();
         let mut changed = (*empty_cells).clone();
-        changed.content.tank_animation_states[0].bounds_points = Some([1.0, 2.0, 3.0, 4.0]);
+        changed.frame.tank_instances[0].bounds_points = Some([1.0, 2.0, 3.0, 4.0]);
         let changed = Arc::new(changed);
         assert_eq!(
             classify_snapshot_changes(&empty_cells, &changed),
@@ -3121,11 +3414,11 @@ mod tests {
             ),
             (
                 "tank frame",
-                Box::new(|s| s.content.tank_animation_states[0].origin_points[0] += 1.0),
+                Box::new(|s| s.frame.tank_instances[0].origin_points[0] += 1.0),
             ),
             (
                 "tank cell frame",
-                Box::new(|s| s.content.tank_animation_states[0].cells[0].position_points[0] += 1.0),
+                Box::new(|s| s.frame.tank_instances[0].cells[0].position_points[0] += 1.0),
             ),
             (
                 "ambient",
@@ -3391,10 +3684,11 @@ mod tests {
         desired.frame.gauge_fractions[0] = 0.75;
         let desired = Arc::new(desired);
         commit_snapshot(&mut runtime, Arc::clone(&desired));
+        let rebased_desired = Arc::clone(runtime.snapshot());
         runtime.rebase_ready_candidate().unwrap();
 
         let expected = super::super::scene::build_scene_generation_owned(
-            Arc::clone(&desired),
+            Arc::clone(&rebased_desired),
             key,
             runtime.pending_desired_source().unwrap(),
         )
@@ -3415,7 +3709,7 @@ mod tests {
         );
         assert!(Arc::ptr_eq(
             candidate.generation.source_snapshot(),
-            &desired
+            &rebased_desired
         ));
 
         let attempt = runtime.begin_activation().unwrap();
@@ -3430,10 +3724,10 @@ mod tests {
         assert_eq!(lease.content_checksum(), expected.content_checksum());
         assert_eq!(lease.frame_checksum(), expected.frame_checksum());
 
-        let mut active_update = (*desired).clone();
+        let mut active_update = (*rebased_desired).clone();
         active_update.frame.dimmed = true;
         active_update.frame.dim_amount = 0.25;
-        active_update.content.prop_animation_states[0].origin_points[0] += 5.0;
+        active_update.frame.prop_instances[0].origin_points[0] += 5.0;
         let active_update = Arc::new(active_update);
         commit_snapshot(&mut runtime, Arc::clone(&active_update));
         let expected = super::super::scene::build_scene_generation_owned(
@@ -4033,6 +4327,80 @@ mod tests {
     }
 
     #[test]
+    fn host_owned_surface_rebind_requires_the_exact_next_epoch() {
+        let mut runtime = runtime();
+        let before = runtime.active_version().unwrap();
+        assert_eq!(
+            runtime.acknowledge_operational_surface_rebound_to(before.surface),
+            Err(RuntimeError::RecoveryActionRejected)
+        );
+        assert_eq!(
+            runtime.acknowledge_operational_surface_rebound_to(SurfaceEpoch(before.surface.0 + 2)),
+            Err(RuntimeError::RecoveryActionRejected)
+        );
+        runtime
+            .acknowledge_operational_surface_rebound_to(SurfaceEpoch(before.surface.0 + 1))
+            .unwrap();
+        assert_eq!(
+            runtime.active_version().unwrap().surface,
+            SurfaceEpoch(before.surface.0 + 1)
+        );
+    }
+
+    #[test]
+    fn logical_resize_and_scale_invalidation_queue_one_coalesced_replacement() {
+        let mut runtime = runtime();
+        let before = runtime.active_version().unwrap();
+        let mut resized = (**runtime.snapshot()).clone();
+        resized.topology.layout.width_points += 40.0;
+        resized.topology.glyph_grid.cell_extent_points[0] =
+            resized.topology.layout.width_points / f32::from(resized.topology.glyph_grid.columns);
+        let prepared = runtime
+            .prepare_snapshot_with_resource_invalidation(
+                Arc::new(resized),
+                Some(ResourceInvalidation::BackingScaleAtlas),
+            )
+            .unwrap();
+        assert!(prepared
+            .changes()
+            .resources()
+            .contains(ResourceChangeMask::BACKING_SCALE_ATLAS));
+        let request = take_start(runtime.commit_prepared(prepared).unwrap());
+        assert_eq!(
+            request.key().layout,
+            LayoutGeneration(before.generation.layout.0 + 1)
+        );
+        assert_eq!(
+            request.key().resources,
+            ResourceGeneration(before.generation.resources.0 + 1)
+        );
+        assert_eq!(runtime.next_request_id.0, request.request_id().0 + 1);
+    }
+
+    #[test]
+    fn bounded_retry_supersedes_inflight_replacement_and_shutdown_rejects_late_candidate() {
+        let mut runtime = runtime();
+        let replacement = topology_update(runtime.snapshot(), Stage::S4);
+        let first = take_start(commit_snapshot(&mut runtime, replacement));
+        let mut retry_effects = runtime.retry_current_generation().unwrap();
+        assert_eq!(
+            retry_effects.take_cancel_worker().unwrap().request_id(),
+            first.request_id()
+        );
+        assert!(retry_effects.take_start_worker().is_none());
+        let retry_identity = runtime.pending_request_identity().unwrap();
+        assert_ne!(retry_identity.request_id(), first.request_id());
+        runtime.shutdown();
+        let mut late = runtime.complete_candidate(first.accept());
+        assert_eq!(late.disposition(), RuntimeDisposition::DroppedStale);
+        assert!(late.take_drop_candidate().is_some());
+        assert_eq!(
+            runtime.retry_current_generation(),
+            Err(RuntimeError::Shutdown)
+        );
+    }
+
+    #[test]
     fn operational_surface_rebind_preserves_ready_candidate_for_new_surface() {
         let mut runtime = runtime();
         let next = topology_update(runtime.snapshot(), Stage::S4);
@@ -4101,6 +4469,60 @@ mod tests {
             &next
         ));
         assert_eq!(Arc::strong_count(&next), 3);
+    }
+
+    #[test]
+    fn task8_frame_projection_reuses_semantics_rejects_stale_base_and_never_generates() {
+        let mut runtime = runtime();
+        let initial_version = runtime.active_version().unwrap();
+        let initial_topology = runtime.snapshot().topology.clone();
+        let initial_content = runtime.snapshot().content.clone();
+        let projection = runtime
+            .snapshot()
+            .project_presentation_frame(
+                runtime.applied_revisions().semantic,
+                super::super::CompanionProjectionClock::new(
+                    time::OffsetDateTime::UNIX_EPOCH,
+                    1_033,
+                ),
+                super::super::input::CompanionPresentationOptions::STANDARD,
+            )
+            .unwrap();
+        let prepared = runtime.prepare_frame_projection(projection).unwrap();
+        let mut effects = runtime.commit_frame_projection(prepared).unwrap();
+        assert!(effects.take_start_worker().is_none());
+        assert_eq!(
+            runtime.active_version().unwrap().generation,
+            initial_version.generation
+        );
+        assert_eq!(
+            runtime.applied_revisions().semantic,
+            initial_version.applied.semantic
+        );
+        assert_eq!(
+            runtime.applied_revisions().frame,
+            FrameRevision(initial_version.applied.frame.0 + 1)
+        );
+        assert!(runtime.snapshot().topology.ptr_eq(&initial_topology));
+        assert!(runtime.snapshot().content.ptr_eq(&initial_content));
+
+        let stale = runtime
+            .snapshot()
+            .project_presentation_frame(
+                SemanticRevision(initial_version.applied.semantic.0 + 1),
+                super::super::CompanionProjectionClock::new(
+                    time::OffsetDateTime::UNIX_EPOCH,
+                    1_066,
+                ),
+                super::super::input::CompanionPresentationOptions::STANDARD,
+            )
+            .unwrap();
+        let expected_stale = SemanticRevision(initial_version.applied.semantic.0 + 1);
+        assert!(matches!(
+            runtime.prepare_frame_projection(stale),
+            Err(RuntimeError::StaleSemanticBase { expected, actual })
+                if expected == expected_stale && actual == initial_version.applied.semantic
+        ));
     }
 
     #[test]

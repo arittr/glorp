@@ -15,7 +15,7 @@ use crate::commands::companion_mode::{
 };
 #[cfg(feature = "retained-renderer")]
 use crate::commands::companion_mode::{
-    resolve_scene_rollout, SceneRuntimeRollout, AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+    resolve_scene_runtime_rollout, SceneRuntimeRollout, AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
 };
 use crate::commands::watch::{
     build_watch_view_model_at, build_watch_view_model_semantic_at, rerender_pet_for_view_model,
@@ -50,24 +50,25 @@ use objc2::declare_class;
 use objc2::msg_send_id;
 use objc2::mutability;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
-    NSBackingStoreType, NSBezierPath, NSBitmapImageRep, NSButtLineCapStyle,
-    NSCalibratedRGBColorSpace, NSColor, NSCommandKeyMask, NSCompositingOperation, NSControlKeyMask,
-    NSEventModifierFlags, NSFloatingWindowLevel, NSFont, NSFontAttributeName, NSFontWeightBold,
-    NSForegroundColorAttributeName, NSGradient, NSGraphicsContext, NSImage, NSLineCapStyle, NSMenu,
-    NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSAttributedStringNSStringDrawing, NSBackingStoreType, NSBezierPath, NSBitmapImageRep,
+    NSButtLineCapStyle, NSCalibratedRGBColorSpace, NSColor, NSCommandKeyMask,
+    NSCompositingOperation, NSControlKeyMask, NSEventModifierFlags, NSFloatingWindowLevel, NSFont,
+    NSFontAttributeName, NSFontWeightBold, NSForegroundColorAttributeName, NSGradient,
+    NSGraphicsContext, NSImage, NSLineCapStyle, NSMenu, NSMenuItem, NSRoundLineCapStyle, NSView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
 };
 // Used only by the retained-gated paired Smooth capture, which normalizes its
 // output to a faithful sRGB color space.
 #[cfg(feature = "retained-renderer")]
 use objc2_app_kit::{NSColorRenderingIntent, NSColorSpace};
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSMutableAttributedString, NSPoint, NSRect, NSSize,
-    NSString, NSTimer,
+    MainThreadMarker, NSAttributedString, NSMutableAttributedString, NSNotification, NSPoint,
+    NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
 // The pace gauge reads a ten-minute window and the pet's vitals move on hour
@@ -92,6 +93,14 @@ fn companion_tick_interval(
     } else {
         UI_TICK_INTERVAL_SECS
     }
+}
+
+#[cfg(feature = "retained-renderer")]
+fn should_run_direct_terminal_capture(
+    renderer: EffectiveCompanionRenderer,
+    scene_runtime_rollout: SceneRuntimeRollout,
+) -> bool {
+    renderer.is_retained() && scene_runtime_rollout == SceneRuntimeRollout::Live
 }
 
 #[cfg(not(feature = "retained-renderer"))]
@@ -651,77 +660,6 @@ pub(super) fn prepare_capacity_fixture_frame(
     .map_err(CompanionFramePreparationError::category)
 }
 
-#[cfg(feature = "retained-renderer")]
-fn prepare_lifetime_fixture_frame(
-    species: crate::pet::generation::Species,
-    frame: u64,
-    now: time::OffsetDateTime,
-) -> std::result::Result<
-    (PreparedCompanionFrame, u64),
-    crate::companion::retained::RetainedFailureCategory,
-> {
-    use crate::commands::companion_mode::CompanionReviewState;
-    use crate::game::evolution::Stage;
-    use crate::game::metabolism::Mood;
-
-    let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, now.date());
-    vm.pet_render.generated_species = species;
-    let stages = [Stage::S2, Stage::S3, Stage::S4, Stage::S5];
-    let stage = stages[((frame / 600) as usize) % stages.len()];
-    vm.pet_render.stage = stage;
-    if (frame / 300) % 2 == 1 {
-        vm.habitat.earned_props.pop();
-    }
-    let state_index = ((frame / 900) % 5) as u8;
-    let (review_state, dimmed) = match state_index {
-        0 => (CompanionReviewState::Normal, false),
-        1 => (CompanionReviewState::ActivePulse, false),
-        2 => (CompanionReviewState::AsleepCalm, false),
-        3 => (CompanionReviewState::HelperTrouble, false),
-        _ => (CompanionReviewState::Normal, true),
-    };
-    let mut presentation_state = WatchPresentationState::default();
-    apply_review_state(review_state, &mut presentation_state, &mut vm, now).map_err(|_| {
-        crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
-    })?;
-    let asleep = review_state == CompanionReviewState::AsleepCalm;
-    rerender_pet_for_view_model(&mut vm, frame, asleep, now).map_err(|_| {
-        crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
-    })?;
-    if review_state == CompanionReviewState::ActivePulse {
-        vm.pet_render.mood = Mood::Ecstatic;
-    }
-    let scene = derive_round_scene_model(&vm, now);
-    let mut metric_cache = CompanionMetricCache::default();
-    let base = time::macros::datetime!(2026-06-13 18:00 UTC);
-    let elapsed_ms = (now - base)
-        .whole_milliseconds()
-        .max(0)
-        .min(i128::from(u64::MAX)) as u64;
-    let prepared = prepare_companion_frame_at(
-        &vm,
-        &scene,
-        EffectiveCompanionRenderer::Retained,
-        None,
-        None,
-        frame,
-        true,
-        dimmed,
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
-        &mut metric_cache,
-        now,
-        elapsed_ms,
-    )
-    .map_err(|_| crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation)?;
-    let semantic_hash =
-        crate::presentation::smooth::pet_visual_checksum(&vm.pet_art, &vm.pet_spans)
-            ^ ((stage.index() as u64) << 56)
-            ^ (u64::from(state_index) << 48)
-            ^ ((vm.habitat.earned_props.len() as u64) << 32)
-            ^ (vm.habitat.earned_inhabitants.len() as u64);
-    Ok((prepared, semantic_hash))
-}
-
 struct AppState {
     /// Retained to keep the window alive after makeKeyAndOrderFront.
     #[allow(dead_code)]
@@ -741,6 +679,12 @@ struct AppState {
     scene_runtime_rollout: SceneRuntimeRollout,
     #[cfg(feature = "retained-renderer")]
     scene_runtime_hidden: bool,
+    #[cfg(feature = "retained-renderer")]
+    scene_semantic_dirty: bool,
+    #[cfg(feature = "retained-renderer")]
+    reduce_motion: bool,
+    #[cfg(feature = "retained-renderer")]
+    scene_progress: SceneProgressPolicy,
     #[cfg(feature = "retained-renderer")]
     cold_smooth_fallback: ColdSmoothFallbackGate,
     pixel_input: Option<PixelPetInput>,
@@ -764,6 +708,8 @@ struct AppState {
     #[cfg(feature = "retained-renderer")]
     runtime_metrics_out: Option<std::path::PathBuf>,
     #[cfg(feature = "retained-renderer")]
+    review_lifetime_frames: Option<u64>,
+    #[cfg(feature = "retained-renderer")]
     runtime_baseline_visibility: RuntimeBaselineVisibilityPhase,
     #[cfg(feature = "retained-renderer")]
     terminal_runtime_metrics: Option<crate::companion::retained::CompanionRuntimeMetricsSnapshot>,
@@ -779,9 +725,15 @@ struct AppState {
 
 #[cfg(feature = "retained-renderer")]
 struct PreparedSceneRuntimeTick {
-    snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+    projection: PreparedSceneProjection,
     hud: CompanionHudText,
     hud_font_size: f64,
+}
+
+#[cfg(feature = "retained-renderer")]
+enum PreparedSceneProjection {
+    Semantic(std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>),
+    Frame(Box<crate::presentation::companion_scene::CompanionFrameProjection>),
 }
 
 #[cfg(feature = "retained-renderer")]
@@ -799,6 +751,94 @@ impl ColdSmoothFallbackGate {
             self.prepared = true;
             true
         }
+    }
+}
+
+#[cfg(feature = "retained-renderer")]
+const SCENE_PROGRESS_MAX_ATTEMPTS: u32 = 60;
+#[cfg(feature = "retained-renderer")]
+const SCENE_PROGRESS_MAX_VISIBLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(feature = "retained-renderer")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneProgressAction {
+    Continue,
+    RetryReplacement,
+    Fallback,
+}
+
+#[cfg(feature = "retained-renderer")]
+#[derive(Debug, Default)]
+struct SceneProgressPolicy {
+    deadline_started_at: Option<Instant>,
+    hidden_since: Option<Instant>,
+    eligible_attempts: u32,
+    retried_replacement: bool,
+    replacement_identity: Option<(crate::companion::retained::SceneReplacementIdentity, u64)>,
+}
+
+#[cfg(feature = "retained-renderer")]
+impl SceneProgressPolicy {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn pause_hidden(&mut self, now: Instant) {
+        if self.deadline_started_at.is_some() && self.hidden_since.is_none() {
+            self.hidden_since = Some(now);
+        }
+    }
+
+    fn resume_visible(&mut self, now: Instant) {
+        let Some(hidden_since) = self.hidden_since.take() else {
+            return;
+        };
+        if let Some(started) = self.deadline_started_at {
+            self.deadline_started_at = started.checked_add(now.duration_since(hidden_since));
+        }
+    }
+
+    fn observe_replacement(
+        &mut self,
+        identity: Option<(crate::companion::retained::SceneReplacementIdentity, u64)>,
+    ) {
+        let Some(identity) = identity else {
+            return;
+        };
+        if self.replacement_identity != Some(identity) {
+            self.deadline_started_at = None;
+            self.hidden_since = None;
+            self.eligible_attempts = 0;
+            self.retried_replacement = false;
+            self.replacement_identity = Some(identity);
+        }
+    }
+
+    fn observe_eligible_attempt(&mut self, now: Instant) -> SceneProgressAction {
+        self.resume_visible(now);
+        let started = *self.deadline_started_at.get_or_insert(now);
+        self.eligible_attempts = self.eligible_attempts.saturating_add(1);
+        if self.eligible_attempts < SCENE_PROGRESS_MAX_ATTEMPTS
+            && now.duration_since(started) < SCENE_PROGRESS_MAX_VISIBLE
+        {
+            return SceneProgressAction::Continue;
+        }
+        SceneProgressAction::Fallback
+    }
+
+    fn observe_terminal_failure(&mut self) -> SceneProgressAction {
+        if self.retried_replacement {
+            SceneProgressAction::Fallback
+        } else {
+            self.retried_replacement = true;
+            self.deadline_started_at = None;
+            self.eligible_attempts = 0;
+            SceneProgressAction::RetryReplacement
+        }
+    }
+
+    fn replacement_in_progress(&self) -> bool {
+        self.replacement_identity.is_some()
     }
 }
 
@@ -842,6 +882,78 @@ impl RuntimeBaselineVisibilityPhase {
 
 thread_local! {
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
+    static APP_TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
+    static UI_TICK_GATE: RefCell<NonReentrantTickGate> = const { RefCell::new(NonReentrantTickGate::idle()) };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NonReentrantTickGate {
+    running: bool,
+    pending: bool,
+}
+
+impl NonReentrantTickGate {
+    const fn idle() -> Self {
+        Self { running: false, pending: false }
+    }
+
+    fn request(&mut self) -> bool {
+        if self.running {
+            self.pending = true;
+            false
+        } else {
+            self.running = true;
+            true
+        }
+    }
+
+    fn finish_one(&mut self) -> bool {
+        if self.pending {
+            self.pending = false;
+            true
+        } else {
+            self.running = false;
+            false
+        }
+    }
+
+    fn finish_coalesced(&mut self) {
+        self.running = false;
+        self.pending = false;
+    }
+}
+
+fn drive_non_reentrant_ui_tick() {
+    if !UI_TICK_GATE.with(|gate| gate.borrow_mut().request()) {
+        return;
+    }
+    ui_tick();
+    if UI_TICK_GATE.with(|gate| gate.borrow_mut().finish_one()) {
+        ui_tick();
+        UI_TICK_GATE.with(|gate| gate.borrow_mut().finish_coalesced());
+    }
+}
+
+fn shutdown_app_lifecycle() {
+    APP_TIMER.with(|timer| {
+        if let Some(timer) = timer.borrow_mut().take() {
+            unsafe { timer.invalidate() };
+        }
+    });
+    APP_STATE.with(|cell| {
+        if let Some(mut state) = cell.borrow_mut().take() {
+            #[cfg(feature = "retained-renderer")]
+            if let Some(host) = state.retained_host.as_mut() {
+                host.shutdown_scene_runtime();
+            }
+            #[cfg(feature = "retained-renderer")]
+            if state.retained_host.take().is_some() {
+                crate::companion::retained::ActiveRetainedHost::restore_appkit(
+                    state.view.as_super(),
+                );
+            }
+        }
+    });
 }
 
 fn run_objc_callback(label: &'static str, f: impl FnOnce()) {
@@ -877,16 +989,35 @@ declare_class!(
 
     unsafe impl ClassType for Controller {
         type Super = NSObject;
-        type Mutability = mutability::InteriorMutable;
+        type Mutability = mutability::MainThreadOnly;
         const NAME: &'static str = "GlorpCompanionController";
     }
 
     impl DeclaredClass for Controller {}
 
+    unsafe impl NSObjectProtocol for Controller {}
+
+    unsafe impl NSApplicationDelegate for Controller {
+        #[method(applicationWillTerminate:)]
+        fn application_will_terminate(&self, _notification: &NSNotification) {
+            run_objc_callback("applicationWillTerminate", shutdown_app_lifecycle);
+        }
+    }
+
+    unsafe impl NSWindowDelegate for Controller {
+        #[method(windowWillClose:)]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            run_objc_callback("windowWillClose", shutdown_app_lifecycle);
+            if let Some(mtm) = MainThreadMarker::new() {
+                unsafe { NSApplication::sharedApplication(mtm).terminate(None) };
+            }
+        }
+    }
+
     unsafe impl Controller {
         #[method(uiTick:)]
         fn ui_tick(&self, _sender: Option<&AnyObject>) {
-            run_objc_callback("uiTick", ui_tick);
+            run_objc_callback("uiTick", drive_non_reentrant_ui_tick);
         }
     }
 );
@@ -905,14 +1036,66 @@ declare_class!(
     unsafe impl RoundView {
         #[method(drawRect:)]
         fn draw_rect(&self, _rect: NSRect) {
-            run_objc_callback("drawRect", || draw_scene(self, self.bounds()));
+            run_objc_callback("drawRect", || {
+                let drawing_to_screen = unsafe { NSGraphicsContext::currentContextDrawingToScreen() };
+                if let AppKitPaintOutcome::Prepared(review_sample) = draw_scene(self.bounds()) {
+                    if drawing_to_screen {
+                        record_review_frame(review_sample);
+                    }
+                }
+            });
+        }
+
+        #[method(isAccessibilityElement)]
+        fn is_accessibility_element(&self) -> bool {
+            true
+        }
+
+        #[method_id(accessibilityRole)]
+        fn accessibility_role(&self) -> Retained<NSString> {
+            NSString::from_str("AXGroup")
+        }
+
+        #[method_id(accessibilityLabel)]
+        fn accessibility_label(&self) -> Retained<NSString> {
+            NSString::from_str("Glorp habitat")
+        }
+
+        #[method_id(accessibilityValue)]
+        fn accessibility_value(&self) -> Retained<NSString> {
+            NSString::from_str(&companion_accessibility_value())
+        }
+
+        #[method(accessibilityFrame)]
+        fn accessibility_frame(&self) -> NSRect {
+            self.window().map_or_else(
+                || self.frame(),
+                |window| window.convertRectToScreen(self.convertRect_toView(self.bounds(), None)),
+            )
         }
     }
 );
 
+fn companion_accessibility_value() -> String {
+    APP_STATE.with(|cell| {
+        cell.try_borrow()
+            .ok()
+            .and_then(|state| state.as_ref().map(|state| state.vm.mood.clone()))
+            .map_or_else(
+                || "Companion habitat".to_string(),
+                |mood| format!("Mood: {mood}"),
+            )
+    })
+}
+
 pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) -> Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| GlorpError::Message("glorp companion must run on the main thread".into()))?;
+    if review.runtime_metrics_out.is_some() && review.review_capture_live_values {
+        return Err(GlorpError::Message(
+            "sensitive review capture cannot be combined with redacted runtime metrics".into(),
+        ));
+    }
     let retained_compiled = cfg!(all(target_os = "macos", feature = "retained-renderer"));
     let effective = resolve_renderer(
         request,
@@ -965,19 +1148,12 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     let mut presentation_state = WatchPresentationState::default();
     let review_state = review.resolved_state();
     #[cfg(feature = "retained-renderer")]
-    let scene_runtime_rollout = if renderer_runtime.effective().is_retained() {
-        match review.retained_scene_runtime {
-            Some(SceneRuntimeRollout::Off) => SceneRuntimeRollout::Off,
-            Some(SceneRuntimeRollout::Shadow) => resolve_scene_rollout(true, false),
-            Some(SceneRuntimeRollout::Live) => resolve_scene_rollout(true, true),
-            None => resolve_scene_rollout(
-                request == CompanionRendererRequest::Retained,
-                AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
-            ),
-        }
-    } else {
-        SceneRuntimeRollout::Off
-    };
+    let scene_runtime_rollout = resolve_scene_runtime_rollout(
+        request,
+        renderer_runtime.effective(),
+        review.retained_scene_runtime,
+        AUTO_SCENE_RUNTIME_ON_APPLE_SILICON,
+    );
     apply_review_state(review_state, &mut presentation_state, &mut initial_vm, now)?;
     if renderer_runtime.effective().uses_smooth_scene() {
         prepare_smooth_view_model_for_tick(&mut initial_vm, 0, now)?;
@@ -1008,13 +1184,18 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
 
     let controller: Retained<Controller> = unsafe { msg_send_id![Controller::class(), new] };
     let (window, view) = build_window(mtm, review.initial_size);
-    if review.runtime_metrics_out.is_some() {
+    let app_delegate = ProtocolObject::from_ref(&*controller);
+    app.setDelegate(Some(app_delegate));
+    let window_delegate = ProtocolObject::from_ref(&*controller);
+    window.setDelegate(Some(window_delegate));
+    if review.runtime_metrics_out.is_some() || review.capture_dir.is_some() {
         #[allow(deprecated)] // Required for deterministic bounded AppKit review automation.
         app.activateIgnoringOtherApps(true);
-        // A baseline that is fully covered by the controlling Codex window gets
+        // A bounded artifact review that remains inactive or fully covered gets
         // no CAMetalLayer drawable and can only report skipped frames. Keep this
-        // bounded review window above ordinary app windows so the 120-second
-        // visible phase measures actual acquire/encode/submit/present work.
+        // automation window above ordinary app windows so both direct capture and
+        // the 120-second metrics baseline exercise real
+        // acquire/encode/submit/present work.
         window.setLevel(NSFloatingWindowLevel);
         unsafe { window.orderFrontRegardless() };
         window.makeKeyAndOrderFront(None);
@@ -1081,13 +1262,34 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             host.prewarm_capture_resources();
         }
     }
+    #[cfg(feature = "retained-renderer")]
+    if review.review_capture_live_values {
+        let capture_dir = review.capture_dir.as_ref().ok_or_else(|| {
+            GlorpError::Message(
+                "sensitive review capture requires an explicit capture directory".into(),
+            )
+        })?;
+        let repo = std::env::current_dir()?;
+        crate::companion::paired_review::validate_review_output(
+            &repo,
+            capture_dir,
+            crate::companion::paired_review::CapturePrivacy::SensitiveLiveValues,
+        )
+        .map_err(|error| {
+            GlorpError::Message(format!(
+                "sensitive review capture output rejected: {}",
+                error.category()
+            ))
+        })?;
+    }
     let review_capture = crate::companion::review_capture::ReviewCapture::from_options(
         renderer_runtime.effective(),
         &review,
     )?;
-    let redacts_live_hud = review_capture
+    let redacts_live_hud = (review_capture
         .as_ref()
         .is_some_and(|capture| capture.redacts_live_hud())
+        && !review.review_capture_live_values)
         || review.runtime_metrics_out.is_some();
     let poll_rx = if review.runtime_metrics_out.is_some() {
         // The hidden Stage-0 baseline consumes only the initialized fixture.
@@ -1139,6 +1341,14 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             #[cfg(feature = "retained-renderer")]
             scene_runtime_hidden: false,
             #[cfg(feature = "retained-renderer")]
+            scene_semantic_dirty: true,
+            #[cfg(feature = "retained-renderer")]
+            reduce_motion: unsafe {
+                NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+            },
+            #[cfg(feature = "retained-renderer")]
+            scene_progress: SceneProgressPolicy::default(),
+            #[cfg(feature = "retained-renderer")]
             cold_smooth_fallback: ColdSmoothFallbackGate::default(),
             pixel_input,
             pixel_state,
@@ -1155,6 +1365,8 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             review_capture_live_values: review.review_capture_live_values,
             #[cfg(feature = "retained-renderer")]
             runtime_metrics_out: review.runtime_metrics_out.clone(),
+            #[cfg(feature = "retained-renderer")]
+            review_lifetime_frames: review.review_lifetime_frames,
             #[cfg(feature = "retained-renderer")]
             runtime_baseline_visibility: if review.runtime_metrics_out.is_some() {
                 RuntimeBaselineVisibilityPhase::Visible
@@ -1184,8 +1396,8 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
     #[cfg(not(feature = "retained-renderer"))]
     prepare_current_frame_from_state();
 
-    let _timer: Retained<NSTimer> = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+    let timer: Retained<NSTimer> = unsafe {
+        NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
             tick_interval,
             &controller,
             sel!(uiTick:),
@@ -1193,8 +1405,13 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             true,
         )
     };
+    unsafe {
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+    }
+    APP_TIMER.with(|slot| *slot.borrow_mut() = Some(timer));
 
     unsafe { app.run() };
+    shutdown_app_lifecycle();
     // A paired-capture fault after NSApplication exits must fail the process so a
     // successful `open`/spawn cannot hide an app-side capture failure.
     #[cfg(feature = "retained-renderer")]
@@ -1360,12 +1577,15 @@ fn build_window(
     }
 
     let content_frame = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
-    let view: Retained<RoundView> =
-        unsafe { msg_send_id![mtm.alloc::<RoundView>(), initWithFrame: content_frame] };
+    let view = new_round_view(mtm, content_frame);
     window.setContentView(Some(&view));
     window.makeKeyAndOrderFront(None);
 
     (window, view)
+}
+
+fn new_round_view(mtm: MainThreadMarker, frame: NSRect) -> Retained<RoundView> {
+    unsafe { msg_send_id![mtm.alloc::<RoundView>(), initWithFrame: frame] }
 }
 
 fn ui_tick() {
@@ -1386,14 +1606,14 @@ fn ui_tick() {
     // of replaying hidden frames.
     if !companion_view_is_visible() {
         #[cfg(feature = "retained-renderer")]
-        match prepare_scene_runtime_tick() {
-            Ok(Some(tick)) => {
-                if let Err(error) = coalesce_hidden_scene_snapshot(tick.snapshot) {
-                    handle_scene_runtime_failure(error);
-                }
+        APP_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.scene_progress.pause_hidden(Instant::now());
             }
-            Ok(None) => {}
-            Err(error) => handle_scene_runtime_failure(error),
+        });
+        #[cfg(feature = "retained-renderer")]
+        if let Err(error) = hide_scene_runtime() {
+            handle_scene_runtime_failure(error);
         }
         #[cfg(feature = "retained-renderer")]
         APP_STATE.with(|cell| {
@@ -1448,10 +1668,17 @@ fn ui_tick() {
                     .and_then(|state| state.retained_host.as_ref())
                     .is_some_and(|host| host.scene_active_delta_pending())
             });
-            if was_hidden {
-                reveal_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
-            } else if !active_delta_pending {
-                reconcile_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
+            match &tick.projection {
+                PreparedSceneProjection::Semantic(snapshot) if was_hidden => {
+                    reveal_scene_runtime(std::sync::Arc::clone(snapshot))?;
+                }
+                PreparedSceneProjection::Semantic(snapshot) if !active_delta_pending => {
+                    reconcile_scene_runtime(std::sync::Arc::clone(snapshot))?;
+                }
+                PreparedSceneProjection::Frame(projection) if !active_delta_pending => {
+                    reconcile_scene_frame((**projection).clone())?;
+                }
+                PreparedSceneProjection::Semantic(_) | PreparedSceneProjection::Frame(_) => {}
             }
             service_scene_runtime(&tick)
         });
@@ -1487,10 +1714,16 @@ fn ui_tick() {
                     .as_ref()
                     .is_some_and(|state| state.scene_runtime_hidden)
             });
-            if was_hidden {
-                reveal_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
-            } else {
-                reconcile_scene_runtime(std::sync::Arc::clone(&tick.snapshot))?;
+            match &tick.projection {
+                PreparedSceneProjection::Semantic(snapshot) if was_hidden => {
+                    reveal_scene_runtime(std::sync::Arc::clone(snapshot))?;
+                }
+                PreparedSceneProjection::Semantic(snapshot) => {
+                    reconcile_scene_runtime(std::sync::Arc::clone(snapshot))?;
+                }
+                PreparedSceneProjection::Frame(projection) => {
+                    reconcile_scene_frame((**projection).clone())?;
+                }
             }
             service_scene_runtime(&tick)
         });
@@ -1594,13 +1827,10 @@ fn present_retained_active_generation() -> bool {
     true
 }
 
-/// After a runtime fallback tears down the retained host, the reverted
-/// layer-hosting view does not resume automatic `drawRect:` on `setNeedsDisplay`
-/// within the timer callback. Force a synchronous display each tick so the Smooth
-/// paint runs, `draw_scene` records a frame, `acknowledge_smooth_paint` promotes
-/// the disposition to `FallbackPainted`, and a bounded review reaches its capture
-/// budget and terminates — the same render/record cadence a Smooth-from-start run
-/// gets for free.
+/// After a runtime fallback tears down the retained host, force an unconditional
+/// AppKit display transaction. Only the resulting on-screen `drawRect:` callback
+/// may acknowledge the fallback and advance review evidence; the timer callback
+/// never invokes AppKit drawing primitives directly.
 #[cfg(feature = "retained-renderer")]
 fn drive_smooth_fallback_paint() {
     use crate::companion::retained::FrameDisposition;
@@ -1618,7 +1848,7 @@ fn drive_smooth_fallback_paint() {
     if let Some(view) = view {
         unsafe {
             view.setNeedsDisplay(true);
-            view.displayIfNeeded();
+            view.displayRectIgnoringOpacity(view.bounds());
         }
     }
 }
@@ -1654,8 +1884,7 @@ fn companion_view_is_visible() -> bool {
 }
 
 #[cfg(feature = "retained-renderer")]
-fn coalesce_hidden_scene_snapshot(
-    snapshot: std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>,
+fn hide_scene_runtime(
 ) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
     APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
@@ -1675,7 +1904,7 @@ fn coalesce_hidden_scene_snapshot(
             host.hide_scene_runtime()?;
             state.scene_runtime_hidden = true;
         }
-        host.coalesce_hidden_scene_snapshot(snapshot)
+        Ok(())
     })
 }
 
@@ -1688,16 +1917,36 @@ fn reveal_scene_runtime(
         let Some(state) = state.as_mut() else {
             return Ok(());
         };
+        let view = state.view.clone();
         let Some(host) = state.retained_host.as_mut() else {
             return Ok(());
         };
         let revealed = if host.has_scene_runtime() && state.scene_runtime_hidden {
-            host.reveal_scene_runtime(snapshot)?
+            host.reveal_scene_runtime(view.as_super(), snapshot)?
         } else {
-            host.reconcile_scene_snapshot(snapshot)?;
+            host.reconcile_scene_snapshot(view.as_super(), snapshot)?;
             true
         };
+        state.scene_semantic_dirty = false;
         state.scene_runtime_hidden = !revealed;
+        Ok(())
+    })
+}
+
+#[cfg(feature = "retained-renderer")]
+fn reconcile_scene_frame(
+    projection: crate::presentation::companion_scene::CompanionFrameProjection,
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    APP_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return Ok(());
+        };
+        let view = state.view.clone();
+        let Some(host) = state.retained_host.as_mut() else {
+            return Ok(());
+        };
+        host.reconcile_scene_frame(view.as_super(), projection)?;
         Ok(())
     })
 }
@@ -1741,19 +1990,55 @@ fn prepare_scene_runtime_tick() -> std::result::Result<
         if let Some(depth) = state.review_depth {
             input = input.with_depth_override(depth.normalized());
         }
-        let mut snapshot =
-            crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input(
-                &state.vm, input,
-            )
-            .map_err(|_| {
-                crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode
-            })?;
-        if state.force_dim_overlay {
-            snapshot.frame.dimmed = true;
-            snapshot.frame.dim_amount = 0.35;
-        }
+        let reduce_motion = unsafe {
+            NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+        };
+        state.reduce_motion = reduce_motion;
+        let needs_semantic = state.scene_semantic_dirty
+            || state.scene_runtime_hidden
+            || state
+                .retained_host
+                .as_ref()
+                .is_none_or(|host| !host.has_scene_runtime());
+        let projection = if needs_semantic {
+            let projection_started_at = std::time::Instant::now();
+            let mut snapshot = crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input_and_options(
+                    &state.vm,
+                    input,
+                    crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                        reduce_motion,
+                    },
+                )
+                .map_err(|_| {
+                    crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode
+                })?;
+            if state.force_dim_overlay {
+                snapshot.frame.dimmed = true;
+                snapshot.frame.dim_amount = 0.35;
+            }
+            state
+                .retained_host
+                .as_mut()
+                .expect("retained host checked before scene projection")
+                .record_scene_snapshot_projection(
+                    crate::companion::retained::duration_us(projection_started_at.elapsed()),
+                );
+            PreparedSceneProjection::Semantic(std::sync::Arc::new(snapshot))
+        } else {
+            let host = state.retained_host.as_mut().ok_or(
+                crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode,
+            )?;
+            let projection = host
+                .project_scene_frame(
+                    input.clock,
+                    crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                        reduce_motion,
+                    },
+                )?;
+            PreparedSceneProjection::Frame(Box::new(projection))
+        };
         Ok(Some(PreparedSceneRuntimeTick {
-            snapshot: std::sync::Arc::new(snapshot),
+            projection,
             hud: prepare_hud_frame(&state.vm, state.redacts_live_hud),
             hud_font_size: metrics.font_size,
         }))
@@ -1811,45 +2096,125 @@ fn service_live_scene_runtime(
         let Some(host) = state.retained_host.as_mut() else {
             return Ok(());
         };
+        // Device and surface faults are reported asynchronously through the host
+        // mailbox. Drain before candidate work so the exact static category wins
+        // over any secondary generic activation/encode failure caused by that
+        // fault. The legacy retained present path has the equivalent post-render
+        // drain because it has no direct scene service boundary.
+        if let Some(category) = host.drain_gpu_error() {
+            return Err(category);
+        }
+        state
+            .scene_progress
+            .observe_replacement(host.scene_replacement_identity());
         let service = host.advance_scene_generation(true)?;
+        let presentation_privacy = if state.redacts_live_hud {
+            crate::presentation::companion_scene::contract::PresentedCapturePrivacy::ExternalRedacted
+        } else {
+            crate::presentation::companion_scene::contract::PresentedCapturePrivacy::SensitiveLiveValues
+        };
         let mut activation_presented = false;
+        let mut progress_action = SceneProgressAction::Continue;
         if service == SceneGenerationServiceTick::CandidateReady {
-            let disposition = host
-                .activate_candidate(&tick.hud, tick.hud_font_size)
+            let activation = host
+                .activate_candidate(&tick.hud, tick.hud_font_size, presentation_privacy)
                 .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
+            let disposition = activation.disposition;
             match disposition {
                 RuntimeDisposition::Activation(ActivationTransition::Committed) => {
                     activation_presented = true;
-                }
-                RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending) => {
-                    return Err(RetainedFailureCategory::SceneCandidateEncode);
-                }
-                RuntimeDisposition::Activation(
-                    ActivationTransition::RetryLater
-                    | ActivationTransition::CandidateDestroyedRetainingActive
-                    | ActivationTransition::DroppedStale,
-                )
-                | RuntimeDisposition::DroppedStale => {}
-                _ => {}
-            }
-        } else if service == SceneGenerationServiceTick::Failed
-            && !host.scene_has_active_generation()
-        {
-            return Err(RetainedFailureCategory::SceneCandidateEncode);
-        }
-
-        if !activation_presented && host.scene_has_active_generation() {
-            match host.present_active_scene(view.as_super(), &tick.hud, tick.hud_font_size)? {
-                ScenePresentOutcome::Presented(_version) => {
+                    state.scene_progress.reset();
                     if let Some(capture) = state.review_capture.as_mut() {
                         capture.record_frame(None);
                     }
                 }
-                ScenePresentOutcome::Skipped => {
+                RuntimeDisposition::Activation(ActivationTransition::HostFallbackPending) => {
+                    return Err(RetainedFailureCategory::SceneCandidateEncode);
+                }
+                RuntimeDisposition::Activation(ActivationTransition::RetryLater) => {
+                    // A cold Live review can spend its whole bounded run waiting
+                    // for the first CAMetalLayer drawable (for example under
+                    // headless or fully occluded automation). Count the prepared
+                    // retry tick just like a steady-state skipped present. The
+                    // terminal direct capture still requires a post-present
+                    // receipt and therefore fails nonzero rather than fabricating
+                    // evidence, but the process cannot hang forever waiting for
+                    // MIN_CAPTURE_FRAMES.
+                    if !host.scene_has_active_generation() {
+                        if let Some(capture) = state.review_capture.as_mut() {
+                            capture.record_offscreen_review_tick();
+                        }
+                    }
+                    if activation.skipped == Some(crate::companion::retained::SkipReason::Occluded)
+                    {
+                        state.scene_progress.pause_hidden(Instant::now());
+                    }
+                }
+                RuntimeDisposition::Activation(
+                    ActivationTransition::CandidateDestroyedRetainingActive
+                    | ActivationTransition::DroppedStale,
+                ) => {
+                    if disposition
+                        == RuntimeDisposition::Activation(
+                            ActivationTransition::CandidateDestroyedRetainingActive,
+                        )
+                    {
+                        progress_action = state.scene_progress.observe_terminal_failure();
+                    }
+                }
+                | RuntimeDisposition::DroppedStale => {}
+                _ => {}
+            }
+        } else if service == SceneGenerationServiceTick::Failed {
+            progress_action = state.scene_progress.observe_terminal_failure();
+        }
+
+        if !activation_presented && host.scene_active_is_present_compatible() {
+            match host.present_active_scene(
+                view.as_super(),
+                &tick.hud,
+                tick.hud_font_size,
+                presentation_privacy,
+            )? {
+                ScenePresentOutcome::Presented(_version) => {
+                    if progress_action == SceneProgressAction::Continue {
+                        if state.scene_progress.replacement_in_progress() {
+                            progress_action = state
+                                .scene_progress
+                                .observe_eligible_attempt(Instant::now());
+                        } else {
+                            state.scene_progress.reset();
+                        }
+                    }
+                    if let Some(capture) = state.review_capture.as_mut() {
+                        capture.record_frame(None);
+                    }
+                }
+                ScenePresentOutcome::Skipped(reason) => {
                     if let Some(capture) = state.review_capture.as_mut() {
                         capture.record_offscreen_review_tick();
                     }
+                    if reason == crate::companion::retained::SkipReason::Occluded {
+                        state.scene_progress.pause_hidden(Instant::now());
+                    } else {
+                        progress_action = state
+                            .scene_progress
+                            .observe_eligible_attempt(Instant::now());
+                    }
                 }
+            }
+        } else if !activation_presented {
+            progress_action = state
+                .scene_progress
+                .observe_eligible_attempt(Instant::now());
+        }
+        match progress_action {
+            SceneProgressAction::Continue => {}
+            SceneProgressAction::RetryReplacement => {
+                host.retry_scene_replacement()?;
+            }
+            SceneProgressAction::Fallback => {
+                return Err(RetainedFailureCategory::PresentationStalled);
             }
         }
         Ok(())
@@ -1905,13 +2270,15 @@ fn reconcile_scene_runtime(
 ) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
     APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
-        let Some(host) = state
-            .as_mut()
-            .and_then(|state| state.retained_host.as_mut())
-        else {
+        let Some(state) = state.as_mut() else {
             return Ok(());
         };
-        let _ = host.reconcile_scene_snapshot(snapshot)?;
+        let view = state.view.clone();
+        let Some(host) = state.retained_host.as_mut() else {
+            return Ok(());
+        };
+        let _ = host.reconcile_scene_snapshot(view.as_super(), snapshot)?;
+        state.scene_semantic_dirty = false;
         Ok(())
     })
 }
@@ -2110,13 +2477,21 @@ fn fallback_from_retained(error: crate::companion::retained::RetainedFailureCate
             }
         }
         state.retained_host.take();
-        // Restore the AppKit-drawn view (this also requests a display) and record
-        // the pending fallback. The reverted layer-hosting view does not resume
-        // automatic drawRect on setNeedsDisplay alone, so ui_tick drives the
-        // Smooth paint each tick until the review terminates (see
-        // drive_smooth_fallback_paint).
-        crate::companion::retained::ActiveRetainedHost::restore_appkit(state.view.as_super());
+        // Establish the pending state before AppKit invalidation can synchronously
+        // dispatch `drawRect:`. The callback, not teardown, owns the first genuine
+        // on-screen Smooth-paint acknowledgement.
         state.renderer_runtime.request_fallback(error);
+        crate::companion::retained::ActiveRetainedHost::restore_appkit(state.view.as_super());
+        // A view that has hosted a CAMetalLayer does not reliably re-enter AppKit's
+        // window-backed display machinery after the layer is removed. Replace only
+        // that mutated content view with the same RoundView class and bounds. All
+        // semantic/presentation/review state remains in AppState; subsequent code
+        // reads the new authoritative view from `state.view`.
+        if let Some(mtm) = MainThreadMarker::new() {
+            let replacement = new_round_view(mtm, state.view.frame());
+            state.window.setContentView(Some(&replacement));
+            state.view = replacement;
+        }
         write_boundary_diagnostic(format_args!(
             "glorp retained renderer fell back to Smooth: {}\n",
             error.category()
@@ -2179,6 +2554,7 @@ fn drain_poll_results() {
                 };
                 state.pixel_input = None;
                 state.vm = vm;
+                state.scene_semantic_dirty = true;
                 unsafe { state.view.setNeedsDisplay(true) };
                 return;
             }
@@ -2271,7 +2647,9 @@ fn animate_pet() {
                 state.animation_frame = tick_index;
                 state.smooth_semantic_art_tick_index = tick_index;
                 #[cfg(feature = "retained-renderer")]
-                if state.scene_runtime_rollout != SceneRuntimeRollout::Live {
+                if state.scene_runtime_rollout != SceneRuntimeRollout::Off {
+                    state.scene_semantic_dirty = true;
+                } else {
                     state.scene = derive_round_scene_model(&state.vm, now);
                 }
                 #[cfg(not(feature = "retained-renderer"))]
@@ -2333,25 +2711,22 @@ fn finish_review_capture_if_due() {
                 return None;
             }
         }
-        // Produce the paired Smooth/Retained artifacts from the frozen last-good
-        // frame before the capture session is torn down.
         #[cfg(feature = "retained-renderer")]
-        if state.runtime_metrics_out.is_some() {
-            let species = state.vm.pet_render.generated_species;
-            if let Some(host) = state.retained_host.as_mut() {
-                if let Err(error) = host.run_virtual_lifetime_audit(4_500, |_phase, frame, now| {
-                    prepare_lifetime_fixture_frame(species, frame, now)
-                }) {
-                    write_boundary_diagnostic(format_args!(
-                        "glorp runtime lifetime audit failed: {}\n",
-                        error.category()
-                    ));
-                    std::process::exit(1);
-                }
+        if should_run_direct_terminal_capture(
+            state.renderer_runtime.effective(),
+            state.scene_runtime_rollout,
+        ) {
+            if let Err(error) = run_direct_lifetime_audit_if_requested(state) {
+                write_boundary_diagnostic(format_args!(
+                    "glorp runtime lifetime audit failed: {}\n",
+                    error.category()
+                ));
+                std::process::exit(1);
             }
+            run_direct_scene_capture(state);
+        } else {
+            run_paired_capture(state);
         }
-        #[cfg(feature = "retained-renderer")]
-        run_paired_capture(state);
         #[cfg(feature = "retained-renderer")]
         if let Err(error) = write_runtime_metrics_if_requested(state) {
             write_boundary_diagnostic(format_args!(
@@ -2515,6 +2890,176 @@ fn run_paired_capture(state: &mut AppState) {
     capture.record_pair_capture_result(result);
 }
 
+#[cfg(feature = "retained-renderer")]
+fn run_direct_scene_capture(state: &mut AppState) {
+    #[cfg(feature = "dev-preview")]
+    let injected_capture_fault = state
+        .retained_fault_injection
+        .and_then(crate::commands::companion_mode::RetainedFaultInjection::capture_fault_category);
+    #[cfg(not(feature = "dev-preview"))]
+    let injected_capture_fault: Option<crate::companion::retained::RetainedFailureCategory> = None;
+    let AppState {
+        review_capture,
+        retained_host,
+        renderer_runtime,
+        review_capture_live_values,
+        ..
+    } = state;
+    let Some(capture) = review_capture.as_mut() else {
+        return;
+    };
+    let Some(out_dir) = capture.capture_dir().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let Some(host) = retained_host.as_mut() else {
+        capture.record_pair_capture_result(Err(GlorpError::Message(
+            "direct scene capture requested without a retained host".into(),
+        )));
+        return;
+    };
+    let sensitive = *review_capture_live_values;
+    let result = (|| {
+        if let Some(category) = injected_capture_fault {
+            host.record_injected_capture_attempt();
+            return Err(GlorpError::Message(category.category().into()));
+        }
+        if sensitive {
+            let repo = std::env::current_dir()?;
+            crate::companion::paired_review::validate_review_output(
+                &repo,
+                &out_dir,
+                crate::companion::paired_review::CapturePrivacy::SensitiveLiveValues,
+            )
+            .map_err(|error| {
+                GlorpError::Message(format!(
+                    "sensitive direct capture output rejected: {}",
+                    error.category()
+                ))
+            })?;
+        }
+        let direct = host
+            .capture_presented_scene(sensitive)
+            .map_err(|error| GlorpError::Message(error.category().into()))?;
+        let metrics = host.runtime_metrics_snapshot(
+            crate::companion::paired_review::full_preview_capacity_inventory(),
+        );
+        crate::companion::direct_capture::write_direct_scene_capture(
+            &out_dir,
+            renderer_runtime,
+            &direct,
+            &metrics,
+        )
+    })();
+    if result.is_ok() {
+        host.record_lifetime_terminal_capture(true);
+        host.record_direct_capture_success();
+    } else {
+        host.record_lifetime_terminal_capture(false);
+        host.record_direct_capture_failure();
+    }
+    capture.record_pair_capture_result(result);
+}
+
+#[cfg(feature = "retained-renderer")]
+fn run_direct_lifetime_audit_if_requested(
+    state: &mut AppState,
+) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
+    let Some(frames) = state.review_lifetime_frames.take() else {
+        return Ok(());
+    };
+    if frames == 0 || state.scene_runtime_rollout != SceneRuntimeRollout::Live {
+        return Err(crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation);
+    }
+    let bounds = prepare_bounds(state.view.bounds()).map_err(|_| {
+        crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
+    })?;
+    let metrics = state.metric_cache.metrics_for(bounds).map_err(|_| {
+        crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
+    })?;
+    let vm = state.vm.clone();
+    let depth = state.review_depth;
+    let force_dim = state.force_dim_overlay;
+    let reduce_motion = state.reduce_motion;
+    let hud = prepare_hud_frame(&state.vm, state.redacts_live_hud);
+    let terminal_hud = hud.clone();
+    let presentation_ticks = frames.saturating_mul(15).div_ceil(2);
+    let virtual_elapsed_ms = frames.saturating_mul(250);
+    let view = state.view.clone();
+    let semantic = move |_phase: crate::companion::retained::LifetimeAuditPhase,
+                         _sample: u64,
+                         now: time::OffsetDateTime| {
+        let elapsed_ms = (now - time::macros::datetime!(2026-06-13 18:00 UTC))
+            .whole_milliseconds()
+            .max(0)
+            .min(i128::from(u64::MAX)) as u64;
+        let mut input = crate::presentation::companion_scene::CompanionSceneProjectionInput::round(
+            crate::presentation::companion_scene::CompanionProjectionClock::new(now, elapsed_ms),
+            crate::presentation::companion_scene::CompanionLogicalLayout::round(
+                bounds.width_f64 as f32,
+                bounds.height_f64 as f32,
+            ),
+            metrics.grid_cols,
+            metrics.grid_rows,
+            crate::round::scene::current_round_motion_clearance(metrics.grid_rows),
+        );
+        if let Some(depth) = depth {
+            input = input.with_depth_override(depth.normalized());
+        }
+        let mut snapshot =
+            crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input_and_options(
+                &vm,
+                input,
+                crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                    reduce_motion,
+                },
+            )
+            .map_err(|_| {
+                crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
+            })?;
+        if force_dim {
+            snapshot.frame.dimmed = true;
+            snapshot.frame.dim_amount = 0.35;
+        }
+        Ok(std::sync::Arc::new(snapshot))
+    };
+    let Some(host) = state.retained_host.as_mut() else {
+        return Err(crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation);
+    };
+    host.run_direct_lifetime_audit(
+        view.as_super(),
+        state.scene_runtime_hidden,
+        frames,
+        presentation_ticks,
+        virtual_elapsed_ms,
+        semantic,
+        hud,
+        metrics.font_size,
+        reduce_motion,
+    )?;
+    state.scene_runtime_hidden = false;
+    // The virtual lifetime schedule submits only to the persistent offscreen
+    // target. Its terminal revision is not presentation evidence. Present that
+    // exact active revision to the CAMetalLayer before capture so the receipt is
+    // created only by the normal post-present boundary.
+    match host.present_active_scene(
+        view.as_super(),
+        &terminal_hud,
+        metrics.font_size,
+        crate::presentation::companion_scene::contract::PresentedCapturePrivacy::ExternalRedacted,
+    )? {
+        crate::companion::retained::ScenePresentOutcome::Presented(_) => {}
+        crate::companion::retained::ScenePresentOutcome::Skipped(_) => {
+            return Err(
+                crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation,
+            );
+        }
+    }
+    if let Some(category) = host.drain_gpu_error() {
+        return Err(category);
+    }
+    Ok(())
+}
+
 // The process-level terminal outcome of the paired capture, relayed from the
 // review lifecycle so `run` can fail the process after NSApplication exits.
 #[cfg(feature = "retained-renderer")]
@@ -2550,7 +3095,6 @@ fn render_live_pixel_frame(
 }
 
 fn record_review_frame(
-    _view: &RoundView,
     smooth_sample: Option<crate::companion::review_capture::SmoothReviewFrameSample>,
 ) {
     APP_STATE.with(|cell| {
@@ -2560,7 +3104,19 @@ fn record_review_frame(
             // retained host paints via Metal, not this AppKit path, so this only
             // ever promotes the disposition once the host has been torn down.
             #[cfg(feature = "retained-renderer")]
-            state.renderer_runtime.acknowledge_smooth_paint();
+            {
+                let pending = matches!(
+                    state.renderer_runtime.disposition(),
+                    crate::companion::retained::FrameDisposition::FallbackPending(_)
+                );
+                state.renderer_runtime.acknowledge_smooth_paint();
+                if pending {
+                    if let Some(metrics) = state.terminal_runtime_metrics.as_mut() {
+                        metrics.fallback_painted_transitions =
+                            metrics.fallback_painted_transitions.saturating_add(1);
+                    }
+                }
+            }
             if let Some(capture) = state.review_capture.as_mut() {
                 capture.record_frame(smooth_sample);
             }
@@ -2568,28 +3124,33 @@ fn record_review_frame(
     });
 }
 
-fn draw_scene(view: &RoundView, bounds: NSRect) {
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AppKitPaintOutcome {
+    Prepared(Option<crate::companion::review_capture::SmoothReviewFrameSample>),
+    BackgroundOnly,
+    RetainedHostOwnsSurface,
+    OffMainThread,
+}
+
+fn draw_scene(bounds: NSRect) -> AppKitPaintOutcome {
     let Some(_mtm) = MainThreadMarker::new() else {
         write_boundary_diagnostic(format_args!(
             "glorp companion draw_scene called off main thread\n"
         ));
-        return;
+        return AppKitPaintOutcome::OffMainThread;
     };
     // Paint directly from the immutable prepared frame. Cloning here copied the
     // full layered scene (including every glyph String and Vec) on every AppKit
     // repaint solely to shorten a RefCell borrow; draw callbacks are synchronous,
     // so holding the immutable borrow across paint is both safe and much cheaper.
-    let review_sample = APP_STATE.with(|cell| {
+    APP_STATE.with(|cell| {
         let state = cell.borrow();
         #[cfg(feature = "retained-renderer")]
         if state
             .as_ref()
             .is_some_and(|state| state.retained_host.is_some())
         {
-            return state
-                .as_ref()
-                .and_then(|state| state.last_good_frame.as_ref())
-                .and_then(|frame| frame.review_sample);
+            return AppKitPaintOutcome::RetainedHostOwnsSurface;
         }
         match state
             .as_ref()
@@ -2597,15 +3158,14 @@ fn draw_scene(view: &RoundView, bounds: NSRect) {
         {
             Some(frame) => {
                 paint_prepared_frame(bounds, frame);
-                frame.review_sample
+                AppKitPaintOutcome::Prepared(frame.review_sample)
             }
             None => {
                 paint_fallback_background(bounds);
-                None
+                AppKitPaintOutcome::BackgroundOnly
             }
         }
-    });
-    record_review_frame(view, review_sample);
+    })
 }
 
 fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
@@ -3777,6 +4337,19 @@ mod tests {
 
     #[cfg(feature = "retained-renderer")]
     #[test]
+    fn acknowledged_smooth_fallback_does_not_request_direct_terminal_capture() {
+        assert!(should_run_direct_terminal_capture(
+            EffectiveCompanionRenderer::Retained,
+            SceneRuntimeRollout::Live,
+        ));
+        assert!(!should_run_direct_terminal_capture(
+            EffectiveCompanionRenderer::Smooth,
+            SceneRuntimeRollout::Live,
+        ));
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
     fn retained_live_scene_presents_at_thirty_hertz() {
         assert_eq!(
             companion_tick_interval(
@@ -3808,6 +4381,122 @@ mod tests {
         assert!(gate.take_prepare_request());
         assert!(!gate.take_prepare_request());
         assert!(!gate.take_prepare_request());
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn scene_progress_watchdog_falls_back_at_the_first_exceeded_bound() {
+        let started = Instant::now();
+        let mut progress = SceneProgressPolicy::default();
+        for attempt in 0..SCENE_PROGRESS_MAX_ATTEMPTS - 1 {
+            assert_eq!(
+                progress
+                    .observe_eligible_attempt(started + Duration::from_millis(u64::from(attempt))),
+                SceneProgressAction::Continue,
+            );
+        }
+        assert_eq!(
+            progress.observe_eligible_attempt(started + Duration::from_secs(1)),
+            SceneProgressAction::Fallback,
+        );
+
+        let mut elapsed = SceneProgressPolicy::default();
+        assert_eq!(
+            elapsed.observe_eligible_attempt(started),
+            SceneProgressAction::Continue,
+        );
+        assert_eq!(
+            elapsed.observe_eligible_attempt(started + SCENE_PROGRESS_MAX_VISIBLE),
+            SceneProgressAction::Fallback,
+        );
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn hidden_pause_excludes_wall_time_and_terminal_failure_uses_same_retry_budget() {
+        let started = Instant::now();
+        let mut progress = SceneProgressPolicy::default();
+        assert_eq!(
+            progress.observe_eligible_attempt(started),
+            SceneProgressAction::Continue
+        );
+        progress.pause_hidden(started + Duration::from_millis(1));
+        assert_eq!(
+            progress.observe_eligible_attempt(started + Duration::from_secs(30)),
+            SceneProgressAction::Continue
+        );
+        assert_eq!(
+            progress.observe_terminal_failure(),
+            SceneProgressAction::RetryReplacement
+        );
+        assert_eq!(
+            progress.observe_terminal_failure(),
+            SceneProgressAction::Fallback
+        );
+        progress.reset();
+        assert_eq!(
+            progress.observe_terminal_failure(),
+            SceneProgressAction::RetryReplacement
+        );
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn occluded_pause_excludes_wall_time_without_discarding_visible_attempts() {
+        let started = Instant::now();
+        let mut progress = SceneProgressPolicy::default();
+        assert_eq!(
+            progress.observe_eligible_attempt(started),
+            SceneProgressAction::Continue
+        );
+        progress.pause_hidden(started + Duration::from_millis(1));
+        assert_eq!(
+            progress.observe_eligible_attempt(started + Duration::from_secs(30)),
+            SceneProgressAction::Continue
+        );
+        assert_eq!(progress.eligible_attempts, 2);
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn replacement_retry_budget_resets_only_for_a_superseding_identity_or_scale() {
+        let first = crate::companion::retained::SceneReplacementIdentity::for_test(1);
+        let second = crate::companion::retained::SceneReplacementIdentity::for_test(2);
+        let mut progress = SceneProgressPolicy::default();
+
+        progress.observe_replacement(Some((first, 1.0_f64.to_bits())));
+        assert_eq!(
+            progress.observe_terminal_failure(),
+            SceneProgressAction::RetryReplacement
+        );
+        progress.observe_replacement(Some((first, 1.0_f64.to_bits())));
+        assert_eq!(
+            progress.observe_terminal_failure(),
+            SceneProgressAction::Fallback
+        );
+
+        progress.observe_replacement(Some((second, 1.0_f64.to_bits())));
+        assert_eq!(
+            progress.observe_terminal_failure(),
+            SceneProgressAction::RetryReplacement
+        );
+        progress.observe_replacement(Some((second, 2.0_f64.to_bits())));
+        assert_eq!(
+            progress.observe_terminal_failure(),
+            SceneProgressAction::RetryReplacement
+        );
+    }
+
+    #[test]
+    fn non_reentrant_tick_gate_coalesces_one_newest_pending_tick() {
+        let mut gate = NonReentrantTickGate::idle();
+        assert!(gate.request());
+        assert!(!gate.request());
+        assert!(!gate.request());
+        assert!(gate.finish_one());
+        assert!(!gate.request());
+        gate.finish_coalesced();
+        assert!(gate.request());
     }
 
     #[cfg(feature = "retained-renderer")]
@@ -3851,7 +4540,7 @@ mod tests {
                 fixture_id: "glorp-scene-baseline-v2",
                 seed: "test",
                 update_source: "fixed",
-                cadence_ms: 250,
+                semantic_cadence_ms: 250,
                 logical_width: 360.0,
                 logical_height: 360.0,
                 physical_width: 720,

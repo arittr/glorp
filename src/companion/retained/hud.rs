@@ -540,6 +540,16 @@ impl GpuHudResources {
             prepared.resource_generation,
         )
     }
+
+    pub(super) fn validate_sensitive(
+        &self,
+        prepared: &SensitivePreparedHudFrame,
+    ) -> Result<(), HudGpuStagingError> {
+        validate_staging_generation(
+            self.prepared_atlas.resource_identity,
+            prepared.resource_generation,
+        )
+    }
 }
 
 impl fmt::Debug for GpuHudResources {

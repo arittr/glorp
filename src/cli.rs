@@ -59,6 +59,8 @@ pub enum Command {
         review_capture_dir: Option<PathBuf>,
         #[arg(long, hide = true)]
         review_runtime_metrics_out: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        review_lifetime_frames: Option<u64>,
         #[arg(long, value_enum, hide = true)]
         review_depth: Option<CompanionReviewDepth>,
         #[arg(long, hide = true)]
@@ -79,6 +81,15 @@ pub enum Command {
         #[arg(long, value_enum, hide = true)]
         review_inject_retained_fault:
             Option<crate::commands::companion_mode::RetainedFaultInjection>,
+        /// Dev-preview-only deterministic retained host lifecycle/fault harness.
+        /// Emits one sanitized JSON report and exits nonzero on a mismatch.
+        #[cfg(all(
+            target_os = "macos",
+            feature = "retained-renderer",
+            feature = "dev-preview"
+        ))]
+        #[arg(long, value_enum, hide = true)]
+        review_scene_soak: Option<crate::commands::companion_mode::ReviewSceneSoakScenario>,
     },
     #[command(hide = true)]
     CompanionApp {
@@ -101,6 +112,8 @@ pub enum Command {
         review_capture_dir: Option<PathBuf>,
         #[arg(long, hide = true)]
         review_runtime_metrics_out: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        review_lifetime_frames: Option<u64>,
         #[arg(long, value_enum, hide = true)]
         review_depth: Option<CompanionReviewDepth>,
         #[arg(long, hide = true)]
@@ -121,6 +134,15 @@ pub enum Command {
         #[arg(long, value_enum, hide = true)]
         review_inject_retained_fault:
             Option<crate::commands::companion_mode::RetainedFaultInjection>,
+        /// Dev-preview-only deterministic retained host lifecycle/fault harness.
+        /// Emits one sanitized JSON report and exits nonzero on a mismatch.
+        #[cfg(all(
+            target_os = "macos",
+            feature = "retained-renderer",
+            feature = "dev-preview"
+        ))]
+        #[arg(long, value_enum, hide = true)]
+        review_scene_soak: Option<crate::commands::companion_mode::ReviewSceneSoakScenario>,
     },
     /// Print a compact non-interactive pet and usage summary.
     Status,
@@ -213,6 +235,7 @@ impl Cli {
         review_duration_ms: Option<u64>,
         review_capture_dir: Option<PathBuf>,
         review_runtime_metrics_out: Option<PathBuf>,
+        review_lifetime_frames: Option<u64>,
         review_depth: Option<CompanionReviewDepth>,
         review_capture_live_values: bool,
         review_force_dim: bool,
@@ -224,6 +247,7 @@ impl Cli {
             duration_ms: review_duration_ms,
             capture_dir: review_capture_dir,
             runtime_metrics_out: review_runtime_metrics_out,
+            review_lifetime_frames,
             depth: review_depth,
             review_capture_live_values,
             force_dim_overlay: review_force_dim,
@@ -257,6 +281,32 @@ mod tests {
                 command => panic!("expected companion command, got {command:?}"),
             };
             assert_eq!(renderer, CompanionRendererRequest::Auto);
+        }
+    }
+
+    #[cfg(all(
+        target_os = "macos",
+        feature = "retained-renderer",
+        feature = "dev-preview"
+    ))]
+    #[test]
+    fn companion_commands_parse_typed_review_scene_soak_scenarios() {
+        use crate::commands::companion_mode::ReviewSceneSoakScenario;
+
+        for subcommand in ["companion", "companion-app"] {
+            let cli = Cli::try_parse_from([
+                "glorp",
+                subcommand,
+                "--review-scene-soak",
+                "surface-outdated",
+            ])
+            .expect("typed scene soak should parse");
+            let scenario = match cli.command {
+                Command::Companion { review_scene_soak, .. }
+                | Command::CompanionApp { review_scene_soak, .. } => review_scene_soak,
+                command => panic!("expected companion command, got {command:?}"),
+            };
+            assert_eq!(scenario, Some(ReviewSceneSoakScenario::SurfaceOutdated));
         }
     }
 
@@ -328,6 +378,7 @@ mod companion_review_depth_tests {
         let options = Cli::companion_review_options(
             None,
             false,
+            None,
             None,
             None,
             None,

@@ -49,6 +49,7 @@ pub fn run() -> Result<()> {
             review_duration_ms,
             review_capture_dir,
             review_runtime_metrics_out,
+            review_lifetime_frames,
             review_depth,
             review_capture_live_values,
             review_force_dim,
@@ -60,7 +61,24 @@ pub fn run() -> Result<()> {
                 feature = "dev-preview"
             ))]
             review_inject_retained_fault,
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            review_scene_soak,
         } => {
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            if let Some(scenario) = review_scene_soak {
+                return companion::retained::run_review_scene_soak(
+                    scenario,
+                    &mut std::io::stdout(),
+                );
+            }
             let review = Cli::companion_review_options(
                 review_size,
                 review_active_pulse,
@@ -68,6 +86,7 @@ pub fn run() -> Result<()> {
                 review_duration_ms,
                 review_capture_dir,
                 review_runtime_metrics_out,
+                review_lifetime_frames,
                 review_depth,
                 review_capture_live_values,
                 review_force_dim,
@@ -90,9 +109,18 @@ pub fn run() -> Result<()> {
             };
             commands::companion::run(renderer, review)?
         }
-        Command::CompanionApp { renderer, print_capabilities: true, .. } => {
-            commands::companion_mode::print_companion_capabilities(
+        Command::CompanionApp {
+            renderer,
+            print_capabilities: true,
+            #[cfg(all(target_os = "macos", feature = "retained-renderer"))]
+            retained_scene_runtime,
+            ..
+        } => {
+            #[cfg(not(all(target_os = "macos", feature = "retained-renderer")))]
+            let retained_scene_runtime = None;
+            commands::companion_mode::print_companion_capabilities_with_scene_runtime(
                 renderer,
+                retained_scene_runtime,
                 &mut std::io::stdout(),
             )?;
         }
@@ -105,6 +133,7 @@ pub fn run() -> Result<()> {
             review_duration_ms,
             review_capture_dir,
             review_runtime_metrics_out,
+            review_lifetime_frames,
             review_depth,
             review_capture_live_values,
             review_force_dim,
@@ -116,7 +145,24 @@ pub fn run() -> Result<()> {
                 feature = "dev-preview"
             ))]
             review_inject_retained_fault,
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            review_scene_soak,
         } => {
+            #[cfg(all(
+                target_os = "macos",
+                feature = "retained-renderer",
+                feature = "dev-preview"
+            ))]
+            if let Some(scenario) = review_scene_soak {
+                return companion::retained::run_review_scene_soak(
+                    scenario,
+                    &mut std::io::stdout(),
+                );
+            }
             let review = Cli::companion_review_options(
                 review_size,
                 review_active_pulse,
@@ -124,6 +170,7 @@ pub fn run() -> Result<()> {
                 review_duration_ms,
                 review_capture_dir,
                 review_runtime_metrics_out,
+                review_lifetime_frames,
                 review_depth,
                 review_capture_live_values,
                 review_force_dim,

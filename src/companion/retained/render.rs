@@ -11,7 +11,7 @@ use super::resources::{GlyphEntryKind, GlyphKey, PreparedSceneAtlas};
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 
 const NONE_U32: u32 = u32::MAX;
@@ -298,6 +298,19 @@ const APERTURE_COMPOSITE_PIPELINE_CONTRACT: ApertureCompositePipelineContract =
         scene_storage_group: 0,
         sampled_raw_group: 2,
         target_format: SceneTextureContract::INTERMEDIATE,
+    };
+
+const APERTURE_SURFACE_PIPELINE_CONTRACT: ApertureCompositePipelineContract =
+    ApertureCompositePipelineContract {
+        pipeline: ScenePipelineContract {
+            vertex_entry: "vs_final",
+            fragment_entry: "fs_aperture_surface",
+            blend: None,
+            depth_write_enabled: None,
+        },
+        scene_storage_group: 0,
+        sampled_raw_group: 2,
+        target_format: wgpu::TextureFormat::Bgra8UnormSrgb,
     };
 
 const fn scene_pipeline_contract(class: ScenePipelineClass) -> ScenePipelineContract {
@@ -2097,7 +2110,7 @@ impl SceneGpuSharedFacts {
     pub(super) const EXPECTED: Self = Self {
         bind_group_layouts: 4,
         samplers: 1,
-        pipelines: 11,
+        pipelines: 12,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -2255,6 +2268,7 @@ pub(super) struct SceneBasePipelines {
     pub(super) chrome_analytic: wgpu::RenderPipeline,
     pub(super) chrome_hud: wgpu::RenderPipeline,
     pub(super) aperture_composite: wgpu::RenderPipeline,
+    pub(super) aperture_surface: wgpu::RenderPipeline,
     pub(super) final_surface: wgpu::RenderPipeline,
 }
 
@@ -2606,6 +2620,32 @@ fn create_scene_base_pipelines(
         multiview_mask: None,
         cache: None,
     });
+    let aperture_surface_contract = APERTURE_SURFACE_PIPELINE_CONTRACT.pipeline;
+    let aperture_surface = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("glorp-scene-aperture-surface"),
+        layout: Some(&aperture_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some(aperture_surface_contract.vertex_entry),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some(aperture_surface_contract.fragment_entry),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: APERTURE_SURFACE_PIPELINE_CONTRACT.target_format,
+                blend: aperture_surface_contract.blend.map(scene_blend_state),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
     let final_surface = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("glorp-scene-final-surface"),
         layout: Some(&final_pipeline_layout),
@@ -2642,6 +2682,7 @@ fn create_scene_base_pipelines(
         chrome_analytic,
         chrome_hud,
         aperture_composite,
+        aperture_surface,
         final_surface,
     }
 }
@@ -2904,6 +2945,21 @@ impl GpuSceneCandidate {
     pub(super) const fn facts(&self) -> GpuSceneCandidateFacts {
         GpuSceneCandidateFacts::EXPECTED
     }
+
+    pub(super) fn submitted_draw_count(&self) -> u64 {
+        let scene_draws = self
+            .draw_plan
+            .opaque
+            .len()
+            .saturating_add(self.draw_plan.world_blended_unsorted.len())
+            .saturating_add(self.draw_plan.chrome.prefix.len())
+            .saturating_add(self.draw_plan.chrome.suffix.len());
+        // The renderer also issues one fixed HUD hook, aperture composite, and
+        // final surface pass for every direct-scene submission.
+        u64::try_from(scene_draws)
+            .unwrap_or(u64::MAX)
+            .saturating_add(3)
+    }
 }
 
 pub(super) fn encode_sensitive_hud_hook(
@@ -2940,6 +2996,44 @@ pub(super) fn encode_redacted_hud_hook(
     candidate
         .hud
         .encode_redacted_capture(staging_belt, encoder, target, bindings, prepared)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PreparedCaptureHud<'prepared> {
+    Redacted(&'prepared super::hud::CaptureSafePreparedHudFrame),
+    Sensitive(&'prepared super::hud::SensitivePreparedHudFrame),
+}
+
+impl PreparedCaptureHud<'_> {
+    fn validate(self, candidate: &GpuSceneCandidate) -> Result<(), super::hud::HudGpuStagingError> {
+        match self {
+            Self::Redacted(prepared) => candidate.hud.validate_redacted_capture(prepared),
+            Self::Sensitive(prepared) => candidate.hud.validate_sensitive(prepared),
+        }
+    }
+
+    fn encode(
+        self,
+        encoder: &mut wgpu::CommandEncoder,
+        staging_belt: &mut wgpu::util::StagingBelt,
+        target: &wgpu::TextureView,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+    ) -> Result<(), super::hud::HudGpuStagingError> {
+        match self {
+            Self::Redacted(prepared) => {
+                encode_redacted_hud_hook(encoder, staging_belt, target, shared, candidate, prepared)
+            }
+            Self::Sensitive(prepared) => encode_sensitive_hud_hook(
+                encoder,
+                staging_belt,
+                target,
+                shared,
+                candidate,
+                prepared,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3997,6 +4091,13 @@ struct SceneDeltaTransaction<'candidate> {
     prepared: PreparedSceneDelta,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SceneSurfaceTimings {
+    pub(super) delta_write: Duration,
+    pub(super) encode: Duration,
+    pub(super) submit: Duration,
+}
+
 impl SceneRenderer {
     pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, shared: &SceneGpuShared) -> Self {
         Self {
@@ -4036,7 +4137,27 @@ impl SceneRenderer {
             shared,
             candidate,
             request,
-            prepared_hud,
+            PreparedCaptureHud::Redacted(prepared_hud),
+            None,
+        )
+    }
+
+    pub(super) fn render_offscreen_sensitive(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
+    ) -> Result<SceneRenderOutcome, SceneRenderError> {
+        self.render_offscreen_inner(
+            device,
+            queue,
+            shared,
+            candidate,
+            request,
+            PreparedCaptureHud::Sensitive(prepared_hud),
             None,
         )
     }
@@ -4104,8 +4225,7 @@ impl SceneRenderer {
                 candidate,
                 &candidate.draw_plan.chrome.suffix,
             );
-            encode_aperture_composite(&mut encoder, targets, shared, candidate);
-            encode_final_surface(&mut encoder, surface_view, targets, shared);
+            encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
             self.staging_belt.finish();
             Ok::<_, super::hud::HudGpuStagingError>(encoder.finish())
         })();
@@ -4142,7 +4262,7 @@ impl SceneRenderer {
         request: SceneRenderRequest,
         prepared_hud: &super::hud::SensitivePreparedHudFrame,
         surface_view: &wgpu::TextureView,
-    ) -> Result<wgpu::SubmissionIndex, SceneRenderError> {
+    ) -> Result<(wgpu::SubmissionIndex, SceneSurfaceTimings), SceneRenderError> {
         self.submit_active_to_surface_inner(
             device,
             queue,
@@ -4171,7 +4291,14 @@ impl SceneRenderer {
         request: SceneRenderRequest,
         prepared_hud: &super::hud::SensitivePreparedHudFrame,
         surface_view: &wgpu::TextureView,
-    ) -> Result<wgpu::SubmissionIndex, SceneRenderError> {
+    ) -> Result<
+        (
+            wgpu::SubmissionIndex,
+            super::compiler::SceneDirtyMetrics,
+            SceneSurfaceTimings,
+        ),
+        SceneRenderError,
+    > {
         self.validate_actual_identity(device, queue, shared, candidate)?;
         if cpu.generation_key != candidate.generation_key {
             return Err(SceneRenderError::Delta(
@@ -4202,7 +4329,8 @@ impl SceneRenderer {
                 SceneDeltaRenderError::PreparedRevisionMismatch,
             ));
         }
-        self.submit_active_to_surface_inner(
+        let dirty_metrics = dirty.metrics();
+        let (submission, timings) = self.submit_active_to_surface_inner(
             device,
             queue,
             shared,
@@ -4211,11 +4339,16 @@ impl SceneRenderer {
             prepared_hud,
             surface_view,
             Some(SceneDeltaTransaction { cpu, prepared }),
-        )
+        )?;
+        Ok((submission, dirty_metrics, timings))
     }
 
+    /// Submits one direct scene frame into the renderer's persistent offscreen
+    /// target without copying or mapping the readback buffer. The lifetime gate
+    /// uses this path for its 30 Hz presentation schedule; the one terminal
+    /// capture then exercises and validates the separately prewarmed readback.
     #[allow(clippy::too_many_arguments)]
-    fn submit_active_to_surface_inner(
+    pub(super) fn submit_active_offscreen(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -4223,9 +4356,92 @@ impl SceneRenderer {
         candidate: &mut GpuSceneCandidate,
         request: SceneRenderRequest,
         prepared_hud: &super::hud::SensitivePreparedHudFrame,
-        surface_view: &wgpu::TextureView,
+    ) -> Result<(wgpu::SubmissionIndex, SceneSurfaceTimings), SceneRenderError> {
+        self.submit_active_offscreen_inner(
+            device,
+            queue,
+            shared,
+            candidate,
+            request,
+            prepared_hud,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn submit_active_offscreen_with_delta(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        cpu: &mut CpuSceneCandidate,
+        candidate: &mut GpuSceneCandidate,
+        content_delta: &crate::presentation::companion_scene::scene::ContentDelta,
+        frame_delta: &crate::presentation::companion_scene::scene::FrameDelta,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
+    ) -> Result<
+        (
+            wgpu::SubmissionIndex,
+            super::compiler::SceneDirtyMetrics,
+            SceneSurfaceTimings,
+        ),
+        SceneRenderError,
+    > {
+        self.validate_actual_identity(device, queue, shared, candidate)?;
+        if cpu.generation_key != candidate.generation_key {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::GenerationMismatch,
+            ));
+        }
+        if cpu.static_checksum != candidate.static_checksum {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::StaticChecksumMismatch,
+            ));
+        }
+        if cpu.source_revisions != candidate.source_revisions {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::RevisionMismatch,
+            ));
+        }
+        if cpu.logical_viewport_points() != candidate.logical_viewport_points {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::LogicalViewportMismatch,
+            ));
+        }
+        let prepared = cpu
+            .prepare_deltas(content_delta, frame_delta)
+            .map_err(SceneRenderError::DeltaPreparation)?;
+        let dirty = prepared.dirty_spans();
+        if dirty.from != candidate.source_revisions || dirty.to != request.version.applied {
+            return Err(SceneRenderError::Delta(
+                SceneDeltaRenderError::PreparedRevisionMismatch,
+            ));
+        }
+        let dirty_metrics = dirty.metrics();
+        let (submission, timings) = self.submit_active_offscreen_inner(
+            device,
+            queue,
+            shared,
+            candidate,
+            request,
+            prepared_hud,
+            Some(SceneDeltaTransaction { cpu, prepared }),
+        )?;
+        Ok((submission, dirty_metrics, timings))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_active_offscreen_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
         mut delta: Option<SceneDeltaTransaction<'_>>,
-    ) -> Result<wgpu::SubmissionIndex, SceneRenderError> {
+    ) -> Result<(wgpu::SubmissionIndex, SceneSurfaceTimings), SceneRenderError> {
         if self.device_epoch != shared.device_epoch {
             return Err(SceneRenderError::RendererDeviceEpochMismatch {
                 renderer: self.device_epoch,
@@ -4254,6 +4470,7 @@ impl SceneRenderer {
             &request,
         )
         .map_err(SceneRenderError::Request)?;
+        let delta_stage_started_at = Instant::now();
         let physical_delta = delta
             .as_ref()
             .map(|transaction| {
@@ -4261,6 +4478,11 @@ impl SceneRenderer {
             })
             .transpose()
             .map_err(SceneRenderError::Delta)?;
+        let delta_stage_elapsed = if physical_delta.is_some() {
+            delta_stage_started_at.elapsed()
+        } else {
+            Duration::ZERO
+        };
         let blended_order_prepared = if physical_delta.is_some()
             && delta
                 .as_ref()
@@ -4300,9 +4522,11 @@ impl SceneRenderer {
         let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let submission_result = (|| {
+            let encode_started_at = Instant::now();
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("glorp-scene-active-surface-encoder"),
+                label: Some("glorp-scene-lifetime-offscreen-encoder"),
             });
+            let delta_copy_started_at = Instant::now();
             let scene_buffer_copies = physical_delta
                 .map(|physical| {
                     encode_scene_delta_copies(
@@ -4313,6 +4537,271 @@ impl SceneRenderer {
                     )
                 })
                 .unwrap_or(0);
+            let delta_copy_elapsed = if physical_delta.is_some() {
+                delta_copy_started_at.elapsed()
+            } else {
+                Duration::ZERO
+            };
+            encode_scene_world(&mut encoder, targets, shared, candidate);
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-lifetime-chrome-prefix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.prefix,
+            );
+            encode_sensitive_hud_hook(
+                &mut encoder,
+                &mut self.staging_belt,
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                prepared_hud,
+            )?;
+            encode_scene_draws_without_depth(
+                &mut encoder,
+                "glorp-scene-lifetime-chrome-suffix",
+                &targets.raw_scene_view,
+                shared,
+                candidate,
+                &candidate.draw_plan.chrome.suffix,
+            );
+            encode_aperture_composite(&mut encoder, targets, shared, candidate);
+            let encode_elapsed = encode_started_at
+                .elapsed()
+                .saturating_sub(delta_copy_elapsed);
+            let submit_started_at = Instant::now();
+            self.staging_belt.finish();
+            let command = encoder.finish();
+            let submission = queue.submit([command]);
+            let submit_elapsed = submit_started_at.elapsed();
+            #[cfg(test)]
+            {
+                self.submission_events = self.submission_events.saturating_add(1);
+                self.scene_buffer_copy_events = self
+                    .scene_buffer_copy_events
+                    .saturating_add(u64::try_from(scene_buffer_copies).unwrap_or(u64::MAX));
+            }
+            #[cfg(not(test))]
+            let _ = scene_buffer_copies;
+            self.staging_belt.recall();
+            Ok::<_, super::hud::HudGpuStagingError>((
+                submission,
+                SceneSurfaceTimings {
+                    delta_write: delta_stage_elapsed.saturating_add(delta_copy_elapsed),
+                    encode: encode_elapsed,
+                    submit: submit_elapsed,
+                },
+            ))
+        })();
+
+        let validation_error = pollster::block_on(validation.pop()).map(sanitize_gpu_error);
+        let out_of_memory_error = pollster::block_on(out_of_memory.pop()).map(sanitize_gpu_error);
+        let internal_error = pollster::block_on(internal.pop()).map(sanitize_gpu_error);
+        if let Some(category) =
+            select_scoped_gpu_error(validation_error, out_of_memory_error, internal_error)
+        {
+            self.reset_staging_belt(device);
+            if physical_delta.is_some() {
+                candidate.generation_state.reset_pending();
+                candidate.blended_order.discard_pending();
+            }
+            return Err(SceneRenderError::Gpu(category));
+        }
+        let submission = match submission_result {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.reset_staging_belt(device);
+                if physical_delta.is_some() {
+                    candidate.generation_state.reset_pending();
+                    candidate.blended_order.discard_pending();
+                }
+                return Err(SceneRenderError::Hud(error));
+            }
+        };
+        if let Some(transaction) = delta.take() {
+            let expected_dirty = transaction.prepared.dirty_spans();
+            let applied = transaction.cpu.commit_prepared(transaction.prepared);
+            debug_assert_eq!(applied.dirty, expected_dirty);
+            candidate.generation_state.commit_pending();
+            if blended_order_prepared {
+                candidate.blended_order.commit_pending();
+            }
+            candidate.source_revisions = applied.to;
+            candidate.logical_viewport_points = applied.prospective_logical_viewport_points;
+        }
+        Ok(submission)
+    }
+
+    pub(super) fn prewarm_offscreen_readback(
+        &mut self,
+        device: &wgpu::Device,
+        shared: &SceneGpuShared,
+        request: SceneRenderRequest,
+        candidate: &GpuSceneCandidate,
+    ) -> Result<(), SceneRenderError> {
+        let binding = bind_scene_render_request(shared, candidate, request)
+            .map_err(SceneRenderError::Request)?;
+        self.targets
+            .ensure(device, shared, binding.target_key)
+            .map_err(SceneRenderError::Target)?;
+        let key = super::capture::SceneReadbackKey::new(
+            binding.target_key.device_epoch,
+            binding.request.physical_extent_pixels,
+        );
+        super::capture::SceneReadbackLayout::checked(
+            key.physical_extent_pixels[0],
+            key.physical_extent_pixels[1],
+            key.intermediate_format,
+            Some(device.limits().max_buffer_size),
+        )
+        .map_err(SceneRenderError::Readback)?;
+        self.readback
+            .ensure(device, shared, key)
+            .map_err(SceneRenderError::Readback)?;
+        Ok(())
+    }
+
+    pub(super) const fn offscreen_cache_events(&self) -> (u64, u64) {
+        (
+            self.targets.creation_events(),
+            self.readback.creation_events(),
+        )
+    }
+
+    pub(super) fn offscreen_cache_allocation(&self) -> (u64, u64) {
+        let Some(targets) = self.targets.current() else {
+            return (0, 0);
+        };
+        let pixels = targets
+            .key
+            .extent
+            .width
+            .saturating_mul(targets.key.extent.height) as u64;
+        // raw BGRA8 + straight-alpha RGBA8 intermediate + Depth32Float.
+        let target_bytes = pixels.saturating_mul(12);
+        let readback_bytes = self.readback.current_buffer_size();
+        let target_objects = u64::from(targets.facts().persistent_owned_handles());
+        let readback_objects = u64::from(readback_bytes > 0);
+        (
+            target_bytes.saturating_add(readback_bytes),
+            target_objects.saturating_add(readback_objects),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_active_to_surface_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SceneGpuShared,
+        candidate: &mut GpuSceneCandidate,
+        request: SceneRenderRequest,
+        prepared_hud: &super::hud::SensitivePreparedHudFrame,
+        surface_view: &wgpu::TextureView,
+        mut delta: Option<SceneDeltaTransaction<'_>>,
+    ) -> Result<(wgpu::SubmissionIndex, SceneSurfaceTimings), SceneRenderError> {
+        if self.device_epoch != shared.device_epoch {
+            return Err(SceneRenderError::RendererDeviceEpochMismatch {
+                renderer: self.device_epoch,
+                shared: shared.device_epoch,
+            });
+        }
+        self.validate_actual_identity(device, queue, shared, candidate)?;
+        let (revisions, logical_viewport_points) = delta
+            .as_ref()
+            .map(|transaction| {
+                (
+                    transaction.prepared.dirty_spans().to,
+                    transaction.prepared.prospective_logical_viewport_points(),
+                )
+            })
+            .unwrap_or((
+                candidate.source_revisions,
+                candidate.logical_viewport_points,
+            ));
+        let target_key = derive_scene_target_key(
+            shared.device_epoch,
+            candidate.generation_key,
+            revisions,
+            logical_viewport_points,
+            shared.max_texture_dimension_2d,
+            &request,
+        )
+        .map_err(SceneRenderError::Request)?;
+        let delta_stage_started_at = Instant::now();
+        let physical_delta = delta
+            .as_ref()
+            .map(|transaction| {
+                stage_prepared_scene_delta(&mut candidate.generation_state, &transaction.prepared)
+            })
+            .transpose()
+            .map_err(SceneRenderError::Delta)?;
+        let delta_stage_elapsed = if physical_delta.is_some() {
+            delta_stage_started_at.elapsed()
+        } else {
+            Duration::ZERO
+        };
+        let blended_order_prepared = if physical_delta.is_some()
+            && delta
+                .as_ref()
+                .is_some_and(|transaction| transaction.prepared.blended_depth_dirty())
+        {
+            match candidate.blended_order.prepare_from_packed(
+                candidate.generation_state.nodes.pending.as_ref(),
+                candidate.generation_state.frame.pending.as_ref(),
+                true,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    candidate.generation_state.reset_pending();
+                    candidate.blended_order.discard_pending();
+                    return Err(SceneRenderError::Delta(
+                        SceneDeltaRenderError::BlendedOrder(error),
+                    ));
+                }
+            }
+        } else {
+            candidate.blended_order.discard_pending();
+            false
+        };
+
+        if let Err(error) = self.targets.ensure(device, shared, target_key) {
+            if physical_delta.is_some() {
+                candidate.generation_state.reset_pending();
+                candidate.blended_order.discard_pending();
+            }
+            return Err(SceneRenderError::Target(error));
+        }
+        let targets = self
+            .targets
+            .current()
+            .expect("successful target ensure installs the requested target");
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let submission_result = (|| {
+            let encode_started_at = Instant::now();
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glorp-scene-active-surface-encoder"),
+            });
+            let delta_copy_started_at = Instant::now();
+            let scene_buffer_copies = physical_delta
+                .map(|physical| {
+                    encode_scene_delta_copies(
+                        &mut encoder,
+                        &mut self.staging_belt,
+                        candidate,
+                        physical,
+                    )
+                })
+                .unwrap_or(0);
+            let delta_copy_elapsed = if physical_delta.is_some() {
+                delta_copy_started_at.elapsed()
+            } else {
+                Duration::ZERO
+            };
             encode_scene_world(&mut encoder, targets, shared, candidate);
             encode_scene_draws_without_depth(
                 &mut encoder,
@@ -4338,10 +4827,15 @@ impl SceneRenderer {
                 candidate,
                 &candidate.draw_plan.chrome.suffix,
             );
-            encode_aperture_composite(&mut encoder, targets, shared, candidate);
-            encode_final_surface(&mut encoder, surface_view, targets, shared);
+            encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
+            let encode_elapsed = encode_started_at
+                .elapsed()
+                .saturating_sub(delta_copy_elapsed);
+            let submit_started_at = Instant::now();
             self.staging_belt.finish();
-            let submission = queue.submit([encoder.finish()]);
+            let command = encoder.finish();
+            let submission = queue.submit([command]);
+            let submit_elapsed = submit_started_at.elapsed();
             #[cfg(test)]
             {
                 self.submission_events = self.submission_events.saturating_add(1);
@@ -4352,7 +4846,14 @@ impl SceneRenderer {
             #[cfg(not(test))]
             let _ = scene_buffer_copies;
             self.staging_belt.recall();
-            Ok::<_, super::hud::HudGpuStagingError>(submission)
+            Ok::<_, super::hud::HudGpuStagingError>((
+                submission,
+                SceneSurfaceTimings {
+                    delta_write: delta_stage_elapsed.saturating_add(delta_copy_elapsed),
+                    encode: encode_elapsed,
+                    submit: submit_elapsed,
+                },
+            ))
         })();
 
         let validation_error = pollster::block_on(validation.pop()).map(sanitize_gpu_error);
@@ -4447,7 +4948,7 @@ impl SceneRenderer {
             shared,
             candidate,
             request,
-            prepared_hud,
+            PreparedCaptureHud::Redacted(prepared_hud),
             Some(SceneDeltaTransaction { cpu, prepared }),
         )
     }
@@ -4460,7 +4961,7 @@ impl SceneRenderer {
         shared: &SceneGpuShared,
         candidate: &mut GpuSceneCandidate,
         request: SceneRenderRequest,
-        prepared_hud: &super::hud::CaptureSafePreparedHudFrame,
+        prepared_hud: PreparedCaptureHud<'_>,
         mut delta: Option<SceneDeltaTransaction<'_>>,
     ) -> Result<SceneRenderOutcome, SceneRenderError> {
         if self.device_epoch != shared.device_epoch {
@@ -4492,9 +4993,8 @@ impl SceneRenderer {
         )
         .map_err(SceneRenderError::Request)?;
         let binding = SceneRenderBinding { request, target_key };
-        candidate
-            .hud
-            .validate_redacted_capture(prepared_hud)
+        prepared_hud
+            .validate(candidate)
             .map_err(SceneRenderError::Hud)?;
         let readback_key = super::capture::SceneReadbackKey::new(
             binding.target_key.device_epoch,
@@ -4593,13 +5093,12 @@ impl SceneRenderer {
             );
             // This is the only HUD draw in the general scene schedule. The hook
             // rechecks generation immediately before its one fixed upload.
-            encode_redacted_hud_hook(
+            prepared_hud.encode(
                 &mut encoder,
                 &mut self.staging_belt,
                 &targets.raw_scene_view,
                 shared,
                 candidate,
-                prepared_hud,
             )?;
             encode_scene_draws_without_depth(
                 &mut encoder,
@@ -4986,6 +5485,36 @@ fn encode_aperture_composite(
         ..Default::default()
     });
     pass.set_pipeline(&shared.pipelines.aperture_composite);
+    pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
+    pass.set_bind_group(2, &targets.aperture_bind_group, &[]);
+    pass.draw(0..3, 0..1);
+}
+
+/// Applies the unique circular clip and converts the raw premultiplied scene to
+/// the straight-RGB contract expected by the PostMultiplied CAMetalLayer in one
+/// fullscreen pass. Offscreen capture retains `encode_aperture_composite` and
+/// its premultiplied intermediate so readback semantics remain unchanged.
+fn encode_aperture_surface(
+    encoder: &mut wgpu::CommandEncoder,
+    surface_view: &wgpu::TextureView,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-aperture-surface"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: surface_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_pipeline(&shared.pipelines.aperture_surface);
     pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
     pass.set_bind_group(2, &targets.aperture_bind_group, &[]);
     pass.draw(0..3, 0..1);
@@ -6415,6 +6944,20 @@ mod tests {
                 target_format: SceneTextureContract::INTERMEDIATE,
             },
         );
+        assert_eq!(
+            APERTURE_SURFACE_PIPELINE_CONTRACT,
+            ApertureCompositePipelineContract {
+                pipeline: ScenePipelineContract {
+                    vertex_entry: "vs_final",
+                    fragment_entry: "fs_aperture_surface",
+                    blend: None,
+                    depth_write_enabled: None,
+                },
+                scene_storage_group: 0,
+                sampled_raw_group: 2,
+                target_format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            },
+        );
         let production = include_str!("render.rs")
             .split("#[cfg(test)]\nmod tests")
             .next()
@@ -6440,6 +6983,7 @@ mod tests {
             "fn fs_trouble(",
             "fn fs_dim(",
             "fn fs_aperture_composite(",
+            "fn fs_aperture_surface(",
             "fn fs_wall_shadow_glyph(",
         ] {
             assert!(SCENE_SHADER_SOURCE.contains(required), "missing {required}");
@@ -7904,6 +8448,35 @@ mod tests {
             );
         }
 
+        let surface = SCENE_SHADER_SOURCE
+            .split("fn fs_aperture_surface(")
+            .nth(1)
+            .expect("direct aperture surface composite exists")
+            .split("@fragment")
+            .next()
+            .expect("direct surface composite has a bounded body");
+        for required in [
+            "frame_buffer.analytics[0u]",
+            "scene_content_buffer.analytics[0u]",
+            "valid_analytic_role(0u, aperture, aperture_content)",
+            "textureDimensions(scene_sampled_texture)",
+            "frame_buffer.globals.viewport_points",
+            "textureLoad(scene_sampled_texture",
+            "sampled.a * coverage",
+            "sampled.rgb / sampled.a",
+        ] {
+            assert!(
+                surface.contains(required),
+                "missing direct surface composite contract: {required}"
+            );
+        }
+        for forbidden in ["frame_buffer.globals.aperture", "viewport_pixels"] {
+            assert!(
+                !surface.contains(forbidden),
+                "reserved direct surface global used: {forbidden}"
+            );
+        }
+
         let entry = SCENE_SHADER_SOURCE.split("fn fs_analytic(").nth(1).unwrap();
         assert!(entry.contains("if (output.a <= 0.0) {\n        discard;\n    }"));
 
@@ -7931,6 +8504,17 @@ mod tests {
             .unwrap();
         assert!(aperture_encoder.contains("pass.draw(0..3, 0..1);"));
         assert!(!aperture_encoder.contains("pass.draw(0..6"));
+
+        let surface_encoder = rust_source
+            .split("fn encode_aperture_surface(")
+            .nth(1)
+            .unwrap()
+            .split("fn encode_final_surface(")
+            .next()
+            .unwrap();
+        assert!(surface_encoder.contains("pass.draw(0..3, 0..1);"));
+        assert!(surface_encoder.contains("&shared.pipelines.aperture_surface"));
+        assert!(surface_encoder.contains("&targets.aperture_bind_group"));
 
         let world_encoder = rust_source
             .split("fn encode_scene_world(")
@@ -7992,7 +8576,7 @@ mod tests {
     fn gpu_resource_accounting_is_exact_and_not_a_live_global_metric() {
         assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 4);
         assert_eq!(SceneGpuSharedFacts::EXPECTED.samplers, 1);
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 11);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 12);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 10);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.textures, 2);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.texture_views, 2);
@@ -8005,7 +8589,7 @@ mod tests {
             SceneGpuSharedFacts::EXPECTED.persistent_owned_handles()
                 + GpuSceneCandidateFacts::EXPECTED.persistent_owned_handles()
                 + SceneTargetFacts::EXPECTED.persistent_owned_handles(),
-            42,
+            43,
         );
     }
 
@@ -8290,6 +8874,123 @@ mod tests {
             assert_eq!(shadow.committed, shadow.pending);
             assert_ne!(shadow.committed.as_ptr(), shadow.pending.as_ptr());
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn rgba_roi(
+        outcome: &SceneRenderOutcome,
+        logical_rect: [f32; 4],
+        backing_scale: f64,
+    ) -> Vec<u8> {
+        let [width, height] = outcome.physical_extent_pixels;
+        let scale = backing_scale as f32;
+        let x0 = (logical_rect[0] * scale).floor().max(0.0) as u32;
+        let y0 = (logical_rect[1] * scale).floor().max(0.0) as u32;
+        let x1 = ((logical_rect[0] + logical_rect[2]) * scale)
+            .ceil()
+            .clamp(0.0, width as f32) as u32;
+        let y1 = ((logical_rect[1] + logical_rect[3]) * scale)
+            .ceil()
+            .clamp(0.0, height as f32) as u32;
+        let mut roi = Vec::with_capacity(((x1 - x0) * (y1 - y0) * 4) as usize);
+        for y in y0..y1 {
+            let start = ((y * width + x0) * 4) as usize;
+            let end = ((y * width + x1) * 4) as usize;
+            roi.extend_from_slice(&outcome.rgba[start..end]);
+        }
+        roi
+    }
+
+    #[cfg(target_os = "macos")]
+    fn prop_roi(
+        candidate: &super::super::compiler::CpuSceneCandidate,
+        slot: usize,
+        margin: f32,
+    ) -> [f32; 4] {
+        let frame = candidate.accepted_frame_for_test().prop_slots[slot];
+        let content = candidate.accepted_content_for_test().prop_slots[slot]
+            .content
+            .expect("occupied production prop slot");
+        let cell = [360.0 / 44.0, 360.0 / 18.0];
+        let occupied = content
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.glyph.is_some())
+            .collect::<Vec<_>>();
+        let min_col = occupied
+            .iter()
+            .map(|glyph| glyph.local_cell[0])
+            .min()
+            .unwrap() as f32;
+        let max_col = occupied
+            .iter()
+            .map(|glyph| glyph.local_cell[0])
+            .max()
+            .unwrap() as f32;
+        let min_row = occupied
+            .iter()
+            .map(|glyph| glyph.local_cell[1])
+            .min()
+            .unwrap() as f32;
+        let max_row = occupied
+            .iter()
+            .map(|glyph| glyph.local_cell[1])
+            .max()
+            .unwrap() as f32;
+        let x = frame.origin_points[0] + frame.motion_offset_points[0] + min_col * cell[0];
+        let y_up = frame.origin_points[1] + frame.motion_offset_points[1] - max_row * cell[1];
+        let width = (max_col - min_col + 1.0) * cell[0];
+        let height = (max_row - min_row + 1.0) * cell[1];
+        [
+            (x - margin).max(0.0),
+            (360.0 - y_up - height - margin).max(0.0),
+            width + margin * 2.0,
+            height + margin * 2.0,
+        ]
+    }
+
+    #[cfg(target_os = "macos")]
+    fn tank_roi(
+        candidate: &super::super::compiler::CpuSceneCandidate,
+        slot: usize,
+        margin: f32,
+    ) -> [f32; 4] {
+        let frame = candidate.accepted_frame_for_test().tank_slots[slot];
+        let glyphs = candidate.accepted_content_for_test().tank_slots[slot]
+            .content
+            .expect("occupied production tank slot")
+            .glyphs;
+        let bounds = frame
+            .cells
+            .iter()
+            .zip(glyphs)
+            .filter_map(|(cell, glyph)| {
+                (cell.visible && glyph.is_some()).then_some(cell.bounds_points)
+            })
+            .collect::<Vec<_>>();
+        let min_x = bounds
+            .iter()
+            .map(|bounds| bounds[0])
+            .fold(f32::INFINITY, f32::min);
+        let min_y = bounds
+            .iter()
+            .map(|bounds| bounds[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = bounds
+            .iter()
+            .map(|bounds| bounds[0] + bounds[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_y = bounds
+            .iter()
+            .map(|bounds| bounds[1] + bounds[3])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite());
+        [
+            (min_x - margin).max(0.0),
+            (360.0 - max_y - margin).max(0.0),
+            max_x - min_x + margin * 2.0,
+            max_y - min_y + margin * 2.0,
+        ]
     }
 
     #[test]
@@ -8745,6 +9446,332 @@ mod tests {
             .unwrap();
         assert_eq!(incremental, fresh_outcome);
         assert_eq!(renderer.delta_events_for_test(), (1, 4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn task8_native_multiframe_prop_rois_change_only_animated_element_without_churn() {
+        use crate::game::habitat::{FIRST_ENSEMBLE_DAY, TOKEN_PEBBLE_25K};
+        use crate::pet::generation::Species;
+        use crate::presentation::companion_scene::{
+            AppliedRevisions, DeviceEpoch, FrameRevision, LayoutGeneration,
+            PropAnimationKindSnapshot, PropPresentationMotion, ResourceGeneration,
+            SceneGenerationKey,
+        };
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let mut snapshot = super::super::compiler::projected_full_scene_snapshot_for_render_test(0);
+        assert_eq!(snapshot.topology.visible_props.len(), 2);
+        assert_eq!(
+            snapshot.topology.visible_props[1].catalog_id,
+            TOKEN_PEBBLE_25K
+        );
+        snapshot.topology.visible_props[0].catalog_id = FIRST_ENSEMBLE_DAY;
+        snapshot.topology.visible_props[0].presentation_motion = PropPresentationMotion::Static;
+        snapshot.content.prop_animation_states[0].catalog_id = FIRST_ENSEMBLE_DAY;
+        snapshot.content.prop_animation_states[0].kind = PropAnimationKindSnapshot::Static;
+        snapshot.content.prop_animation_states[0].sprite_phase = None;
+        snapshot.content.prop_animation_states[0].twinkle_active = None;
+        snapshot.content.prop_animation_states[0].motion_phase = None;
+        snapshot.content.prop_animation_states[0].chest_lid_open = None;
+        snapshot.content.prop_animation_states[0].bloom_active = None;
+        snapshot.frame.prop_instances[0].motion_offset_points = [0.0; 2];
+        snapshot.frame.prop_instances[0].transition = None;
+
+        let generation_key = SceneGenerationKey {
+            device: DeviceEpoch(31),
+            layout: LayoutGeneration(32),
+            resources: ResourceGeneration(33),
+        };
+        let revisions = AppliedRevisions::new(4, 5);
+        let generation = crate::presentation::companion_scene::scene::build_scene_generation_owned(
+            std::sync::Arc::new(snapshot),
+            generation_key,
+            revisions,
+        )
+        .expect("static and animated production prop scene builds");
+        let original_cpu = super::super::compiler::compile_cpu_generation(&generation)
+            .expect("production prop scene compiles");
+
+        for backing_scale in [1.0, 2.0] {
+            let (device, queue) = native_device();
+            let mut cpu = original_cpu.clone();
+            let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Fuzz),
+                backing_scale,
+            );
+            let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+                .expect("production prop repertoire compiles");
+            let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+                resources.atlas(),
+                generation_key.resources,
+            )
+            .expect("production prop atlas prepares");
+            let upload = prepare_scene_upload(&cpu, &atlas).expect("scene upload prepares");
+            let shared = SceneGpuShared::create(&device, generation_key.device).unwrap();
+            let mut candidate =
+                materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+            let hud = candidate
+                .hud
+                .prepared_atlas()
+                .prepare_redacted_capture(
+                    &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                    hud_geometry(generation_key.resources),
+                )
+                .unwrap();
+            let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+            let baseline_request = render_request_fixture(
+                generation_key,
+                revisions,
+                cpu.logical_viewport_points(),
+                backing_scale,
+            );
+            let baseline = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    baseline_request,
+                    &hud,
+                )
+                .expect("baseline production prop frame renders");
+            let static_roi = prop_roi(&cpu, 0, 2.0);
+            let animated_roi = prop_roi(&cpu, 1, 8.0);
+            let static_before = rgba_roi(&baseline, static_roi, backing_scale);
+            let animated_before = rgba_roi(&baseline, animated_roi, backing_scale);
+            assert!(static_before.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            assert!(animated_before.chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+            let static_frame_before = cpu.accepted_frame_for_test().prop_slots[0];
+            let static_checksum_before = cpu.static_checksum;
+            let content_bytes_before = cpu.content_upload_sources().prop_glyphs.to_vec();
+            let generation_before = candidate.generation_key;
+            let mut animated = cpu.accepted_frame_for_test().prop_slots[1];
+            animated.motion_offset_points[0] += 4.0;
+            let to = AppliedRevisions {
+                semantic: revisions.semantic,
+                frame: FrameRevision(revisions.frame.0 + 1),
+            };
+            let mut content = ContentDelta::empty();
+            content.generation_key = generation_key;
+            content.from = revisions;
+            content.to = to;
+            let mut frame = FrameDelta::empty();
+            frame.generation_key = generation_key;
+            frame.from = revisions;
+            frame.to = to;
+            frame.prop_slots.push(animated);
+            let request = render_request_fixture(
+                generation_key,
+                to,
+                cpu.logical_viewport_points(),
+                backing_scale,
+            );
+            let changed = renderer
+                .render_offscreen_with_delta(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut cpu,
+                    &mut candidate,
+                    &content,
+                    &frame,
+                    request,
+                    &hud,
+                )
+                .expect("frame-only prop animation delta renders");
+
+            assert_eq!(rgba_roi(&changed, static_roi, backing_scale), static_before);
+            assert_ne!(
+                rgba_roi(&changed, animated_roi, backing_scale),
+                animated_before
+            );
+            assert_eq!(
+                cpu.accepted_frame_for_test().prop_slots[0],
+                static_frame_before
+            );
+            assert_eq!(cpu.static_checksum, static_checksum_before);
+            assert_eq!(candidate.generation_key, generation_before);
+            assert_eq!(
+                cpu.content_upload_sources().prop_glyphs,
+                content_bytes_before
+            );
+            assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 2));
+            assert_eq!(renderer.delta_events_for_test(), (2, 1));
+            assert_scene_shadows_synchronized(&candidate.generation_state);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn task8_native_tank_motion_and_layer_crossing_stay_in_roi_without_churn() {
+        use crate::pet::generation::Species;
+        use crate::presentation::companion_scene::scene::InstanceLayer;
+        use crate::presentation::companion_scene::{
+            AppliedRevisions, DeviceEpoch, FrameRevision, LayoutGeneration, ResourceGeneration,
+            SceneGenerationKey,
+        };
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let snapshot = super::super::compiler::projected_full_scene_snapshot_for_render_test(0);
+        assert_eq!(snapshot.content.tank_animation_states.len(), 2);
+        let generation_key = SceneGenerationKey {
+            device: DeviceEpoch(41),
+            layout: LayoutGeneration(42),
+            resources: ResourceGeneration(43),
+        };
+        let revisions = AppliedRevisions::new(6, 7);
+        let generation = crate::presentation::companion_scene::scene::build_scene_generation_owned(
+            std::sync::Arc::new(snapshot),
+            generation_key,
+            revisions,
+        )
+        .expect("production tank scene builds");
+        let original_cpu = super::super::compiler::compile_cpu_generation(&generation)
+            .expect("production tank scene compiles");
+
+        for backing_scale in [1.0, 2.0] {
+            let (device, queue) = native_device();
+            let mut cpu = original_cpu.clone();
+            let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Fuzz),
+                backing_scale,
+            );
+            let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+                .expect("production tank repertoire compiles");
+            let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+                resources.atlas(),
+                generation_key.resources,
+            )
+            .expect("production tank atlas prepares");
+            let upload = prepare_scene_upload(&cpu, &atlas).expect("tank scene upload prepares");
+            let shared = SceneGpuShared::create(&device, generation_key.device).unwrap();
+            let mut candidate =
+                materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+            let hud = candidate
+                .hud
+                .prepared_atlas()
+                .prepare_redacted_capture(
+                    &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                    hud_geometry(generation_key.resources),
+                )
+                .unwrap();
+            let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+            let baseline = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    render_request_fixture(
+                        generation_key,
+                        revisions,
+                        cpu.logical_viewport_points(),
+                        backing_scale,
+                    ),
+                    &hud,
+                )
+                .expect("baseline production tank frame renders");
+            let moving_before_roi = tank_roi(&cpu, 0, 12.0);
+            let static_roi = tank_roi(&cpu, 1, 2.0);
+            let moving_before = rgba_roi(&baseline, moving_before_roi, backing_scale);
+            let static_before = rgba_roi(&baseline, static_roi, backing_scale);
+            assert!(moving_before.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            assert!(static_before.chunks_exact(4).any(|pixel| pixel[3] != 0));
+
+            let static_tank_before = cpu.accepted_frame_for_test().tank_slots[1];
+            let static_checksum_before = cpu.static_checksum;
+            let content_bytes_before = cpu.content_upload_sources().tank_glyphs.to_vec();
+            let generation_before = candidate.generation_key;
+            let mut moving = cpu.accepted_frame_for_test().tank_slots[0];
+            let glyphs = cpu.accepted_content_for_test().tank_slots[0]
+                .content
+                .expect("occupied first tank slot")
+                .glyphs;
+            let cell_index = glyphs
+                .iter()
+                .position(Option::is_some)
+                .expect("tank has one visible authored glyph");
+            let old_layer = moving.cells[cell_index].layer;
+            moving.cells[cell_index].position_points[0] += 6.0;
+            moving.cells[cell_index].bounds_points[0] += 6.0;
+            moving.cells[cell_index].layer = match old_layer {
+                InstanceLayer::Behind => InstanceLayer::Foreground,
+                InstanceLayer::Foreground => InstanceLayer::Behind,
+            };
+            let to = AppliedRevisions {
+                semantic: revisions.semantic,
+                frame: FrameRevision(revisions.frame.0 + 1),
+            };
+            let mut content = ContentDelta::empty();
+            content.generation_key = generation_key;
+            content.from = revisions;
+            content.to = to;
+            let mut frame = FrameDelta::empty();
+            frame.generation_key = generation_key;
+            frame.from = revisions;
+            frame.to = to;
+            frame.tank_slots.push(moving);
+            let moving_after_roi = {
+                let mut expected = cpu.clone();
+                expected.apply_deltas(&content, &frame).unwrap();
+                tank_roi(&expected, 0, 12.0)
+            };
+            let union_roi = [
+                moving_before_roi[0].min(moving_after_roi[0]),
+                moving_before_roi[1].min(moving_after_roi[1]),
+                (moving_before_roi[0] + moving_before_roi[2])
+                    .max(moving_after_roi[0] + moving_after_roi[2])
+                    - moving_before_roi[0].min(moving_after_roi[0]),
+                (moving_before_roi[1] + moving_before_roi[3])
+                    .max(moving_after_roi[1] + moving_after_roi[3])
+                    - moving_before_roi[1].min(moving_after_roi[1]),
+            ];
+            let moving_union_before = rgba_roi(&baseline, union_roi, backing_scale);
+            let logical_viewport_points = cpu.logical_viewport_points();
+            let changed = renderer
+                .render_offscreen_with_delta(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut cpu,
+                    &mut candidate,
+                    &content,
+                    &frame,
+                    render_request_fixture(
+                        generation_key,
+                        to,
+                        logical_viewport_points,
+                        backing_scale,
+                    ),
+                    &hud,
+                )
+                .expect("frame-only tank motion and layer delta renders");
+
+            assert_eq!(rgba_roi(&changed, static_roi, backing_scale), static_before);
+            assert_ne!(
+                rgba_roi(&changed, union_roi, backing_scale),
+                moving_union_before
+            );
+            assert_ne!(
+                cpu.accepted_frame_for_test().tank_slots[0].cells[cell_index].layer,
+                old_layer
+            );
+            assert_eq!(
+                cpu.accepted_frame_for_test().tank_slots[1],
+                static_tank_before
+            );
+            assert_eq!(cpu.static_checksum, static_checksum_before);
+            assert_eq!(candidate.generation_key, generation_before);
+            assert_eq!(
+                cpu.content_upload_sources().tank_glyphs,
+                content_bytes_before
+            );
+            assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 2));
+            assert_eq!(renderer.delta_events_for_test(), (2, 1));
+            assert_scene_shadows_synchronized(&candidate.generation_state);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -9384,7 +10411,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn native_candidate_surface_encoder_runs_intermediate_and_final_surface_pass() {
+    fn native_candidate_surface_encoder_runs_direct_aperture_surface_pass() {
         let (device, queue) = native_device();
         let cpu = compile_fixture(&canonical_materialization_fixture());
         let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
