@@ -682,6 +682,8 @@ struct AppState {
     #[cfg(feature = "retained-renderer")]
     scene_semantic_dirty: bool,
     #[cfg(feature = "retained-renderer")]
+    scene_surface_transition: SceneSurfaceTransitionState,
+    #[cfg(feature = "retained-renderer")]
     reduce_motion: bool,
     #[cfg(feature = "retained-renderer")]
     scene_progress: SceneProgressPolicy,
@@ -728,12 +730,55 @@ struct PreparedSceneRuntimeTick {
     projection: PreparedSceneProjection,
     hud: CompanionHudText,
     hud_font_size: f64,
+    defer_surface_resize: bool,
 }
 
 #[cfg(feature = "retained-renderer")]
 enum PreparedSceneProjection {
     Semantic(std::sync::Arc<crate::presentation::companion_scene::CompanionSceneSnapshot>),
     Frame(Box<crate::presentation::companion_scene::CompanionFrameProjection>),
+}
+
+#[cfg(feature = "retained-renderer")]
+#[derive(Debug, Default)]
+struct SceneSurfaceTransitionState {
+    deferred: bool,
+    fullscreen_transition: bool,
+}
+
+#[cfg(feature = "retained-renderer")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SceneSurfaceTransitionTick {
+    defer_surface_resize: bool,
+    refresh_layout: bool,
+}
+
+#[cfg(feature = "retained-renderer")]
+impl SceneSurfaceTransitionState {
+    fn set_fullscreen_transition(&mut self, active: bool) {
+        self.fullscreen_transition = active;
+    }
+
+    fn observe(
+        &mut self,
+        in_live_resize: bool,
+        has_active_generation: bool,
+    ) -> SceneSurfaceTransitionTick {
+        if in_live_resize || self.fullscreen_transition {
+            let defer_surface_resize = has_active_generation;
+            self.deferred |= defer_surface_resize;
+            return SceneSurfaceTransitionTick {
+                defer_surface_resize,
+                refresh_layout: false,
+            };
+        }
+
+        let refresh_layout = std::mem::take(&mut self.deferred);
+        SceneSurfaceTransitionTick {
+            defer_surface_resize: false,
+            refresh_layout,
+        }
+    }
 }
 
 #[cfg(feature = "retained-renderer")]
@@ -984,6 +1029,19 @@ fn record_callback_panic(label: &'static str) {
     });
 }
 
+fn set_scene_fullscreen_transition(active: bool) {
+    #[cfg(feature = "retained-renderer")]
+    APP_STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            state
+                .scene_surface_transition
+                .set_fullscreen_transition(active);
+        }
+    });
+    #[cfg(not(feature = "retained-renderer"))]
+    let _ = active;
+}
+
 declare_class!(
     pub(super) struct Controller;
 
@@ -1011,6 +1069,48 @@ declare_class!(
             if let Some(mtm) = MainThreadMarker::new() {
                 unsafe { NSApplication::sharedApplication(mtm).terminate(None) };
             }
+        }
+
+        #[method(windowWillEnterFullScreen:)]
+        fn window_will_enter_full_screen(&self, _notification: &NSNotification) {
+            run_objc_callback("windowWillEnterFullScreen", || {
+                set_scene_fullscreen_transition(true)
+            });
+        }
+
+        #[method(windowDidEnterFullScreen:)]
+        fn window_did_enter_full_screen(&self, _notification: &NSNotification) {
+            run_objc_callback("windowDidEnterFullScreen", || {
+                set_scene_fullscreen_transition(false)
+            });
+        }
+
+        #[method(windowWillExitFullScreen:)]
+        fn window_will_exit_full_screen(&self, _notification: &NSNotification) {
+            run_objc_callback("windowWillExitFullScreen", || {
+                set_scene_fullscreen_transition(true)
+            });
+        }
+
+        #[method(windowDidExitFullScreen:)]
+        fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
+            run_objc_callback("windowDidExitFullScreen", || {
+                set_scene_fullscreen_transition(false)
+            });
+        }
+
+        #[method(windowDidFailToEnterFullScreen:)]
+        fn window_did_fail_to_enter_full_screen(&self, _window: &NSWindow) {
+            run_objc_callback("windowDidFailToEnterFullScreen", || {
+                set_scene_fullscreen_transition(false)
+            });
+        }
+
+        #[method(windowDidFailToExitFullScreen:)]
+        fn window_did_fail_to_exit_full_screen(&self, _window: &NSWindow) {
+            run_objc_callback("windowDidFailToExitFullScreen", || {
+                set_scene_fullscreen_transition(false)
+            });
         }
     }
 
@@ -1342,6 +1442,8 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             scene_runtime_hidden: false,
             #[cfg(feature = "retained-renderer")]
             scene_semantic_dirty: true,
+            #[cfg(feature = "retained-renderer")]
+            scene_surface_transition: SceneSurfaceTransitionState::default(),
             #[cfg(feature = "retained-renderer")]
             reduce_motion: unsafe {
                 NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
@@ -1676,7 +1778,7 @@ fn ui_tick() {
                     reconcile_scene_runtime(std::sync::Arc::clone(snapshot))?;
                 }
                 PreparedSceneProjection::Frame(projection) if !active_delta_pending => {
-                    reconcile_scene_frame((**projection).clone())?;
+                    reconcile_scene_frame((**projection).clone(), tick.defer_surface_resize)?;
                 }
                 PreparedSceneProjection::Semantic(_) | PreparedSceneProjection::Frame(_) => {}
             }
@@ -1722,7 +1824,7 @@ fn ui_tick() {
                     reconcile_scene_runtime(std::sync::Arc::clone(snapshot))?;
                 }
                 PreparedSceneProjection::Frame(projection) => {
-                    reconcile_scene_frame((**projection).clone())?;
+                    reconcile_scene_frame((**projection).clone(), tick.defer_surface_resize)?;
                 }
             }
             service_scene_runtime(&tick)
@@ -1936,6 +2038,7 @@ fn reveal_scene_runtime(
 #[cfg(feature = "retained-renderer")]
 fn reconcile_scene_frame(
     projection: crate::presentation::companion_scene::CompanionFrameProjection,
+    defer_surface_resize: bool,
 ) -> std::result::Result<(), crate::companion::retained::RetainedFailureCategory> {
     APP_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
@@ -1946,7 +2049,7 @@ fn reconcile_scene_frame(
         let Some(host) = state.retained_host.as_mut() else {
             return Ok(());
         };
-        host.reconcile_scene_frame(view.as_super(), projection)?;
+        host.reconcile_scene_frame(view.as_super(), projection, defer_surface_resize)?;
         Ok(())
     })
 }
@@ -1964,6 +2067,16 @@ fn prepare_scene_runtime_tick() -> std::result::Result<
         if state.scene_runtime_rollout == SceneRuntimeRollout::Off || state.retained_host.is_none()
         {
             return Ok(None);
+        }
+        let surface_transition = state.scene_surface_transition.observe(
+            unsafe { state.window.inLiveResize() },
+            state
+                .retained_host
+                .as_ref()
+                .is_some_and(|host| host.scene_has_active_generation()),
+        );
+        if surface_transition.refresh_layout {
+            state.scene_semantic_dirty = true;
         }
         let bounds = prepare_bounds(state.view.bounds()).map_err(|_| {
             crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode
@@ -1994,12 +2107,13 @@ fn prepare_scene_runtime_tick() -> std::result::Result<
             NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
         };
         state.reduce_motion = reduce_motion;
-        let needs_semantic = state.scene_semantic_dirty
-            || state.scene_runtime_hidden
-            || state
-                .retained_host
-                .as_ref()
-                .is_none_or(|host| !host.has_scene_runtime());
+        let needs_semantic = !surface_transition.defer_surface_resize
+            && (state.scene_semantic_dirty
+                || state.scene_runtime_hidden
+                || state
+                    .retained_host
+                    .as_ref()
+                    .is_none_or(|host| !host.has_scene_runtime()));
         let projection = if needs_semantic {
             let projection_started_at = std::time::Instant::now();
             let mut snapshot = crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input_and_options(
@@ -2041,6 +2155,7 @@ fn prepare_scene_runtime_tick() -> std::result::Result<
             projection,
             hud: prepare_hud_frame(&state.vm, state.redacts_live_hud),
             hud_font_size: metrics.font_size,
+            defer_surface_resize: surface_transition.defer_surface_resize,
         }))
     })
 }
@@ -4372,6 +4487,48 @@ mod tests {
             ),
             1.0 / 15.0,
         );
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn active_scene_defers_surface_resize_during_live_drag() {
+        let mut resize = SceneSurfaceTransitionState::default();
+
+        let tick = resize.observe(true, true);
+
+        assert!(tick.defer_surface_resize);
+        assert!(!tick.refresh_layout);
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn ending_live_resize_requests_one_layout_refresh() {
+        let mut resize = SceneSurfaceTransitionState::default();
+        let _ = resize.observe(true, true);
+
+        let ended = resize.observe(false, true);
+        let settled = resize.observe(false, true);
+
+        assert!(!ended.defer_surface_resize);
+        assert!(ended.refresh_layout);
+        assert!(!settled.defer_surface_resize);
+        assert!(!settled.refresh_layout);
+    }
+
+    #[cfg(feature = "retained-renderer")]
+    #[test]
+    fn fullscreen_transition_defers_surface_resize_until_completion() {
+        let mut resize = SceneSurfaceTransitionState::default();
+        resize.set_fullscreen_transition(true);
+
+        let entering = resize.observe(false, true);
+        resize.set_fullscreen_transition(false);
+        let entered = resize.observe(false, true);
+
+        assert!(entering.defer_surface_resize);
+        assert!(!entering.refresh_layout);
+        assert!(!entered.defer_surface_resize);
+        assert!(entered.refresh_layout);
     }
 
     #[cfg(feature = "retained-renderer")]

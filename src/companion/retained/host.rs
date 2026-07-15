@@ -1306,9 +1306,14 @@ impl ActiveRetainedHost {
         &mut self,
         view: &NSView,
         projection: crate::presentation::companion_scene::CompanionFrameProjection,
+        defer_surface_resize: bool,
     ) -> Result<SceneGenerationServiceTick, RetainedFailureCategory> {
         let started_at = Instant::now();
-        let surface_change = self.host.resize_surface_if_needed(view)?;
+        let surface_change = if defer_surface_resize {
+            None
+        } else {
+            self.host.resize_surface_if_needed(view)?
+        };
         let mut activation = self
             .host
             .scene_activation
@@ -1321,9 +1326,10 @@ impl ActiveRetainedHost {
                     .apply_scene_runtime_effects(&mut activation, effects)?;
                 self.host.clear_presented_scene_receipt();
             }
-            let (effects, regenerated) = activation
-                .generations
-                .reconcile_frame_projection(projection)?;
+            let (effects, regenerated) = activation.generations.reconcile_frame_projection(
+                projection,
+                surface_change.is_some_and(|change| change.scale_changed),
+            )?;
             if regenerated {
                 self.host.metrics.record_snapshot_projection();
             }
@@ -2318,7 +2324,7 @@ where
         let (effects, regenerated) = self
             .activation
             .generations
-            .reconcile_frame_projection(projection)
+            .reconcile_frame_projection(projection, false)
             .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
         if regenerated {
             return Err(RetainedFailureCategory::LifetimeFramePreparation);

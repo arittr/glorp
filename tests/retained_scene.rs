@@ -166,7 +166,7 @@ fn active_present_skips_a_stale_generation_before_surface_acquire() {
     ] {
         let reconcile = source_between(HOST_SOURCE, start, end);
         let resize = reconcile
-            .find("let surface_change = self.host.resize_surface_if_needed(view)?;")
+            .find("self.host.resize_surface_if_needed(view)?")
             .expect("coordinator resize precedes scene reconciliation");
         let rebind = reconcile
             .find("activation.generations.rebind_surface(change.epoch)?")

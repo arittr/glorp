@@ -432,6 +432,7 @@ impl RetainedSceneGenerationState {
     fn reconcile_frame_projection(
         &mut self,
         mut projection: crate::presentation::companion_scene::CompanionFrameProjection,
+        backing_scale_changed: bool,
     ) -> Result<
         (
             crate::presentation::companion_scene::runtime::RuntimeEffects,
@@ -440,7 +441,13 @@ impl RetainedSceneGenerationState {
         RetainedFailureCategory,
     > {
         let mut regenerated = false;
-        let prepared = match self.runtime.prepare_frame_projection(projection.clone()) {
+        let invalidation = backing_scale_changed.then_some(
+            crate::presentation::companion_scene::runtime::ResourceInvalidation::BackingScaleAtlas,
+        );
+        let prepared = match self
+            .runtime
+            .prepare_frame_projection_with_resource_invalidation(projection.clone(), invalidation)
+        {
             Ok(prepared) => prepared,
             Err(
                 crate::presentation::companion_scene::runtime::RuntimeError::StaleSemanticBase {
@@ -452,7 +459,7 @@ impl RetainedSceneGenerationState {
                     .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?;
                 regenerated = true;
                 self.runtime
-                    .prepare_frame_projection(projection)
+                    .prepare_frame_projection_with_resource_invalidation(projection, invalidation)
                     .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?
             }
             Err(_) => return Err(RetainedFailureCategory::SceneCandidateEncode),
@@ -2871,7 +2878,9 @@ mod tests {
         assert_eq!(semantic_version.generation, before.generation);
         assert_ne!(semantic_version.applied.semantic, before.applied.semantic);
 
-        let (mut frame, regenerated) = generations.reconcile_frame_projection(stale).unwrap();
+        let (mut frame, regenerated) = generations
+            .reconcile_frame_projection(stale, false)
+            .unwrap();
         assert!(regenerated);
         assert!(frame.take_start_worker().is_none());
         assert!(matches!(

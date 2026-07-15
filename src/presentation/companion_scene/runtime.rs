@@ -1810,6 +1810,14 @@ impl CompanionSceneRuntimeState {
         &self,
         projection: super::CompanionFrameProjection,
     ) -> Result<PreparedFrameProjection, RuntimeError> {
+        self.prepare_frame_projection_with_resource_invalidation(projection, None)
+    }
+
+    pub(crate) fn prepare_frame_projection_with_resource_invalidation(
+        &self,
+        projection: super::CompanionFrameProjection,
+        invalidation: Option<ResourceInvalidation>,
+    ) -> Result<PreparedFrameProjection, RuntimeError> {
         self.ensure_running()?;
         if self.visibility == RuntimeVisibility::Hidden {
             return Err(RuntimeError::SnapshotRejected(
@@ -1831,11 +1839,14 @@ impl CompanionSceneRuntimeState {
             frame: projection.frame,
         });
         validate_snapshot(&snapshot)?;
-        let changes = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
+        let mut changes = classify_snapshot_changes(self.reconciler.snapshot(), &snapshot);
         if changes.requires_generation() || changes.has_semantic() {
             return Err(RuntimeError::SnapshotRejected(
                 SnapshotRejection::InconsistentIdentity,
             ));
+        }
+        if let Some(invalidation) = invalidation {
+            changes.resources.insert(invalidation.mask());
         }
         self.prepare_with_changes(snapshot, changes, false)
             .map(|update| PreparedFrameProjection { update })
@@ -4523,6 +4534,39 @@ mod tests {
             Err(RuntimeError::StaleSemanticBase { expected, actual })
                 if expected == expected_stale && actual == initial_version.applied.semantic
         ));
+    }
+
+    #[test]
+    fn frame_projection_with_backing_scale_change_queues_atlas_replacement() {
+        let mut runtime = runtime();
+        let before = runtime.active_version().unwrap();
+        let projection = runtime
+            .snapshot()
+            .project_presentation_frame(
+                runtime.applied_revisions().semantic,
+                super::super::CompanionProjectionClock::new(
+                    time::OffsetDateTime::UNIX_EPOCH,
+                    1_033,
+                ),
+                super::super::input::CompanionPresentationOptions::STANDARD,
+            )
+            .unwrap();
+
+        let prepared = runtime
+            .prepare_frame_projection_with_resource_invalidation(
+                projection,
+                Some(ResourceInvalidation::BackingScaleAtlas),
+            )
+            .unwrap();
+        let mut effects = runtime.commit_frame_projection(prepared).unwrap();
+        let request = effects.take_start_worker().unwrap();
+
+        assert_eq!(request.key().layout, before.generation.layout);
+        assert_eq!(
+            request.key().resources,
+            ResourceGeneration(before.generation.resources.0 + 1)
+        );
+        assert_eq!(request.surface(), before.surface);
     }
 
     #[test]

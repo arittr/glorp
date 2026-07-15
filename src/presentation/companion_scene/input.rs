@@ -344,8 +344,7 @@ impl CompanionSceneSnapshot {
             crate::round::scene::current_round_motion_clearance(self.topology.glyph_grid.rows),
         )
         .with_optional_depth_override(self.frame.pet_depth_override);
-        let motion_clock = OffsetDateTime::UNIX_EPOCH
-            + Duration::milliseconds(i64::try_from(clock.elapsed_ms).unwrap_or(i64::MAX));
+        let motion_clock = clock.wall_time;
         let roam_motion = crate::round::motion::companion_roam_motion();
         let motion = if options.reduce_motion {
             crate::round::motion::project_round_companion_motion_neutral(
@@ -1330,6 +1329,37 @@ mod tests {
             .prop_instances
             .iter()
             .all(|prop| prop.transition.is_none()));
+    }
+
+    #[test]
+    fn semantic_and_frame_projection_share_standard_motion_clock() {
+        use crate::presentation::companion_scene::SemanticRevision;
+
+        let vm = fixture_with_real_pet_art();
+        let clock = CompanionProjectionClock::new(datetime!(2026-07-11 12:00 UTC), 2_731);
+        let input = CompanionSceneProjectionInput::round(
+            clock,
+            CompanionLogicalLayout::round(360.0, 360.0),
+            44,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        );
+        let initial = CompanionSceneSnapshot::project_with_input_and_options(
+            &vm,
+            input,
+            super::CompanionPresentationOptions::STANDARD,
+        )
+        .expect("initial standard-motion semantic projection");
+
+        let replay = initial
+            .project_presentation_frame(
+                SemanticRevision(1),
+                clock,
+                super::CompanionPresentationOptions::STANDARD,
+            )
+            .expect("standard-motion frame replay");
+
+        assert_eq!(initial.frame, replay.frame);
     }
 
     #[test]
