@@ -2191,6 +2191,7 @@ mod tests {
                 "pet-glitch-live-states",
                 "pet-glitch-persistence-states",
                 "round-normal",
+                "round-retained-composition-full-cast",
                 "round-hud-missing-yesterday",
                 "round-hud-stale-yesterday",
                 "round-hud-zero-yesterday",

@@ -8,7 +8,7 @@ use crate::dev_preview::scenarios::{
 use crate::round::layout::{RoundAperture, RoundRenderCapabilities, SAFE_INNER_RADIUS_RATIO};
 use crate::round::preview::render_round_preview_frame_from_vm;
 use crate::tui::identity::SourceDiversity;
-use crate::tui::view_model::{SourceStatus, WatchViewModel};
+use crate::tui::view_model::{EarnedHabitatPropView, SourceStatus, WatchViewModel};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use time::Duration;
@@ -21,6 +21,17 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         "round-normal",
         "Round Normal",
         &normal,
+        ctx.fixed_now,
+        52,
+        52,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let full_cast = retained_composition_full_cast_fixture(ctx.fixed_now.date());
+    frames.push(render_round_preview_frame(
+        "round-retained-composition-full-cast",
+        "Round Retained Composition Full Cast",
+        &full_cast,
         ctx.fixed_now,
         52,
         52,
@@ -224,6 +235,23 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
     frames
 }
 
+fn retained_composition_full_cast_fixture(local_date: time::Date) -> WatchViewModel {
+    let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, local_date);
+    vm.habitat.earned_props = crate::game::habitat::HABITAT_PROP_CATALOG
+        .iter()
+        .map(|spec| EarnedHabitatPropView {
+            id: crate::storage::state::HabitatPropId::new(spec.id),
+            earned_at: time::OffsetDateTime::UNIX_EPOCH,
+            kind: spec.kind,
+            display_priority: spec.display_priority,
+            source: crate::storage::state::HabitatPropSource::LifetimeTokens {
+                threshold: spec.lifetime_threshold.unwrap_or(0.0),
+            },
+        })
+        .collect();
+    vm
+}
+
 pub fn round_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBundle> {
     round_frames(ctx)
         .into_iter()
@@ -325,6 +353,31 @@ fn round_inputs_for_frame(
             ),
         ]);
     }
+    if frame.id == "round-retained-composition-full-cast" {
+        inputs.extend([
+            (
+                "fixture".to_string(),
+                json!("retained-composition-full-cast"),
+            ),
+            (
+                "earned_prop_count".to_string(),
+                json!(crate::game::habitat::HABITAT_PROP_CATALOG.len()),
+            ),
+            (
+                "earned_inhabitant_count".to_string(),
+                json!(crate::game::habitat::TANK_INHABITANT_CATALOG.len()),
+            ),
+            ("tank_calendar_age_days".to_string(), json!(120)),
+            (
+                "visible_prop_capacity".to_string(),
+                json!(crate::presentation::companion_scene::MAX_VISIBLE_PROPS),
+            ),
+            (
+                "visible_tank_capacity".to_string(),
+                json!(crate::presentation::companion_scene::MAX_VISIBLE_TANK_INHABITANTS),
+            ),
+        ]);
+    }
     inputs
 }
 
@@ -420,5 +473,34 @@ mod tests {
         assert!(!round.privacy.source_names_visible);
         assert!(!round.privacy.exact_counts_visible);
         assert!(!round.privacy.diagnostic_text_visible);
+    }
+
+    #[test]
+    fn round_bundles_include_retained_composition_full_cast_fixture() {
+        let ctx = PreviewRenderContext::deterministic();
+
+        let bundles = round_bundles(&ctx);
+
+        let full_cast = bundles
+            .iter()
+            .find(|bundle| bundle.frame.id == "round-retained-composition-full-cast")
+            .expect("retained composition full-cast fixture");
+        assert_eq!(
+            full_cast.scenario.inputs["earned_prop_count"],
+            serde_json::json!(crate::game::habitat::HABITAT_PROP_CATALOG.len())
+        );
+        assert_eq!(
+            full_cast.scenario.inputs["earned_inhabitant_count"],
+            serde_json::json!(crate::game::habitat::TANK_INHABITANT_CATALOG.len())
+        );
+        assert_eq!(
+            full_cast.scenario.inputs["tank_calendar_age_days"],
+            serde_json::json!(120)
+        );
+        assert!(full_cast
+            .frame
+            .cells
+            .iter()
+            .any(|cell| !cell.outside_aperture && !cell.symbol.trim().is_empty()));
     }
 }

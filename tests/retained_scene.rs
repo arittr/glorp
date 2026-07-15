@@ -346,3 +346,254 @@ fn retained_snapshot_keeps_fixed_prop_slots_when_composition_hides_an_accent() {
         );
     }
 }
+
+#[test]
+fn retained_full_cast_composition_matrix() {
+    use glorp::game::evolution::Stage;
+    use glorp::game::habitat::{HabitatPropKind, HABITAT_PROP_CATALOG};
+    use glorp::game::metabolism::Mood;
+    use glorp::pet::generation::{generate_pet, Species};
+    use glorp::pet::render::{render_pet, AnimationFrame};
+    use glorp::presentation::companion_scene::{
+        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+        CompanionSceneSnapshot,
+    };
+    use glorp::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
+    use time::macros::{date, datetime};
+
+    const COLUMNS: u16 = 44;
+    const ROWS: u16 = 18;
+    const SURFACES: &[(f32, f32)] = &[
+        (260.0, 260.0),
+        (360.0, 360.0),
+        (480.0, 480.0),
+        (720.0, 720.0),
+        (480.0, 360.0),
+        (360.0, 480.0),
+    ];
+
+    fn full_cast_fixture() -> WatchViewModel {
+        let mut vm =
+            WatchViewModel::fixture_with_tank_inhabitants_for_age(120, date!(2026 - 07 - 15));
+        vm.habitat.earned_props = HABITAT_PROP_CATALOG
+            .iter()
+            .map(|spec| EarnedHabitatPropView {
+                id: glorp::storage::state::HabitatPropId::new(spec.id),
+                earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                kind: spec.kind,
+                display_priority: spec.display_priority,
+                source: glorp::storage::state::HabitatPropSource::LifetimeTokens {
+                    threshold: spec.lifetime_threshold.unwrap_or(0.0),
+                },
+            })
+            .collect();
+        let rendered = render_pet(
+            &generate_pet("retained-full-cast-composition-matrix").with_species(Species::Fuzz),
+            Stage::S3,
+            Mood::Content,
+            AnimationFrame::default(),
+        );
+        vm.pet_render.generated_species = Species::Fuzz;
+        vm.pet_render.stage = Stage::S3;
+        vm.pet_art = rendered.lines;
+        vm.pet_spans = rendered.spans;
+        vm
+    }
+
+    fn project(
+        vm: &WatchViewModel,
+        width_points: f32,
+        height_points: f32,
+        wall_time: time::OffsetDateTime,
+    ) -> CompanionSceneSnapshot {
+        CompanionSceneSnapshot::project_with_input(
+            vm,
+            CompanionSceneProjectionInput::round(
+                CompanionProjectionClock::new(wall_time, 0),
+                CompanionLogicalLayout::round(width_points, height_points),
+                COLUMNS,
+                ROWS,
+                glorp::round::scene::current_round_motion_clearance(ROWS),
+            ),
+        )
+        .expect("project full retained composition")
+    }
+
+    fn intersects(left: [f32; 4], right: [f32; 4]) -> bool {
+        left[0] < right[2] && left[2] > right[0] && left[1] < right[3] && left[3] > right[1]
+    }
+
+    let vm = full_cast_fixture();
+    for &(width_points, height_points) in SURFACES {
+        let first = project(
+            &vm,
+            width_points,
+            height_points,
+            datetime!(2026-07-15 12:00:00 UTC),
+        );
+        let repeated = project(
+            &vm,
+            width_points,
+            height_points,
+            datetime!(2026-07-15 12:00:00 UTC),
+        );
+        let next_phase = project(
+            &vm,
+            width_points,
+            height_points,
+            datetime!(2026-07-15 12:00:04 UTC),
+        );
+        let label = format!("{width_points}x{height_points}");
+
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&repeated).unwrap(),
+            "{label} repeated projection"
+        );
+        assert!(
+            first
+                .content
+                .prop_animation_states
+                .iter()
+                .zip(&next_phase.content.prop_animation_states)
+                .any(|(left, right)| left.sprite_phase != right.sprite_phase),
+            "{label} fixture must cross a semantic sprite phase"
+        );
+
+        let cell = first.topology.glyph_grid.cell_extent_points;
+        let aperture_radius = f64::from(width_points.min(height_points)) / 2.0;
+        let outer_inset = 3.0_f64.max(aperture_radius * 0.012);
+        let xp_width = (aperture_radius * 0.050).clamp(6.0, 16.0);
+        let daily_width = (aperture_radius * 0.040).clamp(5.0, 13.0);
+        let pace_width = (aperture_radius * 0.034).clamp(4.0, 11.0);
+        let lane_gap = (aperture_radius * 0.010).clamp(1.5, 4.0);
+        let xp_radius = aperture_radius - outer_inset - xp_width / 2.0;
+        let daily_radius = xp_radius - xp_width / 2.0 - lane_gap - daily_width / 2.0;
+        let pace_radius = daily_radius - daily_width / 2.0 - lane_gap - pace_width / 2.0;
+        let inner_radius = pace_radius - pace_width / 2.0;
+        let safe_radii = [
+            inner_radius as f32 / cell[0] - 0.5,
+            inner_radius as f32 / cell[1] - 0.5,
+        ];
+        let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
+        let hud = [
+            (f32::from(COLUMNS) * 0.21).floor(),
+            (f32::from(ROWS) * 0.58).floor(),
+            (f32::from(COLUMNS) * 0.79).ceil(),
+            (f32::from(ROWS) * 0.90).ceil(),
+        ];
+        let bottom = [
+            0.0,
+            f32::from(
+                ROWS - glorp::round::scene::current_round_motion_clearance(ROWS)
+                    .bottom_reserved_rows,
+            ),
+            f32::from(COLUMNS),
+            f32::from(ROWS),
+        ];
+        let visible_bounds = first
+            .frame
+            .prop_instances
+            .iter()
+            .filter(|frame| frame.visible)
+            .map(|frame| {
+                assert!(
+                    frame
+                        .origin_points
+                        .into_iter()
+                        .chain(frame.footprint_points)
+                        .all(f32::is_finite),
+                    "{label} slot {} has non-finite footprint",
+                    frame.slot
+                );
+                assert!(frame.footprint_points.into_iter().all(|value| value > 0.0));
+                let min = [
+                    frame.origin_points[0] / cell[0],
+                    frame.origin_points[1] / cell[1],
+                ];
+                let max = [
+                    min[0] + frame.footprint_points[0] / cell[0],
+                    min[1] + frame.footprint_points[1] / cell[1],
+                ];
+                let bounds = [min[0], min[1], max[0], max[1]];
+                for col in [bounds[0] + 0.5, bounds[2] - 0.5] {
+                    for row in [bounds[1] + 0.5, bounds[3] - 0.5] {
+                        let dx = (col - center[0]) / safe_radii[0];
+                        let dy = (row - center[1]) / safe_radii[1];
+                        assert!(
+                            dx * dx + dy * dy <= 1.0 + f32::EPSILON,
+                            "{label} slot {} escaped the gauge-safe aperture",
+                            frame.slot
+                        );
+                    }
+                }
+                assert!(
+                    !intersects(bounds, hud),
+                    "{label} slot {} overlaps HUD",
+                    frame.slot
+                );
+                assert!(
+                    !intersects(bounds, bottom),
+                    "{label} slot {} overlaps bottom reserve",
+                    frame.slot
+                );
+                bounds
+            })
+            .collect::<Vec<_>>();
+        for (index, left) in visible_bounds.iter().copied().enumerate() {
+            for right in visible_bounds[index + 1..].iter().copied() {
+                assert!(
+                    !intersects(left, right),
+                    "{label} visible footprints overlap"
+                );
+            }
+        }
+
+        let placement = |snapshot: &CompanionSceneSnapshot| {
+            snapshot
+                .frame
+                .prop_instances
+                .iter()
+                .map(|frame| {
+                    (
+                        frame.slot,
+                        frame.visible,
+                        frame.origin_points,
+                        frame.footprint_points,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            placement(&first),
+            placement(&next_phase),
+            "{label} phase repacked props"
+        );
+        let hidden_accents = |snapshot: &CompanionSceneSnapshot| {
+            snapshot
+                .frame
+                .prop_instances
+                .iter()
+                .filter(|frame| !frame.visible)
+                .filter(|frame| {
+                    let id = snapshot.topology.visible_props[usize::from(frame.slot)].catalog_id;
+                    HABITAT_PROP_CATALOG
+                        .iter()
+                        .find(|spec| spec.id == id)
+                        .is_some_and(|spec| spec.kind == HabitatPropKind::Accent)
+                })
+                .map(|frame| frame.slot)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hidden_accents(&first),
+            hidden_accents(&repeated),
+            "{label} hidden accents"
+        );
+        assert_eq!(
+            hidden_accents(&first),
+            hidden_accents(&next_phase),
+            "{label} phase hiding"
+        );
+    }
+}

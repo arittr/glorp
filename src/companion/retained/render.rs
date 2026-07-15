@@ -9030,6 +9030,76 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn retained_full_cast_snapshot() -> crate::presentation::companion_scene::CompanionSceneSnapshot
+    {
+        use crate::presentation::companion_scene::{
+            CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+            CompanionSceneSnapshot,
+        };
+        use crate::tui::view_model::WatchViewModel;
+
+        let day = time::macros::date!(2026 - 07 - 15);
+        let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(120, day);
+        vm.habitat.earned_props = WatchViewModel::fixture_with_habitat_props()
+            .habitat
+            .earned_props;
+        let pet = crate::pet::generation::generate_pet("retained-native-full-cast")
+            .with_species(crate::pet::generation::Species::Fuzz);
+        let rendered = crate::pet::render::render_pet(
+            &pet,
+            crate::game::evolution::Stage::S3,
+            crate::game::metabolism::Mood::Content,
+            crate::pet::render::AnimationFrame::default(),
+        );
+        vm.pet_render.seed = pet.seed;
+        vm.pet_render.generated_species = crate::pet::generation::Species::Fuzz;
+        vm.pet_render.stage = crate::game::evolution::Stage::S3;
+        vm.pet_render.mood = crate::game::metabolism::Mood::Content;
+        vm.pet_art = rendered.lines;
+        vm.pet_spans = rendered.spans;
+        CompanionSceneSnapshot::project_with_input(
+            &vm,
+            CompanionSceneProjectionInput::round(
+                CompanionProjectionClock::new(time::macros::datetime!(2026-07-15 12:00 UTC), 0),
+                CompanionLogicalLayout::round(360.0, 360.0),
+                44,
+                18,
+                crate::round::scene::current_round_motion_clearance(18),
+            ),
+        )
+        .expect("project retained full-cast fixture")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn compile_retained_full_cast_snapshot(
+        snapshot: crate::presentation::companion_scene::CompanionSceneSnapshot,
+        generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+        revisions: crate::presentation::companion_scene::AppliedRevisions,
+    ) -> super::super::compiler::CpuSceneCandidate {
+        let generation = crate::presentation::companion_scene::scene::build_scene_generation_owned(
+            std::sync::Arc::new(snapshot),
+            generation_key,
+            revisions,
+        )
+        .expect("full-cast scene generation builds");
+        super::super::compiler::compile_cpu_generation(&generation)
+            .expect("full-cast scene compiles")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn union_logical_rois(rois: impl IntoIterator<Item = [f32; 4]>) -> [f32; 4] {
+        let mut rois = rois.into_iter();
+        let first = rois.next().expect("at least one visible ROI");
+        rois.fold(first, |union, rect| {
+            let min_x = union[0].min(rect[0]);
+            let min_y = union[1].min(rect[1]);
+            let max_x = (union[0] + union[2]).max(rect[0] + rect[2]);
+            let max_y = (union[1] + union[3]).max(rect[1] + rect[3]);
+            [min_x, min_y, max_x - min_x, max_y - min_y]
+        })
+    }
+
+    #[cfg(target_os = "macos")]
     fn prop_roi(
         candidate: &super::super::compiler::CpuSceneCandidate,
         slot: usize,
@@ -9476,6 +9546,356 @@ mod tests {
         assert!(
             variance < 1.0,
             "upper room departed from its smooth dithered reference: variance={variance}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_full_cast_rois_are_nonblank_at_one_and_two_x() {
+        use crate::pet::generation::Species;
+        use crate::presentation::companion_scene::{
+            AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration, SceneGenerationKey,
+        };
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let snapshot = retained_full_cast_snapshot();
+        assert_eq!(snapshot.topology.visible_props.len(), 2);
+        assert_eq!(snapshot.topology.visible_tank_inhabitants.len(), 2);
+        let generation_key = SceneGenerationKey {
+            device: DeviceEpoch(71),
+            layout: LayoutGeneration(72),
+            resources: ResourceGeneration(73),
+        };
+        let revisions = AppliedRevisions::new(10, 11);
+        let original_cpu = compile_retained_full_cast_snapshot(snapshot, generation_key, revisions);
+
+        for backing_scale in [1.0, 2.0] {
+            let (device, queue) = native_device();
+            let cpu = original_cpu.clone();
+            let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Fuzz),
+                backing_scale,
+            );
+            let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+                .expect("full-cast repertoire compiles");
+            let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+                resources.atlas(),
+                generation_key.resources,
+            )
+            .expect("full-cast atlas prepares");
+            let upload = prepare_scene_upload(&cpu, &atlas).expect("full-cast upload prepares");
+            let shared = SceneGpuShared::create(&device, generation_key.device).unwrap();
+            let mut candidate =
+                materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+            let hud = candidate
+                .hud
+                .prepared_atlas()
+                .prepare_redacted_capture(
+                    &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                    hud_geometry(generation_key.resources),
+                )
+                .unwrap();
+            let request = render_request_fixture(
+                generation_key,
+                revisions,
+                cpu.logical_viewport_points(),
+                backing_scale,
+            );
+            let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+            let baseline = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &hud,
+                )
+                .expect("full-cast scene renders");
+            let baseline_plan = candidate.draw_plan.clone();
+
+            let prop_indices = upload
+                .draws
+                .iter()
+                .enumerate()
+                .filter_map(|(index, draw)| {
+                    matches!(
+                        draw.source,
+                        PrimitiveSource::Instances(InstanceSource::PropGlyphs { .. })
+                    )
+                    .then_some(u32::try_from(index).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let tank_indices = upload
+                .draws
+                .iter()
+                .enumerate()
+                .filter_map(|(index, draw)| {
+                    matches!(
+                        draw.source,
+                        PrimitiveSource::Instances(InstanceSource::TankCells { .. })
+                    )
+                    .then_some(u32::try_from(index).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let bed_index = upload
+                .draws
+                .iter()
+                .enumerate()
+                .find_map(|(index, draw)| {
+                    (draw.source == PrimitiveSource::Analytic
+                        && upload.primitives[index].binding_index == 0)
+                        .then_some(u32::try_from(index).unwrap())
+                })
+                .expect("room analytic draw exists");
+            assert!(!prop_indices.is_empty());
+            assert!(!tank_indices.is_empty());
+
+            let prop_roi = union_logical_rois(
+                cpu.accepted_frame_for_test()
+                    .prop_slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, frame)| frame.visible)
+                    .map(|(slot, _)| prop_roi(&cpu, slot, 2.0)),
+            );
+            let tank_roi = union_logical_rois(
+                cpu.accepted_frame_for_test()
+                    .tank_slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, frame)| frame.visible)
+                    .map(|(slot, _)| tank_roi(&cpu, slot, 2.0)),
+            );
+            let bed_roi = [104.0, 288.0, 152.0, 44.0];
+            assert_ne!(prop_roi, tank_roi);
+            assert_ne!(prop_roi, bed_roi);
+            assert_ne!(tank_roi, bed_roi);
+
+            let render_without = |candidate: &mut GpuSceneCandidate,
+                                  renderer: &mut SceneRenderer,
+                                  hidden: &[u32]| {
+                candidate.draw_plan = baseline_plan.clone();
+                for draw in candidate
+                    .draw_plan
+                    .opaque
+                    .iter_mut()
+                    .chain(candidate.draw_plan.world_blended_unsorted.iter_mut())
+                {
+                    if hidden.contains(&draw.primitive_index) {
+                        draw.instance_range = 0..0;
+                    }
+                }
+                renderer
+                    .render_offscreen(&device, &queue, &shared, candidate, request.clone(), &hud)
+                    .unwrap()
+            };
+            let without_bed = render_without(&mut candidate, &mut renderer, &[bed_index]);
+            let without_props = render_without(&mut candidate, &mut renderer, &prop_indices);
+            let without_tank = render_without(&mut candidate, &mut renderer, &tank_indices);
+
+            for (name, roi, control) in [
+                ("bed", bed_roi, &without_bed),
+                ("props", prop_roi, &without_props),
+                ("tank", tank_roi, &without_tank),
+            ] {
+                let pixels = rgba_roi(&baseline, roi, backing_scale);
+                let control_pixels = rgba_roi(control, roi, backing_scale);
+                assert!(
+                    pixels.chunks_exact(4).any(|pixel| pixel[3] != 0),
+                    "{name} ROI is blank at {backing_scale}x"
+                );
+                assert_ne!(
+                    pixels, control_pixels,
+                    "{name} draw contributes no pixels at {backing_scale}x"
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn habitat_pass_does_not_change_hud_or_gauge_pixels() {
+        use crate::pet::generation::Species;
+        use crate::presentation::companion_scene::{
+            AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration, SceneGenerationKey,
+        };
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let generation_key = SceneGenerationKey {
+            device: DeviceEpoch(81),
+            layout: LayoutGeneration(82),
+            resources: ResourceGeneration(83),
+        };
+        let revisions = AppliedRevisions::new(12, 13);
+        let cpu = compile_retained_full_cast_snapshot(
+            retained_full_cast_snapshot(),
+            generation_key,
+            revisions,
+        );
+        let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+            CompanionContentIdentity::for_pet(Species::Fuzz),
+            1.0,
+        );
+        let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+            .expect("full-cast repertoire compiles");
+        let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+            resources.atlas(),
+            generation_key.resources,
+        )
+        .expect("full-cast atlas prepares");
+        let upload = prepare_scene_upload(&cpu, &atlas).expect("full-cast upload prepares");
+        let (device, queue) = native_device();
+        let shared = SceneGpuShared::create(&device, generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let hud = candidate
+            .hud
+            .prepared_atlas()
+            .prepare_redacted_capture(
+                &super::super::hud::SealedHudFrame::redacted_capture().unwrap(),
+                hud_geometry(generation_key.resources),
+            )
+            .unwrap();
+        let zero_hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            generation_key.resources,
+        );
+        let request = render_request_fixture(
+            generation_key,
+            revisions,
+            cpu.logical_viewport_points(),
+            1.0,
+        );
+        let baseline_plan = candidate.draw_plan.clone();
+        let gauge_index = upload
+            .draws
+            .iter()
+            .enumerate()
+            .find_map(|(index, draw)| {
+                (draw.source == PrimitiveSource::Analytic
+                    && upload.primitives[index].binding_index == 5)
+                    .then_some(u32::try_from(index).unwrap())
+            })
+            .expect("gauge analytic draw exists");
+        let habitat_indices = upload
+            .draws
+            .iter()
+            .enumerate()
+            .filter_map(|(index, draw)| {
+                let habitat = matches!(
+                    draw.source,
+                    PrimitiveSource::Instances(
+                        InstanceSource::RoomGlyphs
+                            | InstanceSource::PropGlyphs { .. }
+                            | InstanceSource::TankCells { .. }
+                            | InstanceSource::Ambient
+                    )
+                ) || (draw.source == PrimitiveSource::Analytic
+                    && upload.primitives[index].binding_index == 8);
+                habitat.then_some(u32::try_from(index).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert!(!habitat_indices.is_empty());
+
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+        let mut render_variant =
+            |hidden: &[u32], prepared_hud: &super::super::hud::CaptureSafePreparedHudFrame| {
+                candidate.draw_plan = baseline_plan.clone();
+                for draw in candidate
+                    .draw_plan
+                    .opaque
+                    .iter_mut()
+                    .chain(candidate.draw_plan.world_blended_unsorted.iter_mut())
+                    .chain(candidate.draw_plan.chrome.prefix.iter_mut())
+                    .chain(candidate.draw_plan.chrome.suffix.iter_mut())
+                {
+                    if hidden.contains(&draw.primitive_index) {
+                        draw.instance_range = 0..0;
+                    }
+                }
+                renderer
+                    .render_offscreen(
+                        &device,
+                        &queue,
+                        &shared,
+                        &mut candidate,
+                        request.clone(),
+                        prepared_hud,
+                    )
+                    .unwrap()
+            };
+        let habitat_on = render_variant(&[], &hud);
+        let habitat_on_without_chrome = render_variant(&[gauge_index], &zero_hud);
+        let habitat_off = render_variant(&habitat_indices, &hud);
+        let mut habitat_and_chrome = habitat_indices.clone();
+        habitat_and_chrome.push(gauge_index);
+        let habitat_off_without_chrome = render_variant(&habitat_and_chrome, &zero_hud);
+
+        let changed_mask = |with: &SceneRenderOutcome,
+                            without: &SceneRenderOutcome,
+                            includes: &dyn Fn(f32, f32) -> bool| {
+            let [width, height] = with.physical_extent_pixels;
+            assert_eq!(with.physical_extent_pixels, without.physical_extent_pixels);
+            let mut mask = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let logical_x = x as f32 + 0.5;
+                    let logical_y = y as f32 + 0.5;
+                    if includes(logical_x, logical_y) {
+                        let offset = usize::try_from((y * width + x) * 4).unwrap();
+                        mask.push(
+                            with.rgba[offset..offset + 4] != without.rgba[offset..offset + 4],
+                        );
+                    }
+                }
+            }
+            mask
+        };
+        let gauge = crate::presentation::companion_effects::perimeter_gauge_layout(
+            180.0,
+            crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+        );
+        for (name, lane) in [
+            ("xp", gauge.xp),
+            ("daily", gauge.daily),
+            ("pace", gauge.pace),
+        ] {
+            let includes = |x: f32, y: f32| {
+                let distance = ((x - 180.0).powi(2) + (y - 180.0).powi(2)).sqrt();
+                (distance - lane.radius as f32).abs() <= lane.stroke_width as f32 / 2.0 + 1.0
+            };
+            let on_mask = changed_mask(&habitat_on, &habitat_on_without_chrome, &includes);
+            let off_mask = changed_mask(&habitat_off, &habitat_off_without_chrome, &includes);
+            assert!(
+                on_mask.iter().any(|changed| *changed),
+                "{name} lane is blank"
+            );
+            let changed_pixels = on_mask
+                .iter()
+                .zip(&off_mask)
+                .filter(|(on, off)| on != off)
+                .count();
+            assert!(
+                on_mask == off_mask,
+                "{name} lane mask changed with habitat pass at {changed_pixels} pixels"
+            );
+        }
+
+        let hud_region = |x: f32, y: f32| (70.0..290.0).contains(&x) && (105.0..255.0).contains(&y);
+        let hud_on_mask = changed_mask(&habitat_on, &habitat_on_without_chrome, &hud_region);
+        let hud_off_mask = changed_mask(&habitat_off, &habitat_off_without_chrome, &hud_region);
+        assert!(
+            hud_on_mask.iter().any(|changed| *changed),
+            "center HUD glyph mask is blank"
+        );
+        let changed_hud_pixels = hud_on_mask
+            .iter()
+            .zip(&hud_off_mask)
+            .filter(|(on, off)| on != off)
+            .count();
+        assert!(
+            hud_on_mask == hud_off_mask,
+            "center HUD glyph mask changed with habitat pass at {changed_hud_pixels} pixels"
         );
     }
 
@@ -10016,6 +10436,9 @@ mod tests {
         snapshot.content.prop_animation_states[0].bloom_active = None;
         snapshot.frame.prop_instances[0].motion_offset_points = [0.0; 2];
         snapshot.frame.prop_instances[0].transition = None;
+        snapshot.frame.prop_instances[1].visible = true;
+        snapshot.frame.prop_instances[1].origin_points = [48.0, 240.0];
+        snapshot.frame.prop_instances[1].opacity = 1.0;
 
         let generation_key = SceneGenerationKey {
             device: DeviceEpoch(31),
@@ -10153,8 +10576,18 @@ mod tests {
         };
         use crate::round::smooth::CompanionContentIdentity;
 
-        let snapshot = super::super::compiler::projected_full_scene_snapshot_for_render_test(0);
+        let mut snapshot = super::super::compiler::projected_full_scene_snapshot_for_render_test(0);
         assert_eq!(snapshot.content.tank_animation_states.len(), 2);
+        let static_slot = &mut snapshot.frame.tank_instances[1];
+        static_slot.origin_points[0] -= 100.0;
+        for cell in &mut static_slot.cells {
+            cell.source_position_points[0] -= 100.0;
+            cell.position_points[0] -= 100.0;
+            cell.target_position_points[0] -= 100.0;
+        }
+        if let Some(bounds) = &mut static_slot.bounds_points {
+            bounds[0] -= 100.0;
+        }
         let generation_key = SceneGenerationKey {
             device: DeviceEpoch(41),
             layout: LayoutGeneration(42),
@@ -11568,6 +12001,8 @@ mod tests {
         assert!(nontransparent > 350_000, "nontransparent={nontransparent}");
 
         let baseline_plan = candidate.draw_plan.clone();
+        assert!(cpu.accepted_frame_for_test().prop_slots[0].visible);
+        assert!(!cpu.accepted_frame_for_test().prop_slots[1].visible);
         let suppress = |plan: &mut SceneDrawPlan, primitive_index: u32| {
             let mut found = false;
             for draw in plan
@@ -11594,7 +12029,6 @@ mod tests {
             ("tank inhabitant 1", &[8, 14]),
             ("pet body", &[11]),
             ("prop 0", &[5]),
-            ("prop 1", &[6]),
             ("pet particles", &[12]),
             ("gauges", &[15]),
             ("status", &[16]),
@@ -11619,6 +12053,22 @@ mod tests {
                 "active production layer was inert: {label}",
             );
         }
+        candidate.draw_plan = baseline_plan.clone();
+        suppress(&mut candidate.draw_plan, 6);
+        let without_hidden_prop = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &prepared_hud,
+            )
+            .expect("hidden prop omission render");
+        assert_eq!(
+            without_hidden_prop.rgba, outcome.rgba,
+            "hidden production prop unexpectedly contributed pixels"
+        );
         candidate.draw_plan = baseline_plan;
 
         let zero_hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(

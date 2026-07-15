@@ -1663,6 +1663,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "pet-glitch-live-states".to_string(),
             "pet-glitch-persistence-states".to_string(),
             "round-normal".to_string(),
+            "round-retained-composition-full-cast".to_string(),
             "round-hud-missing-yesterday".to_string(),
             "round-hud-stale-yesterday".to_string(),
             "round-hud-zero-yesterday".to_string(),

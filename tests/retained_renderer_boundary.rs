@@ -305,6 +305,53 @@ fn retained_scene_render_contract_uses_reusable_uploads_and_owns_its_color_math(
 }
 
 #[test]
+fn retained_habitat_presentation_does_not_own_renderer_lifecycle_policy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let presentation_sources = [
+        "src/presentation/props.rs",
+        "src/presentation/companion_effects.rs",
+        "src/presentation/tank_life.rs",
+        "src/presentation/companion_scene/composition.rs",
+        "src/presentation/companion_scene/input.rs",
+        "src/presentation/companion_scene/scene.rs",
+        "src/presentation/companion_scene/scene/compiler.rs",
+        "src/presentation/companion_scene/scene/checksum.rs",
+        "src/presentation/companion_scene/validate.rs",
+    ];
+    let forbidden_owners = [
+        "wgpu::",
+        "CAMetalLayer",
+        "SurfaceConfiguration",
+        "MainThreadMarker",
+        "NSRunLoop",
+        "EventLoop",
+        "NSTimer",
+        "NSWindow",
+        "toggleFullScreen",
+        "windowDidResize",
+        "resize_surface",
+        "RendererChoice",
+        "renderer_choice",
+        "SceneRuntimeRollout",
+        "RetainedFailureCategory",
+        "fallback_to_smooth",
+    ];
+
+    for relative in presentation_sources {
+        let source = read(&root.join(relative));
+        let production = production_source(&source);
+        for forbidden in forbidden_owners {
+            assert!(
+                !production.contains(forbidden),
+                "presentation/composition must stay platform-neutral and cannot own renderer, \
+                 surface, event-loop, fallback, resize, or fullscreen policy; found \
+                 {forbidden:?} in {relative}"
+            );
+        }
+    }
+}
+
+#[test]
 fn retained_sources_never_reference_the_renderer_spike() {
     let files = retained_source_files();
     // Guard against a silently empty scan (e.g. a moved module).

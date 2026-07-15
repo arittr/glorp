@@ -352,16 +352,10 @@ const fn is_floor_zone(zone: PropZoneSnapshot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::evolution::Stage;
     use crate::game::habitat::{HabitatPropKind, HABITAT_PROP_CATALOG};
-    use crate::game::metabolism::Mood;
-    use crate::pet::generation::{generate_pet, Species};
-    use crate::pet::render::{render_pet, AnimationFrame};
     use crate::presentation::companion_scene::{
-        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
-        CompanionSceneSnapshot,
+        PropPresentationMotion, PropTopologySnapshot, MAX_VISIBLE_PROPS,
     };
-    use crate::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
     use time::macros::datetime;
 
     const COLUMNS: u16 = 44;
@@ -375,62 +369,51 @@ mod tests {
         (360.0, 480.0),
     ];
 
-    fn full_prop_fixture() -> WatchViewModel {
-        let mut vm = WatchViewModel::fixture_with_habitat_props();
-        vm.habitat.earned_props = HABITAT_PROP_CATALOG
+    fn full_prop_topology() -> Vec<PropTopologySnapshot> {
+        let records = HABITAT_PROP_CATALOG
             .iter()
-            .map(|spec| EarnedHabitatPropView {
-                id: crate::storage::state::HabitatPropId::new(spec.id),
-                earned_at: time::OffsetDateTime::UNIX_EPOCH,
-                kind: spec.kind,
-                display_priority: spec.display_priority,
-                source: crate::storage::state::HabitatPropSource::LifetimeTokens {
-                    threshold: spec.lifetime_threshold.unwrap_or(0.0),
+            .map(
+                |spec| crate::presentation::habitat_inventory::HabitatPropRecord {
+                    id: spec.id,
+                    earned_at: time::OffsetDateTime::UNIX_EPOCH,
+                    kind: spec.kind,
+                    display_priority: spec.display_priority,
                 },
+            )
+            .collect::<Vec<_>>();
+        crate::presentation::habitat_inventory::visible_trophy_ids(&records)
+            .into_iter()
+            .chain(crate::presentation::habitat_inventory::visible_accent_ids(
+                &records,
+                datetime!(2026-07-15 12:00 UTC),
+            ))
+            .take(MAX_VISIBLE_PROPS)
+            .enumerate()
+            .filter_map(|(stable_order, id)| {
+                let spec = crate::game::habitat::catalog_prop_by_str(id)?;
+                Some(PropTopologySnapshot {
+                    catalog_id: spec.id,
+                    stable_order: u8::try_from(stable_order).unwrap(),
+                    zone: spec.zone.into(),
+                    authored_depth: spec.pet_layer.into(),
+                    presentation_motion: PropPresentationMotion::Static,
+                })
             })
-            .collect();
-        let rendered = render_pet(
-            &generate_pet("companion-composition-full-prop-fixture").with_species(Species::Fuzz),
-            Stage::S3,
-            Mood::Content,
-            AnimationFrame::default(),
-        );
-        vm.pet_render.generated_species = Species::Fuzz;
-        vm.pet_render.stage = Stage::S3;
-        vm.pet_art = rendered.lines;
-        vm.pet_spans = rendered.spans;
-        vm
+            .collect()
     }
 
-    fn project_full_prop_fixture(
+    fn resolve_for(
+        props: &[PropTopologySnapshot],
         width_points: f32,
         height_points: f32,
-        wall_time: time::OffsetDateTime,
-    ) -> CompanionSceneSnapshot {
-        CompanionSceneSnapshot::project_with_input(
-            &full_prop_fixture(),
-            CompanionSceneProjectionInput::round(
-                CompanionProjectionClock::new(wall_time, 0),
-                CompanionLogicalLayout::round(width_points, height_points),
-                COLUMNS,
-                ROWS,
-                crate::round::scene::current_round_motion_clearance(ROWS),
-            ),
-        )
-        .expect("project the real full-prop fixture")
-    }
-
-    fn resolve_for(snapshot: &CompanionSceneSnapshot) -> CompanionComposition {
+    ) -> CompanionComposition {
         resolve_companion_composition(CompanionCompositionInput {
-            columns: snapshot.topology.glyph_grid.columns,
-            rows: snapshot.topology.glyph_grid.rows,
-            width_points: snapshot.topology.layout.width_points,
-            height_points: snapshot.topology.layout.height_points,
-            bottom_reserved_rows: crate::round::scene::current_round_motion_clearance(
-                snapshot.topology.glyph_grid.rows,
-            )
-            .bottom_reserved_rows,
-            props: &snapshot.topology.visible_props,
+            columns: COLUMNS,
+            rows: ROWS,
+            width_points,
+            height_points,
+            bottom_reserved_rows: 5,
+            props,
         })
     }
 
@@ -442,17 +425,15 @@ mod tests {
         [bounds[0] - 1, bounds[1] - 1, bounds[2] + 1, bounds[3] + 1]
     }
 
-    fn expected_gauge_radii(snapshot: &CompanionSceneSnapshot) -> [f32; 2] {
-        let layout = snapshot.topology.layout;
-        let grid = snapshot.topology.glyph_grid;
+    fn expected_gauge_radii(width_points: f32, height_points: f32) -> [f32; 2] {
         let gauge = crate::presentation::companion_effects::perimeter_gauge_layout(
-            f64::from(layout.width_points.min(layout.height_points)) / 2.0,
+            f64::from(width_points.min(height_points)) / 2.0,
             crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
         );
         let inner_radius_points = gauge.pace.radius - gauge.pace.stroke_width / 2.0;
         [
-            (inner_radius_points / f64::from(grid.cell_extent_points[0]) - 0.5) as f32,
-            (inner_radius_points / f64::from(grid.cell_extent_points[1]) - 0.5) as f32,
+            (inner_radius_points / (f64::from(width_points) / f64::from(COLUMNS)) - 0.5) as f32,
+            (inner_radius_points / (f64::from(height_points) / f64::from(ROWS)) - 0.5) as f32,
         ]
     }
 
@@ -493,14 +474,10 @@ mod tests {
 
     #[test]
     fn full_cast_props_are_disjoint_and_inside_safe_aperture() {
+        let props = full_prop_topology();
         for &(width_points, height_points) in SURFACES {
-            let snapshot = project_full_prop_fixture(
-                width_points,
-                height_points,
-                datetime!(2026-07-15 12:00 UTC),
-            );
-            let composition = resolve_for(&snapshot);
-            let expected_radii = expected_gauge_radii(&snapshot);
+            let composition = resolve_for(&props, width_points, height_points);
+            let expected_radii = expected_gauge_radii(width_points, height_points);
             for (axis, expected_radius) in expected_radii.iter().copied().enumerate() {
                 assert!(
                     (composition.gauge_inner_radius_cells[axis] - expected_radius).abs() < 0.0001,
@@ -524,7 +501,7 @@ mod tests {
                         u16::try_from(max_row - min_row).unwrap(),
                     ]
                 );
-                let topology = &snapshot.topology.visible_props[usize::from(placement.slot)];
+                let topology = &props[usize::from(placement.slot)];
                 assert_eq!(
                     placement.grounded,
                     matches!(
@@ -562,13 +539,9 @@ mod tests {
 
     #[test]
     fn props_avoid_hud_and_bottom_reserves() {
+        let props = full_prop_topology();
         for &(width_points, height_points) in SURFACES {
-            let snapshot = project_full_prop_fixture(
-                width_points,
-                height_points,
-                datetime!(2026-07-15 12:00 UTC),
-            );
-            let composition = resolve_for(&snapshot);
+            let composition = resolve_for(&props, width_points, height_points);
             let expected_hud = [9, 10, 35, 17];
             let expected_bottom = [0, 13, 44, 18];
             assert_eq!(composition.hud_reserve_cells, expected_hud);
@@ -604,8 +577,7 @@ mod tests {
                 .iter()
                 .filter(|placement| {
                     placement.visible
-                        && snapshot.topology.visible_props[usize::from(placement.slot)]
-                            .authored_depth
+                        && props[usize::from(placement.slot)].authored_depth
                             == AuthoredDepthSnapshot::Foreground
                 })
                 .map(|placement| {
@@ -630,58 +602,28 @@ mod tests {
 
     #[test]
     fn composition_is_byte_stable() {
+        let props = full_prop_topology();
         for &(width_points, height_points) in SURFACES {
-            let snapshot = project_full_prop_fixture(
-                width_points,
-                height_points,
-                datetime!(2026-07-15 12:00 UTC),
-            );
             assert_eq!(
-                composition_bytes(&resolve_for(&snapshot)),
-                composition_bytes(&resolve_for(&snapshot)),
+                composition_bytes(&resolve_for(&props, width_points, height_points)),
+                composition_bytes(&resolve_for(&props, width_points, height_points)),
                 "{width_points}x{height_points}"
             );
         }
     }
 
     #[test]
-    fn sprite_phase_does_not_move_prop_anchors() {
-        let first = project_full_prop_fixture(360.0, 360.0, datetime!(2026-07-15 12:00:00 UTC));
-        let second = project_full_prop_fixture(360.0, 360.0, datetime!(2026-07-15 12:00:04 UTC));
-        assert!(first
-            .content
-            .prop_animation_states
-            .iter()
-            .zip(&second.content.prop_animation_states)
-            .any(|(left, right)| left.sprite_phase != right.sprite_phase));
-        assert_eq!(
-            resolve_for(&first)
-                .prop_placements
-                .iter()
-                .map(|placement| (placement.slot, placement.anchor_cell))
-                .collect::<Vec<_>>(),
-            resolve_for(&second)
-                .prop_placements
-                .iter()
-                .map(|placement| (placement.slot, placement.anchor_cell))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     fn small_surfaces_hide_accents_in_stable_order() {
-        let snapshot = project_full_prop_fixture(260.0, 260.0, datetime!(2026-07-15 12:00 UTC));
-        let first = resolve_for(&snapshot);
-        let second = resolve_for(&snapshot);
+        let props = full_prop_topology();
+        let first = resolve_for(&props, 260.0, 260.0);
+        let second = resolve_for(&props, 260.0, 260.0);
         let hidden_accents = |composition: &CompanionComposition| {
             composition
                 .prop_placements
                 .iter()
                 .filter(|placement| {
                     !placement.visible
-                        && snapshot
-                            .topology
-                            .visible_props
+                        && props
                             .get(usize::from(placement.slot))
                             .and_then(|prop| {
                                 crate::game::habitat::catalog_prop_by_str(prop.catalog_id)
@@ -699,11 +641,7 @@ mod tests {
         assert_eq!(first_hidden, hidden_accents(&second));
         assert_eq!(
             first_hidden.last().copied(),
-            snapshot
-                .topology
-                .visible_props
-                .last()
-                .map(|prop| prop.stable_order),
+            props.last().map(|prop| prop.stable_order),
             "the lowest-priority fixed slot must be hidden first or with the hidden suffix"
         );
     }
