@@ -1673,7 +1673,12 @@ fn analytic_paint(
                 biome,
                 phase_scale,
             );
-            AnalyticPaint::ApertureDepth { core_srgb8: core, rim_srgb8: rim }
+            AnalyticPaint::ApertureDepth {
+                core_srgb8: core,
+                rim_srgb8: rim,
+                bed_srgb8: crate::presentation::companion_effects::bed_primary_srgb8(biome),
+                fleck_srgb8: crate::presentation::companion_effects::bed_fleck_srgb8(biome),
+            }
         }
         AnalyticSemantic::WallShadow => AnalyticPaint::PetShadowMultiply {
             color_srgb8: crate::presentation::companion_effects::WALL_SHADOW_SRGB8,

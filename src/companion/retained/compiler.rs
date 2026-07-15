@@ -2084,9 +2084,16 @@ fn pack_analytic_content(value: AnalyticContentSlot) -> AnalyticContentGpuValue 
     };
     let mut payload = [0; 8];
     match content.paint {
-        AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 } => {
+        AnalyticPaint::ApertureDepth {
+            core_srgb8,
+            rim_srgb8,
+            bed_srgb8,
+            fleck_srgb8,
+        } => {
             payload[0] = pack_rgb8(core_srgb8);
             payload[1] = pack_rgb8(rim_srgb8);
+            payload[2] = pack_rgb8(bed_srgb8);
+            payload[3] = pack_rgb8(fleck_srgb8);
         }
         AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 } => {
             payload[0] = pack_rgb8(color_srgb8);
@@ -3861,6 +3868,8 @@ mod tests {
             AnalyticPaint::ApertureDepth {
                 core_srgb8: [1, 2, 3],
                 rim_srgb8: [4, 5, 6],
+                bed_srgb8: [7, 8, 9],
+                fleck_srgb8: [10, 11, 12],
             },
             AnalyticPaint::PetShadowMultiply { color_srgb8: [7, 8, 9], opacity_u8: 10 },
             AnalyticPaint::FloorShadowMultiplyRadial {
@@ -3889,8 +3898,8 @@ mod tests {
             [
                 packed_rgb([1, 2, 3]),
                 packed_rgb([4, 5, 6]),
-                0,
-                0,
+                packed_rgb([7, 8, 9]),
+                packed_rgb([10, 11, 12]),
                 0,
                 0,
                 0,
@@ -4804,6 +4813,8 @@ mod tests {
         analytic_content.value.as_mut().unwrap().paint = AnalyticPaint::ApertureDepth {
             core_srgb8: [31, 32, 33],
             rim_srgb8: [34, 35, 36],
+            bed_srgb8: [37, 38, 39],
+            fleck_srgb8: [40, 41, 42],
         };
         content.analytic_slots.push(analytic_content);
         let mut frame_slot = candidate.accepted.frame().frame().room_glyph_slots[0];
@@ -5155,6 +5166,8 @@ mod tests {
         analytic_content.value.as_mut().unwrap().paint = AnalyticPaint::ApertureDepth {
             core_srgb8: [31, 32, 33],
             rim_srgb8: [34, 35, 36],
+            bed_srgb8: [37, 38, 39],
+            fleck_srgb8: [40, 41, 42],
         };
         content.analytic_slots.push(analytic_content);
 

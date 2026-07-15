@@ -119,6 +119,63 @@ pub(crate) fn bed_shadow_srgb8(primary_biome: &str) -> [u8; 3] {
     bed_primary_srgb8(primary_biome).map(|channel| channel / 3 + 30)
 }
 
+pub(crate) fn bed_fleck_srgb8(primary_biome: &str) -> [u8; 3] {
+    let primary = bed_primary_srgb8(primary_biome);
+    let shadow = bed_shadow_srgb8(primary_biome);
+    std::array::from_fn(|channel| {
+        ((u16::from(primary[channel]) + 2 * u16::from(shadow[channel])) / 3) as u8
+    })
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BedTextureSample {
+    pub(crate) bed_mix: f32,
+    pub(crate) fleck_mix: f32,
+    pub(crate) dither_levels: f32,
+    pub(crate) bed_srgb8: [u8; 3],
+    pub(crate) fleck_srgb8: [u8; 3],
+}
+
+#[cfg(test)]
+pub(crate) fn bed_texture_sample(
+    logical_point_y_down: [f32; 2],
+    logical_extent: [f32; 2],
+    backing_scale: f32,
+    primary_biome: &str,
+) -> BedTextureSample {
+    let normalized_x = logical_point_y_down[0] / logical_extent[0] - 0.5;
+    let horizon_y = logical_extent[1] * (0.76 + 0.04 * normalized_x * normalized_x);
+    let bed_feather = (logical_extent[1] * 0.12).max(1.0);
+    let bed_t = ((logical_point_y_down[1] - horizon_y) / bed_feather).clamp(0.0, 1.0);
+    let bed_mix = bed_t * bed_t * (3.0 - 2.0 * bed_t);
+
+    let physical_x = (logical_point_y_down[0] * backing_scale).floor().max(0.0) as u32;
+    let physical_y = ((logical_extent[1] - logical_point_y_down[1]) * backing_scale)
+        .floor()
+        .max(0.0) as u32;
+    let mut hash = physical_x.wrapping_mul(0x9E37_79B9) ^ physical_y.wrapping_mul(0x85EB_CA6B);
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x7FEB_352D);
+    hash ^= hash >> 15;
+    let dither_levels = ((hash & 0xFFFF) as f32 / 65535.0 - 0.5) * 3.0;
+    let fleck_random = ((hash >> 16) & 0xFFFF) as f32 / 65535.0;
+    let fleck_density = (bed_mix - 0.35).max(0.0) * 0.16;
+    let fleck_mix = if fleck_random < fleck_density {
+        0.35 + 0.55 * bed_mix
+    } else {
+        0.0
+    };
+
+    BedTextureSample {
+        bed_mix,
+        fleck_mix,
+        dither_levels,
+        bed_srgb8: bed_primary_srgb8(primary_biome),
+        fleck_srgb8: bed_fleck_srgb8(primary_biome),
+    }
+}
+
 pub(crate) const TANK_DEPTH_TINT_SRGB: [f32; 3] = [0.10, 0.11, 0.20];
 pub(crate) const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
 
@@ -231,4 +288,81 @@ pub(crate) fn mood_aura_radius(transformed_pet_width: f64) -> f64 {
 
 fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bed_texture_biome_palette_is_deterministic_visible_and_bounded() {
+        for (biome, primary, shadow, fleck) in [
+            ("starter", [72, 83, 108], [54, 57, 66], [60, 65, 80]),
+            ("botanical", [63, 111, 102], [51, 67, 64], [55, 81, 76]),
+            ("technical", [70, 91, 125], [53, 60, 71], [58, 70, 89]),
+            ("celestial", [89, 75, 125], [59, 55, 71], [69, 61, 89]),
+            ("artifact", [108, 83, 102], [66, 57, 64], [80, 65, 76]),
+            ("cozy", [105, 78, 106], [65, 56, 65], [78, 63, 78]),
+        ] {
+            assert_eq!(bed_primary_srgb8(biome), primary, "{biome} primary");
+            assert_eq!(bed_shadow_srgb8(biome), shadow, "{biome} shadow");
+            assert_eq!(bed_fleck_srgb8(biome), fleck, "{biome} fleck");
+            for channel in 0..3 {
+                assert!(
+                    shadow[channel] <= fleck[channel],
+                    "{biome} channel {channel}"
+                );
+                assert!(
+                    fleck[channel] <= primary[channel],
+                    "{biome} channel {channel}"
+                );
+            }
+            assert!(
+                primary
+                    .iter()
+                    .zip(fleck)
+                    .any(|(primary, fleck)| primary.abs_diff(fleck) >= 12),
+                "{biome} fleck must survive room blending"
+            );
+        }
+    }
+
+    #[test]
+    fn bed_texture_is_stable_for_same_logical_sample() {
+        for backing_scale in [1.0, 2.0] {
+            assert_eq!(
+                bed_texture_sample([144.5, 300.5], [360.0; 2], backing_scale, "starter"),
+                bed_texture_sample([144.5, 300.5], [360.0; 2], backing_scale, "starter"),
+                "backing_scale={backing_scale}",
+            );
+        }
+        let first = bed_texture_sample([144.5, 300.5], [360.0; 2], 1.0, "starter");
+        assert!(first.bed_mix > 0.6);
+        assert!(first.fleck_mix > 0.7);
+        assert!((-1.5..=1.5).contains(&first.dither_levels));
+    }
+
+    #[test]
+    fn bed_texture_changes_with_biome() {
+        let starter = bed_texture_sample([144.5, 300.5], [360.0; 2], 1.0, "starter");
+        let botanical = bed_texture_sample([144.5, 300.5], [360.0; 2], 1.0, "botanical");
+        assert_eq!(starter.bed_mix, botanical.bed_mix);
+        assert_eq!(starter.fleck_mix, botanical.fleck_mix);
+        assert_eq!(starter.bed_srgb8, [72, 83, 108]);
+        assert_eq!(starter.fleck_srgb8, [60, 65, 80]);
+        assert_eq!(botanical.bed_srgb8, [63, 111, 102]);
+        assert_eq!(botanical.fleck_srgb8, [55, 81, 76]);
+    }
+
+    #[test]
+    fn upper_room_samples_never_emit_flecks() {
+        for y in (24..=252).step_by(12) {
+            for x in (48..=312).step_by(12) {
+                let sample =
+                    bed_texture_sample([x as f32 + 0.5, y as f32 + 0.5], [360.0; 2], 2.0, "cozy");
+                assert_eq!(sample.bed_mix, 0.0, "sample=({x}, {y})");
+                assert_eq!(sample.fleck_mix, 0.0, "sample=({x}, {y})");
+            }
+        }
+    }
 }

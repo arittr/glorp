@@ -962,6 +962,8 @@ pub enum AnalyticPaint {
     ApertureDepth {
         core_srgb8: [u8; 3],
         rim_srgb8: [u8; 3],
+        bed_srgb8: [u8; 3],
+        fleck_srgb8: [u8; 3],
     },
     PetShadowMultiply {
         color_srgb8: [u8; 3],
@@ -2952,6 +2954,26 @@ mod tests {
             checksum::checksum_content(&changed_content).unwrap(),
             content_checksum
         );
+
+        for lane in ["bed", "fleck"] {
+            let mut changed_room = fixture.content.clone();
+            let AnalyticPaint::ApertureDepth { bed_srgb8, fleck_srgb8, .. } =
+                &mut changed_room.analytic_slots[0].value.as_mut().unwrap().paint
+            else {
+                panic!("room fixture uses aperture-depth paint");
+            };
+            let color = if lane == "bed" {
+                bed_srgb8
+            } else {
+                fleck_srgb8
+            };
+            color[0] ^= 1;
+            assert_ne!(
+                checksum::checksum_content(&changed_room).unwrap(),
+                content_checksum,
+                "{lane} lane must be content identity",
+            );
+        }
         assert_eq!(
             checksum::checksum_frame(&fixture.template, &fixture.frame).unwrap(),
             frame_checksum
@@ -4519,7 +4541,12 @@ mod tests {
                     );
                 assert_eq!(
                     built.content().analytic_slots[0].value.unwrap().paint,
-                    AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 },
+                    AnalyticPaint::ApertureDepth {
+                        core_srgb8,
+                        rim_srgb8,
+                        bed_srgb8: crate::presentation::companion_effects::bed_primary_srgb8(biome),
+                        fleck_srgb8: crate::presentation::companion_effects::bed_fleck_srgb8(biome),
+                    },
                     "{biome} {phase:?}"
                 );
                 let shadow = crate::presentation::companion_effects::bed_shadow_srgb8(biome);

@@ -1694,9 +1694,14 @@ fn validate_analytic_paint(
     let valid = match (semantic, paint) {
         (
             AnalyticSemantic::RoomBackground,
-            AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 },
+            AnalyticPaint::ApertureDepth {
+                core_srgb8,
+                rim_srgb8,
+                bed_srgb8,
+                fleck_srgb8,
+            },
         ) => {
-            let _ = (core_srgb8, rim_srgb8);
+            let _ = (core_srgb8, rim_srgb8, bed_srgb8, fleck_srgb8);
             true
         }
         (

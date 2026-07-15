@@ -670,10 +670,17 @@ fn encode_rgba(hash: &mut Fnv1a64, color: [u8; 4]) {
 }
 fn encode_analytic_paint(hash: &mut Fnv1a64, paint: AnalyticPaint) {
     match paint {
-        AnalyticPaint::ApertureDepth { core_srgb8, rim_srgb8 } => {
+        AnalyticPaint::ApertureDepth {
+            core_srgb8,
+            rim_srgb8,
+            bed_srgb8,
+            fleck_srgb8,
+        } => {
             hash.u8(1);
             encode_rgb(hash, core_srgb8);
             encode_rgb(hash, rim_srgb8);
+            encode_rgb(hash, bed_srgb8);
+            encode_rgb(hash, fleck_srgb8);
         }
         AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 } => {
             hash.u8(2);

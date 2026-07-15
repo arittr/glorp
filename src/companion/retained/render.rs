@@ -8528,7 +8528,7 @@ mod tests {
     }
 
     #[test]
-    fn room_shader_exposes_a_visible_biome_tinted_tank_bed() {
+    fn room_analytic_uses_packed_biome_bed_and_stable_physical_hash_only() {
         let room = SCENE_SHADER_SOURCE
             .split("fn fs_room_aperture(")
             .nth(1)
@@ -8538,15 +8538,28 @@ mod tests {
             .expect("room role has a bounded body");
 
         for required in [
-            "let horizon_y = center.y - radius * 0.52;",
-            "let bed_fade = smoothstep(",
-            "let bed_mix = 1.0 - bed_fade;",
-            "let bed = mix(rim, vec3<f32>(1.0), 0.12);",
-            "mix(room, bed, bed_mix * 0.65)",
+            "content.payload[0].z",
+            "content.payload[0].w",
+            "frame_buffer.globals.viewport_points",
+            "fwidth(input.point_position)",
+            "let backing_scale =",
+            "input.point_position * backing_scale",
+            "0x9e3779b9u",
+            "0x85ebca6bu",
+            "0x7feb352du",
+            "analytic_premultiply(straight, 1.0, input.opacity, input.saturation)",
+        ] {
+            assert!(room.contains(required), "missing room contract: {required}");
+        }
+        for forbidden in [
+            "frame_buffer.values",
+            "frame_buffer.globals.gauges",
+            "frame_buffer.globals.dim_amount",
+            "content_globals_buffer.globals",
         ] {
             assert!(
-                room.contains(required),
-                "missing tank-bed contract: {required}"
+                !room.contains(forbidden),
+                "unstable room input: {forbidden}"
             );
         }
     }
@@ -9245,6 +9258,110 @@ mod tests {
             }))
             .expect("two surfaceless Metal devices are available from one adapter")
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn room_only_offscreen_at_1x(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> [SceneRenderOutcome; 2] {
+        let cpu = compile_fixture(&canonical_materialization_fixture());
+        let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(device, upload.generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(device, queue, &shared, &upload, &atlas).unwrap();
+        for draw in candidate
+            .draw_plan
+            .world_blended_unsorted
+            .iter_mut()
+            .chain(candidate.draw_plan.chrome.prefix.iter_mut())
+            .chain(candidate.draw_plan.chrome.suffix.iter_mut())
+        {
+            draw.instance_range = 0..0;
+        }
+        let hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            upload.generation_key.resources,
+        );
+        let request = render_request_fixture(
+            candidate.generation_key,
+            candidate.source_revisions,
+            candidate.logical_viewport_points,
+            1.0,
+        );
+        let mut renderer = SceneRenderer::new(device, queue, &shared);
+        std::array::from_fn(|_| {
+            renderer
+                .render_offscreen(
+                    device,
+                    queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &hud,
+                )
+                .expect("isolated retained room renders")
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn local_trend_residual_variance(rgba: &[u8], width: usize) -> f64 {
+        let height = rgba.len() / 4 / width;
+        let luminance = |x: usize, y: usize| {
+            let offset = (y * width + x) * 4;
+            let pixel = &rgba[offset..offset + 3];
+            0.2126 * f64::from(pixel[0])
+                + 0.7152 * f64::from(pixel[1])
+                + 0.0722 * f64::from(pixel[2])
+        };
+        let mut squared = 0.0;
+        let mut count = 0_u64;
+        for y in 2..height - 2 {
+            for x in 2..width - 2 {
+                let mut smooth = 0.0;
+                for sample_y in y - 2..=y + 2 {
+                    for sample_x in x - 2..=x + 2 {
+                        smooth += luminance(sample_x, sample_y);
+                    }
+                }
+                let residual = luminance(x, y) - smooth / 25.0;
+                squared += residual * residual;
+                count += 1;
+            }
+        }
+        squared / count as f64
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_bed_lower_roi_has_stable_texture_variance() {
+        let (device, queue) = native_device();
+        let [first, second] = room_only_offscreen_at_1x(&device, &queue);
+        assert_eq!(first.rgba, second.rgba, "bed texture must be byte-stable");
+
+        let lower = rgba_roi(&first, [100.0, 285.0, 160.0, 48.0], 1.0);
+        let variance = local_trend_residual_variance(&lower, 160);
+        let upper = rgba_roi(&first, [100.0, 120.0, 160.0, 96.0], 1.0);
+        let smooth_variance = local_trend_residual_variance(&upper, 160);
+        assert!(
+            variance > 1.5 && variance > smooth_variance * 2.0,
+            "lower bed has only the smooth room trend: variance={variance}, smooth={smooth_variance}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_bed_upper_roi_has_no_substrate_flecks() {
+        let (device, queue) = native_device();
+        let [first, second] = room_only_offscreen_at_1x(&device, &queue);
+        assert_eq!(first.rgba, second.rgba, "room dither must be byte-stable");
+
+        let upper = rgba_roi(&first, [100.0, 120.0, 160.0, 96.0], 1.0);
+        let variance = local_trend_residual_variance(&upper, 160);
+        assert!(
+            variance < 1.0,
+            "upper room departed from its smooth dithered reference: variance={variance}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -10998,11 +11115,14 @@ mod tests {
             assert_eq!(pixel(corner.0, corner.1), [0, 0, 0, 0], "corner={corner:?}");
         }
         for room_probe in [(180, 360), (540, 360)] {
-            assert_eq!(
-                pixel(room_probe.0, room_probe.1),
-                [20, 24, 37, 255],
-                "room_probe={room_probe:?}",
-            );
+            let actual = pixel(room_probe.0, room_probe.1);
+            assert_eq!(actual[3], 255, "room_probe={room_probe:?}");
+            for (channel, smooth_reference) in actual[..3].iter().zip([20_u8, 24, 37]) {
+                assert!(
+                    channel.abs_diff(smooth_reference) <= 2,
+                    "room_probe={room_probe:?}, actual={actual:?}"
+                );
+            }
         }
         let pet_center = pixel(360, 360);
         assert_eq!(pet_center[3], 255);

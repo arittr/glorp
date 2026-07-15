@@ -632,6 +632,21 @@ fn srgb_to_linear(value: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn linear_channel_to_srgb(value: f32) -> f32 {
+    if (value <= 0.0031308) {
+        return value * 12.92;
+    }
+    return 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+fn linear_to_srgb(value: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        linear_channel_to_srgb(value.r),
+        linear_channel_to_srgb(value.g),
+        linear_channel_to_srgb(value.b),
+    );
+}
+
 fn apply_saturation(color: vec3<f32>, saturation: f32) -> vec3<f32> {
     let luminance = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
     return mix(vec3<f32>(luminance), color, max(saturation, 0.0));
@@ -672,12 +687,11 @@ fn packed_rgba8_linear(packed: u32) -> vec4<f32> {
 }
 
 fn packed_rgb8_linear(packed: u32) -> vec3<f32> {
-    let straight_srgb = vec3<f32>(
+    return srgb_to_linear(vec3<f32>(
         f32(packed & 0xffu),
         f32((packed >> 8u) & 0xffu),
         f32((packed >> 16u) & 0xffu),
-    ) / 255.0;
-    return srgb_to_linear(straight_srgb);
+    ) / 255.0);
 }
 
 fn explicit_packed_paint_linear(content: SceneContentGpuValue) -> vec4<f32> {
@@ -749,17 +763,45 @@ fn fs_room_aperture(
     let radial = smoothstep(0.0, radius, distance);
     let core = packed_rgb8_linear(content.payload[0].x);
     let rim = packed_rgb8_linear(content.payload[0].y);
-    let room = mix(core, rim, radial);
-    let horizon_y = center.y - radius * 0.52;
-    let bed_feather = max(radius * 0.16, 1.0);
-    let bed_fade = smoothstep(
-        horizon_y,
-        horizon_y + bed_feather,
-        input.point_position.y,
+    let bed = packed_rgb8_linear(content.payload[0].z);
+    let fleck = packed_rgb8_linear(content.payload[0].w);
+    let viewport = frame_buffer.globals.viewport_points;
+    let point_y_down = vec2<f32>(
+        input.point_position.x,
+        viewport.y - input.point_position.y,
     );
-    let bed_mix = 1.0 - bed_fade;
-    let bed = mix(rim, vec3<f32>(1.0), 0.12);
-    let straight = vec4<f32>(mix(room, bed, bed_mix * 0.65), 1.0);
+    let normalized_x = input.point_position.x / viewport.x - 0.5;
+    let horizon_y = viewport.y * (0.76 + 0.04 * normalized_x * normalized_x);
+    let bed_feather = max(viewport.y * 0.12, 1.0);
+    let bed_mix = smoothstep(horizon_y, horizon_y + bed_feather, point_y_down.y);
+
+    let point_step = max(fwidth(input.point_position), vec2<f32>(0.0001));
+    let backing_scale_xy = vec2<f32>(1.0) / point_step;
+    let backing_scale = 0.5 * (backing_scale_xy.x + backing_scale_xy.y);
+    let physical_hash_point = vec2<u32>(max(
+        floor(input.point_position * backing_scale),
+        vec2<f32>(0.0),
+    ));
+    var hash = (physical_hash_point.x * 0x9e3779b9u)
+        ^ (physical_hash_point.y * 0x85ebca6bu);
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7feb352du;
+    hash = hash ^ (hash >> 15u);
+    let dither_levels = (f32(hash & 0xffffu) / 65535.0 - 0.5) * 3.0;
+    let fleck_random = f32((hash >> 16u) & 0xffffu) / 65535.0;
+    let fleck_density = max(bed_mix - 0.35, 0.0) * 0.16;
+    let fleck_mix = select(0.0, 0.35 + 0.55 * bed_mix, fleck_random < fleck_density);
+
+    var room = mix(core, rim, radial);
+    room = mix(room, bed, bed_mix * 0.72);
+    room = mix(room, fleck, fleck_mix);
+    var room_srgb = linear_to_srgb(room);
+    room_srgb = clamp(
+        room_srgb + vec3<f32>(dither_levels / 255.0),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let straight = vec4<f32>(srgb_to_linear(room_srgb), 1.0);
     return analytic_premultiply(straight, 1.0, input.opacity, input.saturation);
 }
 
