@@ -789,7 +789,7 @@ const SCENE_PROGRESS_MAX_VISIBLE: std::time::Duration = std::time::Duration::fro
 enum SceneProgressAction {
     Continue,
     RetryReplacement,
-    Fallback,
+    TerminalFailure,
 }
 
 #[cfg(feature = "retained-renderer")]
@@ -848,12 +848,12 @@ impl SceneProgressPolicy {
         {
             return SceneProgressAction::Continue;
         }
-        SceneProgressAction::Fallback
+        SceneProgressAction::TerminalFailure
     }
 
     fn observe_terminal_failure(&mut self) -> SceneProgressAction {
         if self.retried_replacement {
-            SceneProgressAction::Fallback
+            SceneProgressAction::TerminalFailure
         } else {
             self.retried_replacement = true;
             self.deadline_started_at = None;
@@ -1663,6 +1663,11 @@ fn new_round_view(mtm: MainThreadMarker, frame: NSRect) -> Retained<RoundView> {
 }
 
 fn ui_tick() {
+    let _mtm = MainThreadMarker::new().expect("companion ui_tick on non-main thread");
+    #[cfg(feature = "retained-renderer")]
+    if !retained_tick_work_allowed() {
+        return;
+    }
     #[cfg(feature = "retained-renderer")]
     let started_at = Instant::now();
     #[cfg(feature = "retained-renderer")]
@@ -1672,16 +1677,7 @@ fn ui_tick() {
             .and_then(|state| state.retained_host.as_ref())
             .map(crate::companion::retained::ActiveRetainedHost::runtime_work_counters)
     });
-    let _mtm = MainThreadMarker::new().expect("companion ui_tick on non-main thread");
     drain_poll_results();
-    #[cfg(feature = "retained-renderer")]
-    if APP_STATE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .is_some_and(|state| !retained_work_allowed(&state.renderer_runtime))
-    }) {
-        return;
-    }
     // AppKit does not need fresh backing-store contents for a window that cannot
     // be seen. Pausing the CPU renderer here preserves the time-based motion: on
     // reveal the next tick samples the current drift/depth/bob position instead
@@ -1696,6 +1692,9 @@ fn ui_tick() {
         #[cfg(feature = "retained-renderer")]
         if let Err(error) = hide_scene_runtime() {
             handle_scene_runtime_failure(error);
+            if !retained_tick_work_allowed() {
+                return;
+            }
         }
         #[cfg(feature = "retained-renderer")]
         APP_STATE.with(|cell| {
@@ -1767,6 +1766,9 @@ fn ui_tick() {
         if let Err(error) = result {
             handle_scene_runtime_failure(error);
         }
+        if !retained_tick_work_allowed() {
+            return;
+        }
         finish_review_capture_if_due();
         record_retained_ui_tick(started_at);
         return;
@@ -1811,9 +1813,16 @@ fn ui_tick() {
         if let Err(error) = result {
             handle_scene_runtime_failure(error);
         }
+        if !retained_tick_work_allowed() {
+            return;
+        }
     }
     #[cfg(feature = "retained-renderer")]
     let presented_active_generation = present_retained_active_generation();
+    #[cfg(feature = "retained-renderer")]
+    if !retained_tick_work_allowed() {
+        return;
+    }
     #[cfg(feature = "retained-renderer")]
     match drive_retained_resource_preparation() {
         crate::companion::retained::ResourcePreparationTick::Ready
@@ -1827,12 +1836,15 @@ fn ui_tick() {
         }
         crate::companion::retained::ResourcePreparationTick::FailedWithoutActive(category) => {
             freeze_retained(category);
-            record_retained_ui_tick(started_at);
             return;
         }
     }
     animate_pet();
     prepare_current_frame_from_state();
+    #[cfg(feature = "retained-renderer")]
+    if !retained_tick_work_allowed() {
+        return;
+    }
     finish_review_capture_if_due();
     #[cfg(feature = "retained-renderer")]
     record_retained_ui_tick(started_at);
@@ -1912,6 +1924,15 @@ fn present_retained_active_generation() -> bool {
 #[cfg(feature = "retained-renderer")]
 fn retained_work_allowed(runtime: &RendererRuntimeState) -> bool {
     runtime.terminal_failure().is_none()
+}
+
+#[cfg(feature = "retained-renderer")]
+fn retained_tick_work_allowed() -> bool {
+    APP_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_none_or(|state| retained_work_allowed(&state.renderer_runtime))
+    })
 }
 
 fn companion_view_is_visible() -> bool {
@@ -2284,7 +2305,7 @@ fn service_live_scene_runtime(
             SceneProgressAction::RetryReplacement => {
                 host.retry_scene_replacement()?;
             }
-            SceneProgressAction::Fallback => {
+            SceneProgressAction::TerminalFailure => {
                 return Err(RetainedFailureCategory::PresentationStalled);
             }
         }
@@ -4564,7 +4585,7 @@ mod tests {
 
     #[cfg(feature = "retained-renderer")]
     #[test]
-    fn scene_progress_watchdog_falls_back_at_the_first_exceeded_bound() {
+    fn scene_progress_watchdog_reports_terminal_failure_at_the_first_exceeded_bound() {
         let started = Instant::now();
         let mut progress = SceneProgressPolicy::default();
         for attempt in 0..SCENE_PROGRESS_MAX_ATTEMPTS - 1 {
@@ -4576,7 +4597,7 @@ mod tests {
         }
         assert_eq!(
             progress.observe_eligible_attempt(started + Duration::from_secs(1)),
-            SceneProgressAction::Fallback,
+            SceneProgressAction::TerminalFailure,
         );
 
         let mut elapsed = SceneProgressPolicy::default();
@@ -4586,7 +4607,7 @@ mod tests {
         );
         assert_eq!(
             elapsed.observe_eligible_attempt(started + SCENE_PROGRESS_MAX_VISIBLE),
-            SceneProgressAction::Fallback,
+            SceneProgressAction::TerminalFailure,
         );
     }
 
@@ -4610,7 +4631,7 @@ mod tests {
         );
         assert_eq!(
             progress.observe_terminal_failure(),
-            SceneProgressAction::Fallback
+            SceneProgressAction::TerminalFailure
         );
         progress.reset();
         assert_eq!(
@@ -4651,7 +4672,7 @@ mod tests {
         progress.observe_replacement(Some((first, 1.0_f64.to_bits())));
         assert_eq!(
             progress.observe_terminal_failure(),
-            SceneProgressAction::Fallback
+            SceneProgressAction::TerminalFailure
         );
 
         progress.observe_replacement(Some((second, 1.0_f64.to_bits())));

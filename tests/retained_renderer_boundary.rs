@@ -867,7 +867,7 @@ fn scene_lifecycle_uses_host_epochs_common_modes_and_explicit_shutdown() {
 }
 
 #[test]
-fn active_hold_precedes_worker_service_and_no_active_records_explicit_skip() {
+fn terminal_guard_precedes_poll_drain_and_any_tick_work() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
     let text = read(&path);
     let tick_start = text.find("fn ui_tick()").expect("ui_tick exists");
@@ -877,19 +877,40 @@ fn active_hold_precedes_worker_service_and_no_active_records_explicit_skip() {
         .expect("ui_tick end marker exists");
     let tick = &tick_tail[..tick_end];
     let terminal_guard = tick
-        .find("retained_work_allowed")
+        .find("if !retained_tick_work_allowed()")
         .expect("terminal retained work guard exists");
+    let poll_drain = tick
+        .find("drain_poll_results()")
+        .expect("poll drain exists");
     let first_animation = tick.find("animate_pet()").expect("animation work exists");
-    let worker_service = tick
-        .find("drive_retained_resource_preparation()")
-        .expect("worker service is driven");
     let hold = tick
         .find("present_retained_active_generation()")
         .expect("active generation presentation exists");
+    let worker_service = tick
+        .find("drive_retained_resource_preparation()")
+        .expect("worker service is driven");
+    assert!(terminal_guard < poll_drain);
     assert!(terminal_guard < first_animation);
     assert!(terminal_guard < hold);
     assert!(terminal_guard < worker_service);
-    assert!(hold < worker_service);
+}
+
+#[test]
+fn active_hold_rechecks_terminal_health_before_worker_service() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/companion/app.rs");
+    let text = read(&path);
+    let tick = function_body_from(&text, "fn ui_tick()");
+    let hold = tick
+        .find("present_retained_active_generation()")
+        .expect("active generation presentation exists");
+    let after_hold = &tick[hold..];
+    let terminal_recheck = after_hold
+        .find("if !retained_tick_work_allowed()")
+        .expect("terminal health is rechecked after active presentation");
+    let worker_service = after_hold
+        .find("drive_retained_resource_preparation()")
+        .expect("worker service is driven");
+    assert!(terminal_recheck < worker_service);
     assert!(tick.contains("ResourcePreparationTick::YieldedWithoutActive"));
 
     let drive_start = text
