@@ -1,3 +1,4 @@
+pub(crate) mod composition;
 pub mod contract;
 pub(crate) mod input;
 #[allow(dead_code)]

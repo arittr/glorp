@@ -1,3 +1,6 @@
+use super::composition::{
+    resolve_companion_composition, CompanionComposition, CompanionCompositionInput,
+};
 use super::{
     AmbientFrameSnapshot, AmbientSemanticSnapshot, AuthoredDepthSnapshot, CompanionDayPhase,
     CompanionFrameProjection, CompanionSceneProjectionError, CompanionSceneProjectionInput,
@@ -194,6 +197,15 @@ impl CompanionSceneSnapshot {
         }
         let now = input.clock.wall_time;
         let layout = input.layout;
+        let visible_props = project_props(vm, now);
+        let composition = resolve_companion_composition(CompanionCompositionInput {
+            columns: input.grid_columns,
+            rows: input.grid_rows,
+            width_points: layout.width_points,
+            height_points: layout.height_points,
+            bottom_reserved_rows: input.motion_clearance.bottom_reserved_rows,
+            props: &visible_props,
+        });
         let room_profile = derive_room_profile(vm, now);
         let activity_pulse = derive_activity_pulse(vm, now);
         let helper_health = derive_helper_health(vm);
@@ -221,7 +233,6 @@ impl CompanionSceneSnapshot {
                 },
             )
         };
-        let visible_props = project_props(vm, now);
         let visible_tank_inhabitants = project_tank_inhabitants(vm);
         let prop_animation_states = project_prop_animation_states(vm, &visible_props, now, layout);
         let tank_animation_states =
@@ -236,6 +247,9 @@ impl CompanionSceneSnapshot {
                 options,
                 semantic_revision: super::SemanticRevision(1),
                 previous: None,
+                composition: &composition,
+                columns: input.grid_columns,
+                rows: input.grid_rows,
             },
         );
         let tank_instances = project_tank_frame_states(&tank_animation_states, input);
@@ -344,6 +358,14 @@ impl CompanionSceneSnapshot {
             crate::round::scene::current_round_motion_clearance(self.topology.glyph_grid.rows),
         )
         .with_optional_depth_override(self.frame.pet_depth_override);
+        let composition = resolve_companion_composition(CompanionCompositionInput {
+            columns: input.grid_columns,
+            rows: input.grid_rows,
+            width_points: input.layout.width_points,
+            height_points: input.layout.height_points,
+            bottom_reserved_rows: input.motion_clearance.bottom_reserved_rows,
+            props: &self.topology.visible_props,
+        });
         let motion_clock = clock.wall_time;
         let roam_motion = crate::round::motion::companion_roam_motion();
         let motion = if options.reduce_motion {
@@ -394,6 +416,9 @@ impl CompanionSceneSnapshot {
                 options,
                 semantic_revision: semantic_base,
                 previous: Some(&self.frame.prop_instances),
+                composition: &composition,
+                columns: input.grid_columns,
+                rows: input.grid_rows,
             },
         );
         frame.tank_instances = project_tank_frame_states_interpolated(
@@ -744,29 +769,6 @@ fn project_tank_animation_states(
         .collect()
 }
 
-fn resolved_prop_origin(
-    zone: PropZoneSnapshot,
-    stable_order: u8,
-    layout: super::CompanionLogicalLayout,
-) -> [f32; 2] {
-    let [x, y] = match zone {
-        PropZoneSnapshot::FloorLeft => [0.18, 0.78],
-        PropZoneSnapshot::FloorMid => [0.47, 0.78],
-        PropZoneSnapshot::FloorRight => [0.76, 0.78],
-        PropZoneSnapshot::WallLeft => [0.14, 0.48],
-        PropZoneSnapshot::WallRight => [0.82, 0.48],
-        PropZoneSnapshot::AirLeft => [0.22, 0.28],
-        PropZoneSnapshot::AirMid => [0.48, 0.25],
-        PropZoneSnapshot::AirRight => [0.74, 0.28],
-        PropZoneSnapshot::Ceiling => [0.50, 0.10],
-    };
-    let lane = f32::from(stable_order % 3) - 1.0;
-    [
-        (x + lane * 0.025) * layout.width_points,
-        y * layout.height_points,
-    ]
-}
-
 #[derive(Clone, Copy)]
 struct PropFrameProjectionContext<'a> {
     clock: super::CompanionProjectionClock,
@@ -775,6 +777,9 @@ struct PropFrameProjectionContext<'a> {
     options: CompanionPresentationOptions,
     semantic_revision: super::SemanticRevision,
     previous: Option<&'a [PropFrameSnapshot]>,
+    composition: &'a CompanionComposition,
+    columns: u16,
+    rows: u16,
 }
 
 fn project_prop_frame_states(
@@ -789,11 +794,27 @@ fn project_prop_frame_states(
         options,
         semantic_revision,
         previous,
+        composition,
+        columns,
+        rows,
     } = context;
     topology
         .iter()
         .zip(semantics)
         .map(|(topology, semantic)| {
+            let placement = composition
+                .prop_placements
+                .iter()
+                .find(|placement| placement.slot == topology.stable_order);
+            let visible = placement.is_some_and(|placement| placement.visible);
+            let origin_points = placement.map_or([0.0; 2], |placement| {
+                [
+                    f32::from(placement.anchor_cell[0]) * layout.width_points
+                        / f32::from(columns.max(1)),
+                    f32::from(placement.anchor_cell[1]) * layout.height_points
+                        / f32::from(rows.max(1)),
+                ]
+            });
             let phase = stable_period_phase(
                 clock.elapsed_ms,
                 topology.catalog_id,
@@ -880,7 +901,9 @@ fn project_prop_frame_states(
                         .unwrap_or(target_pose),
                 }
             };
-            let opacity = if asleep {
+            let opacity = if !visible {
+                0.0
+            } else if asleep {
                 0.72
             } else if matches!(
                 topology.presentation_motion,
@@ -898,7 +921,7 @@ fn project_prop_frame_states(
             };
             PropFrameSnapshot {
                 slot: topology.stable_order,
-                origin_points: resolved_prop_origin(topology.zone, topology.stable_order, layout),
+                origin_points,
                 motion_offset_points,
                 opacity,
                 transition: if options.reduce_motion {
@@ -2297,6 +2320,15 @@ mod tests {
             );
 
             let clock = CompanionProjectionClock::new(at_zero, 1_000 + index as u64 * 37);
+            let composition =
+                super::resolve_companion_composition(super::CompanionCompositionInput {
+                    columns: 44,
+                    rows: 18,
+                    width_points: 360.0,
+                    height_points: 360.0,
+                    bottom_reserved_rows: 5,
+                    props: &topology,
+                });
             let frames_1x = super::project_prop_frame_states(
                 &topology,
                 std::slice::from_ref(&initial),
@@ -2307,6 +2339,9 @@ mod tests {
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
                     previous: None,
+                    composition: &composition,
+                    columns: 44,
+                    rows: 18,
                 },
             );
             let frames_2x = super::project_prop_frame_states(
@@ -2319,6 +2354,9 @@ mod tests {
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
                     previous: None,
+                    composition: &composition,
+                    columns: 44,
+                    rows: 18,
                 },
             );
             assert_eq!(
@@ -2336,6 +2374,9 @@ mod tests {
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
                     previous: None,
+                    composition: &composition,
+                    columns: 44,
+                    rows: 18,
                 },
             );
             assert_eq!(frames_1x, replay, "nondeterministic frame for {}", spec.id);
@@ -2350,6 +2391,9 @@ mod tests {
                     options: super::CompanionPresentationOptions::STANDARD,
                     semantic_revision: SemanticRevision(7),
                     previous: Some(&frames_1x),
+                    composition: &composition,
+                    columns: 44,
+                    rows: 18,
                 },
             );
             if topology[0].presentation_motion == PropPresentationMotion::Static {
@@ -2378,6 +2422,9 @@ mod tests {
                     options: super::CompanionPresentationOptions { reduce_motion: true },
                     semantic_revision: SemanticRevision(8),
                     previous: Some(&frames_1x),
+                    composition: &composition,
+                    columns: 44,
+                    rows: 18,
                 },
             );
             match topology[0].presentation_motion {
@@ -2401,7 +2448,9 @@ mod tests {
                 topology[0].presentation_motion,
                 PropPresentationMotion::TwinkleFade { .. }
             ) {
-                let expected = if motion.twinkle_active.unwrap_or(false) {
+                let expected = if !composition.prop_placements[0].visible {
+                    0.0
+                } else if motion.twinkle_active.unwrap_or(false) {
                     1.0
                 } else {
                     0.55

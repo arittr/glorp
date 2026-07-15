@@ -228,3 +228,85 @@ fn reveal_retries_the_pre_hidden_active_delta_before_committing_latest() {
     );
     assert!(app_reveal.contains("state.scene_runtime_hidden = !revealed"));
 }
+
+#[test]
+fn retained_snapshot_keeps_fixed_prop_slots_when_composition_hides_an_accent() {
+    use glorp::game::evolution::Stage;
+    use glorp::game::habitat::HABITAT_PROP_CATALOG;
+    use glorp::game::metabolism::Mood;
+    use glorp::pet::generation::{generate_pet, Species};
+    use glorp::pet::render::{render_pet, AnimationFrame};
+    use glorp::presentation::companion_scene::{
+        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+        CompanionSceneSnapshot,
+    };
+    use glorp::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
+    use time::macros::datetime;
+
+    let mut vm = WatchViewModel::fixture_with_habitat_props();
+    vm.habitat.earned_props = HABITAT_PROP_CATALOG
+        .iter()
+        .map(|spec| EarnedHabitatPropView {
+            id: glorp::storage::state::HabitatPropId::new(spec.id),
+            earned_at: time::OffsetDateTime::UNIX_EPOCH,
+            kind: spec.kind,
+            display_priority: spec.display_priority,
+            source: glorp::storage::state::HabitatPropSource::LifetimeTokens {
+                threshold: spec.lifetime_threshold.unwrap_or(0.0),
+            },
+        })
+        .collect();
+    let rendered = render_pet(
+        &generate_pet("retained-composition-hidden-accent").with_species(Species::Fuzz),
+        Stage::S3,
+        Mood::Content,
+        AnimationFrame::default(),
+    );
+    vm.pet_render.generated_species = Species::Fuzz;
+    vm.pet_render.stage = Stage::S3;
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+    let input = CompanionSceneProjectionInput::round(
+        CompanionProjectionClock::new(datetime!(2026-07-15 12:00 UTC), 0),
+        CompanionLogicalLayout::round(260.0, 260.0),
+        44,
+        18,
+        glorp::round::scene::current_round_motion_clearance(18),
+    );
+
+    let first = CompanionSceneSnapshot::project_with_input(&vm, input).unwrap();
+    let second = CompanionSceneSnapshot::project_with_input(&vm, input).unwrap();
+    assert_eq!(first.topology.visible_props.len(), 10);
+    assert_eq!(
+        first.topology.visible_props.len(),
+        first.content.prop_animation_states.len()
+    );
+    assert_eq!(
+        first.topology.visible_props.len(),
+        first.frame.prop_instances.len()
+    );
+    assert_eq!(
+        first.topology.visible_props.len(),
+        second.topology.visible_props.len()
+    );
+    assert_eq!(
+        first.content.prop_animation_states.len(),
+        second.content.prop_animation_states.len()
+    );
+    let lowest_priority_slot = first.topology.visible_props.last().unwrap().stable_order;
+    let first_frame = first
+        .frame
+        .prop_instances
+        .iter()
+        .find(|frame| frame.slot == lowest_priority_slot)
+        .unwrap();
+    let second_frame = second
+        .frame
+        .prop_instances
+        .iter()
+        .find(|frame| frame.slot == lowest_priority_slot)
+        .unwrap();
+    assert_eq!(first_frame.opacity, 0.0);
+    assert_eq!(second_frame.opacity, 0.0);
+    assert_eq!(first_frame.origin_points, second_frame.origin_points);
+}
