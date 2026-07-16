@@ -283,11 +283,29 @@ fn companion_scene_neutral_imports_are_listed_in_the_enforced_manifest() {
 }
 
 fn neutral_dependency_violations(source: &str) -> Vec<&'static str> {
-    let normalized = normalize_boundary_text(source);
+    let tokens = normalized_neutral_dependency_tokens(source);
     FORBIDDEN_NEUTRAL_DEPENDENCIES
         .iter()
         .copied()
-        .filter(|forbidden| normalized.contains(&normalize_boundary_text(forbidden)))
+        .filter(|forbidden| {
+            let forbidden_tokens = normalized_neutral_dependency_tokens(forbidden);
+            tokens
+                .windows(forbidden_tokens.len())
+                .any(|window| window == forbidden_tokens)
+        })
+        .collect()
+}
+
+fn normalized_neutral_dependency_tokens(source: &str) -> Vec<BoundaryToken> {
+    boundary_tokens(source)
+        .into_iter()
+        .filter_map(|token| match token {
+            BoundaryToken::Ident(identifier) => {
+                Some(BoundaryToken::Ident(normalize_boundary_text(&identifier)))
+            }
+            BoundaryToken::RawIdentifier => None,
+            token => Some(token),
+        })
         .collect()
 }
 
@@ -546,6 +564,19 @@ fn neutral_dependency_scan_rejects_alias_case_and_separator_bypasses() {
         assert!(
             !neutral_dependency_violations(source).is_empty(),
             "neutral dependency bypass was accepted: {source}"
+        );
+    }
+}
+
+#[test]
+fn neutral_dependency_scan_allows_identifiers_that_only_contain_forbidden_names() {
+    for source in [
+        "fn texture_smooth_step() {}",
+        "let appkitten = habitat_fixture();",
+    ] {
+        assert!(
+            neutral_dependency_violations(source).is_empty(),
+            "neutral dependency scan rejected an unrelated identifier: {source}"
         );
     }
 }
@@ -854,7 +885,7 @@ fn gauge_value_source_regression_guard_rejects_duplicate_shipping_formulas() {
     }
     for formula in [
         "(-current_10m_tokens / PACE_SOFT_CAP_10M_TOKENS).exp()",
-        ".map(|value| (value - 1.0).clamp(0.0, 1.0))",
+        ".map(|value| value - 1.0)",
     ] {
         let owners = files
             .iter()
