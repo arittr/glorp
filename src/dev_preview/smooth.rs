@@ -155,7 +155,7 @@ pub fn smooth_depth_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBu
         PreviewScenarioBundle::from_parts(
             frame,
             PreviewScenarioKind::Smooth,
-            "Review the pet's depth-driven vertical placement in the physical tank.",
+            "Review depth placement using the Smooth typed plan; Classic text/cell captures are intentionally flat.",
             BTreeMap::from([
                 (
                     "fixture".to_string(),
@@ -163,11 +163,25 @@ pub fn smooth_depth_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBu
                 ),
                 ("depth".to_string(), json!(depth)),
                 ("plane".to_string(), Value::String(plane.to_string())),
+                (
+                    "cell_capture_geometry".to_string(),
+                    Value::String("classic-flat".to_string()),
+                ),
+                (
+                    "depth_geometry_authority".to_string(),
+                    Value::String("smooth-plan".to_string()),
+                ),
+                (
+                    "native_hud_overlap_review".to_string(),
+                    Value::String("task-7".to_string()),
+                ),
             ]),
             Some(smooth_round_metadata(DEPTH_GRID_COLS, DEPTH_GRID_ROWS)),
             vec![
-                format!("Confirm the pet reads at the {plane} plane without aperture clipping."),
-                "Confirm shallow scale remains restrained while vertical placement carries depth."
+                format!(
+                    "The Smooth typed plan is the depth-geometry authority; confirm the pet reads at the {plane} plane without aperture clipping."
+                ),
+                "Classic text/cell captures are intentionally flat; native HUD overlap is Task 7."
                     .to_string(),
             ],
         )

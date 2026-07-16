@@ -2659,8 +2659,20 @@ fn round_preview_exports_full_tank_depth_endpoints() {
         ids.iter().collect::<BTreeSet<_>>().len(),
         "round selection must not export duplicate scenario IDs"
     );
+    let artifacts = manifest["artifacts"].as_array().unwrap();
+    let artifact_ids = artifacts
+        .iter()
+        .map(|artifact| artifact["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        artifact_ids.len(),
+        artifact_ids.iter().collect::<BTreeSet<_>>().len(),
+        "round selection must not export duplicate artifact IDs"
+    );
 
     let mut translations = Vec::new();
+    let mut centers = Vec::new();
+    let mut hud_starts = Vec::new();
     let mut scales = Vec::new();
     for (id, plane, depth) in SMOOTH_DEPTH_ENDPOINTS {
         let entry = scenario(&manifest, id);
@@ -2677,9 +2689,23 @@ fn round_preview_exports_full_tank_depth_endpoints() {
         assert!(run.out.join(text_path).is_file(), "missing {text_path}");
         assert!(run.out.join(cells_path).is_file(), "missing {cells_path}");
         assert!(run.out.join(plan_path).is_file(), "missing {plan_path}");
-        assert_artifact_type(&manifest, id, "text");
-        assert_artifact_type(&manifest, &format!("{id}-cells"), "cells");
-        assert_artifact_type(&manifest, &format!("{id}-smooth-plan"), "smooth-plan");
+        for (artifact_id, artifact_type, artifact_path) in [
+            (id.to_string(), "text", text_path),
+            (format!("{id}-cells"), "cells", cells_path),
+            (format!("{id}-smooth-plan"), "smooth-plan", plan_path),
+        ] {
+            let matching = artifacts
+                .iter()
+                .filter(|artifact| artifact["id"] == artifact_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "expected exactly one {artifact_id} inventory entry"
+            );
+            assert_eq!(matching[0]["type"], artifact_type);
+            assert_eq!(matching[0]["path"], artifact_path);
+        }
 
         let plan = run.read_json(plan_path);
         assert_eq!(plan["frame_id"], id);
@@ -2693,17 +2719,69 @@ fn round_preview_exports_full_tank_depth_endpoints() {
             .iter()
             .find(|layer| layer["role"] == "pet-body")
             .unwrap();
-        translations.push(pet["transform"]["translation"]["y"].as_f64().unwrap());
+        let translation_y = pet["transform"]["translation"]["y"].as_f64().unwrap();
+        translations.push(translation_y);
+        centers.push(
+            pet["anchor"]["y"].as_f64().unwrap()
+                + pet["transform_origin"]["y"].as_f64().unwrap()
+                + translation_y,
+        );
+        hud_starts.push(
+            plan["chrome"]["hud_bounds"][0]["min"]["y"]
+                .as_f64()
+                .unwrap(),
+        );
         scales.push(pet["transform"]["scale"]["y"].as_f64().unwrap());
     }
     assert!(translations[0] < translations[1]);
     assert!(translations[1] < translations[2]);
     assert!(translations[2] - translations[0] > 7.0);
+    for (actual, expected) in centers.iter().copied().zip([4.86, 9.0, 13.14]) {
+        assert!(
+            (actual - expected).abs() < 1.0e-4,
+            "expected rendered center {expected}, got {actual}"
+        );
+    }
+    assert!(
+        centers[2] > hud_starts[2],
+        "front center {} must cross the exported HUD start {}",
+        centers[2],
+        hud_starts[2]
+    );
     for (actual, expected) in scales.into_iter().zip([0.97, 1.0, 1.035]) {
         assert!(
             (actual - expected).abs() < 1.0e-5,
             "expected {expected}, got {actual}"
         );
+    }
+
+    for (id, _, _) in SMOOTH_DEPTH_ENDPOINTS {
+        let entry = scenario(&manifest, id);
+        assert_eq!(entry["inputs"]["cell_capture_geometry"], "classic-flat");
+        assert_eq!(entry["inputs"]["depth_geometry_authority"], "smooth-plan");
+        assert_eq!(entry["inputs"]["native_hud_overlap_review"], "task-7");
+        let guidance = format!(
+            "{} {}",
+            entry["intent"].as_str().unwrap(),
+            entry["review_prompts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|prompt| prompt.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .to_lowercase();
+        for required in [
+            "classic text/cell captures are intentionally flat",
+            "smooth typed plan is the depth-geometry authority",
+            "native hud overlap is task 7",
+        ] {
+            assert!(
+                guidance.contains(required),
+                "{id} guidance missing {required:?}"
+            );
+        }
     }
 
     for selection in ["smooth", "all"] {
