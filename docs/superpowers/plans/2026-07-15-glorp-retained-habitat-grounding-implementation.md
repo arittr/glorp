@@ -361,6 +361,11 @@ git commit -m "fix(companion): inset grounded vegetation"
 
 ### Task 2: Attach foreground ceiling props by occupied cells
 
+**TDD sequencing note:** Perform Step 3's contour-contact test and observe its
+behavioral RED before Steps 1-2. Then add the occupied-offset helper and its
+focused unit coverage as part of the smallest GREEN implementation. A
+missing-symbol compiler error does not count as the RED result.
+
 **Files:**
 - Modify: `src/presentation/props.rs:22-35,394-474,565-640`
 - Modify: `src/presentation/companion_scene/composition.rs:139-215,389-487,920-957`
