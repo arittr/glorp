@@ -2108,7 +2108,7 @@ fn pack_analytic_content(value: AnalyticContentSlot) -> AnalyticContentGpuValue 
             payload[2] = pack_rgb8(bed_srgb8);
             payload[3] = pack_rgb8(fleck_srgb8);
         }
-        AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 } => {
+        AnalyticPaint::PetShadowTint { color_srgb8, opacity_u8 } => {
             payload[0] = pack_rgb8(color_srgb8);
             payload[1] = u32::from(opacity_u8);
         }
@@ -3888,7 +3888,7 @@ mod tests {
                 bed_srgb8: [7, 8, 9],
                 fleck_srgb8: [10, 11, 12],
             },
-            AnalyticPaint::PetShadowMultiply { color_srgb8: [7, 8, 9], opacity_u8: 10 },
+            AnalyticPaint::PetShadowTint { color_srgb8: [7, 8, 9], opacity_u8: 10 },
             AnalyticPaint::FloorShadowMultiplyRadial {
                 inner_srgba8: [11, 12, 13, 14],
                 outer_srgba8: [15, 16, 17, 18],

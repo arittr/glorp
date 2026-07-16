@@ -682,7 +682,7 @@ fn encode_analytic_paint(hash: &mut Fnv1a64, paint: AnalyticPaint) {
             encode_rgb(hash, bed_srgb8);
             encode_rgb(hash, fleck_srgb8);
         }
-        AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 } => {
+        AnalyticPaint::PetShadowTint { color_srgb8, opacity_u8 } => {
             hash.u8(2);
             encode_rgb(hash, color_srgb8);
             hash.u8(opacity_u8);

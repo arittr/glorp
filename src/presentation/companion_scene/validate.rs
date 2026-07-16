@@ -1263,9 +1263,13 @@ fn analytic_binding_semantics_match(
             DepthBehavior::WorldWrite,
             PrimitiveSpace::World,
         ),
-        AnalyticSemantic::WallShadow
-        | AnalyticSemantic::FloorProjection
-        | AnalyticSemantic::PropShadows => (
+        AnalyticSemantic::WallShadow => (
+            MaterialKind::UnlitAnalytic,
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveSpace::World,
+        ),
+        AnalyticSemantic::FloorProjection | AnalyticSemantic::PropShadows => (
             MaterialKind::MultiplyShadow,
             WorldBlend::Multiply,
             DepthBehavior::WorldReadOnly,
@@ -1711,7 +1715,7 @@ fn validate_analytic_paint(
         }
         (
             AnalyticSemantic::WallShadow,
-            AnalyticPaint::PetShadowMultiply { color_srgb8, opacity_u8 },
+            AnalyticPaint::PetShadowTint { color_srgb8, opacity_u8 },
         ) => {
             let _ = color_srgb8;
             opacity_u8 > 0
@@ -3128,9 +3132,13 @@ mod tests {
                 primitive.depth = DepthBehavior::WorldWrite;
                 primitive.space = PrimitiveSpace::World;
             }
-            AnalyticSemantic::WallShadow
-            | AnalyticSemantic::FloorProjection
-            | AnalyticSemantic::PropShadows => {
+            AnalyticSemantic::WallShadow => {
+                template.materials[0].kind = MaterialKind::UnlitAnalytic;
+                primitive.blend = WorldBlend::PremultipliedAlpha;
+                primitive.depth = DepthBehavior::WorldReadOnly;
+                primitive.space = PrimitiveSpace::World;
+            }
+            AnalyticSemantic::FloorProjection | AnalyticSemantic::PropShadows => {
                 template.materials[0].kind = MaterialKind::MultiplyShadow;
                 primitive.blend = WorldBlend::Multiply;
                 primitive.depth = DepthBehavior::WorldReadOnly;
@@ -3238,11 +3246,12 @@ mod tests {
 
             let alternate = match semantic {
                 AnalyticSemantic::RoomBackground => AnalyticSemantic::WallShadow,
-                AnalyticSemantic::WallShadow
-                | AnalyticSemantic::FloorProjection
-                | AnalyticSemantic::PropShadows => AnalyticSemantic::MoodAura,
-                AnalyticSemantic::MoodAura
-                | AnalyticSemantic::StatusHalo
+                AnalyticSemantic::WallShadow => AnalyticSemantic::FloorProjection,
+                AnalyticSemantic::FloorProjection | AnalyticSemantic::PropShadows => {
+                    AnalyticSemantic::MoodAura
+                }
+                AnalyticSemantic::MoodAura => AnalyticSemantic::FloorProjection,
+                AnalyticSemantic::StatusHalo
                 | AnalyticSemantic::Gauges
                 | AnalyticSemantic::Trouble
                 | AnalyticSemantic::Dim => AnalyticSemantic::WallShadow,

@@ -1368,9 +1368,9 @@ fn build_template(
     push(
         "pet.shadow.wall",
         PrimitiveKind::AnalyticShape,
-        "material.multiply-shadow",
+        "material.unlit-analytic",
         "resource.analytic-geometry",
-        WorldBlend::Multiply,
+        WorldBlend::PremultipliedAlpha,
         DepthBehavior::WorldReadOnly,
         PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id()),
         PrimitiveSpace::World,
@@ -1699,9 +1699,9 @@ fn analytic_paint(
                 fleck_srgb8: crate::presentation::companion_effects::bed_fleck_srgb8(biome),
             }
         }
-        AnalyticSemantic::WallShadow => AnalyticPaint::PetShadowMultiply {
+        AnalyticSemantic::WallShadow => AnalyticPaint::PetShadowTint {
             color_srgb8: crate::presentation::companion_effects::WALL_SHADOW_SRGB8,
-            opacity_u8: 255,
+            opacity_u8: crate::presentation::companion_effects::RETAINED_WALL_SHADOW_TINT_ALPHA_U8,
         },
         AnalyticSemantic::FloorProjection => AnalyticPaint::FloorShadowMultiplyRadial {
             inner_srgba8: {

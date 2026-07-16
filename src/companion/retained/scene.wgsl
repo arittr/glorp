@@ -1226,13 +1226,13 @@ fn fs_wall_shadow_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
     // The wall role always samples crisp atlas AA coverage. Native atlas color
-    // and pet palette roles are irrelevant; packed wall softness is reserved
-    // and deliberately not consumed by this mask slice.
+    // and pet palette roles are irrelevant; the packed tint remains readable
+    // when a dark display crushes the tank's rear wall toward black.
     let uv = glyph_uv(input, entry);
     var coverage: f32;
     if ((entry.flags & GLYPH_FLAG_COLOR) != 0u) {
         // Native color contributes alpha coverage only; sampled RGB remains
-        // irrelevant to the authored multiply paint.
+        // irrelevant to the authored shadow tint.
         coverage = textureSampleLevel(color_texture, atlas_sampler, uv, 0.0).a;
     } else {
         coverage = textureSampleLevel(coverage_texture, atlas_sampler, uv, 0.0).r;

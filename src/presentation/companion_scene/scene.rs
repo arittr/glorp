@@ -970,7 +970,7 @@ pub enum AnalyticPaint {
         bed_srgb8: [u8; 3],
         fleck_srgb8: [u8; 3],
     },
-    PetShadowMultiply {
+    PetShadowTint {
         color_srgb8: [u8; 3],
         opacity_u8: u8,
     },
@@ -4354,6 +4354,22 @@ mod tests {
                 .unwrap()
                 .kind,
             MaterialKind::UnlitAnalytic
+        );
+
+        let wall_shadow = primitive("pet.shadow.wall");
+        assert_eq!(wall_shadow.blend, WorldBlend::PremultipliedAlpha);
+        assert_eq!(wall_shadow.depth, DepthBehavior::WorldReadOnly);
+        assert_eq!(wall_shadow.space, PrimitiveSpace::World);
+        assert_eq!(
+            built
+                .template
+                .materials
+                .iter()
+                .find(|material| material.id == wall_shadow.material)
+                .unwrap()
+                .kind,
+            MaterialKind::UnlitAnalytic,
+            "the rear silhouette must source-over a visible tint instead of multiplying dark into dark",
         );
 
         let order = |alias: &str| primitive(alias).authored_order;

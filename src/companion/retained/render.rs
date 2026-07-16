@@ -107,8 +107,8 @@ pub(super) struct SceneDrawRecord {
 }
 
 /// Closed draw-to-pipeline classification for the companion scene v2 ABI.
-/// Every axis is checked because a plausible fallback can silently turn a
-/// multiply mask into ordinary color, or route private HUD geometry through a
+/// Every axis is checked because a plausible fallback can silently route a
+/// wall mask through the wrong blend, or expose private HUD geometry through a
 /// scene draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScenePipelineClass {
@@ -116,7 +116,7 @@ pub(super) enum ScenePipelineClass {
     WorldSourceOverAnalytic,
     WorldSourceOverGlyph,
     WorldMultiplyAnalytic,
-    WorldMultiplyGlyphMask,
+    WorldSourceOverGlyphMask,
     WorldAdditiveGlyph,
     /// Materialized to keep the pipeline family complete. Scene v2 authors no
     /// additive analytic primitive, so the selector never returns this class.
@@ -153,14 +153,14 @@ fn scene_pipeline_class(
     // Wall shadow is intentionally checked before ordinary analytics. Its
     // primitive kind is analytic, but its draw source is the pet glyph mask.
     if analytic_axes
-        && primitive.material_kind == 4
-        && primitive.blend == 4
+        && primitive.material_kind == 2
+        && primitive.blend == 3
         && primitive.depth == 2
         && primitive.space == 1
         && primitive.binding_index == 1
         && draw.source == PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask)
     {
-        return Some(WorldMultiplyGlyphMask);
+        return Some(WorldSourceOverGlyphMask);
     }
     if analytic_axes
         && primitive.material_kind == 4
@@ -340,10 +340,10 @@ const fn scene_pipeline_contract(class: ScenePipelineClass) -> ScenePipelineCont
             blend: Some(SceneBlendContract::Multiply),
             depth_write_enabled: Some(false),
         },
-        WorldMultiplyGlyphMask => ScenePipelineContract {
+        WorldSourceOverGlyphMask => ScenePipelineContract {
             vertex_entry: "vs_world_glyph",
             fragment_entry: "fs_wall_shadow_glyph",
-            blend: Some(SceneBlendContract::Multiply),
+            blend: Some(SceneBlendContract::SourceOver),
             depth_write_enabled: Some(false),
         },
         WorldAdditiveGlyph => ScenePipelineContract {
@@ -897,7 +897,7 @@ fn validate_planned_draw(
             ScenePipelineClass::WorldSourceOverAnalytic
                 | ScenePipelineClass::WorldSourceOverGlyph
                 | ScenePipelineClass::WorldMultiplyAnalytic
-                | ScenePipelineClass::WorldMultiplyGlyphMask
+                | ScenePipelineClass::WorldSourceOverGlyphMask
                 | ScenePipelineClass::WorldAdditiveGlyph
         ),
         SceneDrawPhase::Chrome => matches!(
@@ -2266,7 +2266,7 @@ pub(super) struct SceneBasePipelines {
     pub(super) world_source_over_analytic: wgpu::RenderPipeline,
     pub(super) world_source_over_glyph: wgpu::RenderPipeline,
     pub(super) world_multiply_analytic: wgpu::RenderPipeline,
-    pub(super) world_multiply_glyph_mask: wgpu::RenderPipeline,
+    pub(super) world_source_over_glyph_mask: wgpu::RenderPipeline,
     pub(super) world_additive_glyph: wgpu::RenderPipeline,
     pub(super) world_additive_analytic_reserved: wgpu::RenderPipeline,
     pub(super) chrome_analytic: wgpu::RenderPipeline,
@@ -2286,7 +2286,7 @@ impl SceneBasePipelines {
             ScenePipelineClass::WorldSourceOverAnalytic => &self.world_source_over_analytic,
             ScenePipelineClass::WorldSourceOverGlyph => &self.world_source_over_glyph,
             ScenePipelineClass::WorldMultiplyAnalytic => &self.world_multiply_analytic,
-            ScenePipelineClass::WorldMultiplyGlyphMask => &self.world_multiply_glyph_mask,
+            ScenePipelineClass::WorldSourceOverGlyphMask => &self.world_source_over_glyph_mask,
             ScenePipelineClass::WorldAdditiveGlyph => &self.world_additive_glyph,
             ScenePipelineClass::WorldAdditiveAnalyticReserved => {
                 &self.world_additive_analytic_reserved
@@ -2556,9 +2556,9 @@ fn create_scene_base_pipelines(
         "glorp-scene-world-multiply-analytic",
         ScenePipelineClass::WorldMultiplyAnalytic,
     );
-    let world_multiply_glyph_mask = pipeline_for_class(
-        "glorp-scene-world-multiply-glyph-mask",
-        ScenePipelineClass::WorldMultiplyGlyphMask,
+    let world_source_over_glyph_mask = pipeline_for_class(
+        "glorp-scene-world-source-over-glyph-mask",
+        ScenePipelineClass::WorldSourceOverGlyphMask,
     );
     let world_additive_glyph = pipeline_for_class(
         "glorp-scene-world-additive-glyph",
@@ -2680,7 +2680,7 @@ fn create_scene_base_pipelines(
         world_source_over_analytic,
         world_source_over_glyph,
         world_multiply_analytic,
-        world_multiply_glyph_mask,
+        world_source_over_glyph_mask,
         world_additive_glyph,
         world_additive_analytic_reserved,
         chrome_analytic,
@@ -3095,9 +3095,9 @@ fn expected_upload_phase(primitive: PrimitiveGpuValue) -> Option<SceneUploadPhas
         && primitive.instance_base == NONE_U32
         && primitive.binding_index == 1
     {
-        return (primitive.material_kind == 4
+        return (primitive.material_kind == 2
             && primitive.resource_kind == 3
-            && primitive.blend == 4
+            && primitive.blend == 3
             && primitive.depth == 2
             && primitive.space == 1)
             .then_some(SceneUploadPhase::WorldBlended);
@@ -6503,9 +6503,9 @@ mod tests {
                 WorldMultiplyAnalytic,
             ),
             (
-                pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 1),
+                pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 1),
                 pipeline_draw(PrimitiveSource::Instances(WallShadowGlyphMask)),
-                WorldMultiplyGlyphMask,
+                WorldSourceOverGlyphMask,
             ),
             (
                 pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 4),
@@ -6888,10 +6888,10 @@ mod tests {
                 Some(false),
             ),
             (
-                WorldMultiplyGlyphMask,
+                WorldSourceOverGlyphMask,
                 "vs_world_glyph",
                 "fs_wall_shadow_glyph",
-                Some(SceneBlendContract::Multiply),
+                Some(SceneBlendContract::SourceOver),
                 Some(false),
             ),
             (
@@ -7837,7 +7837,9 @@ mod tests {
         wall.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
         wall.template.primitives[0].binding =
             PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id());
-        wall.template.materials[0].kind = MaterialKind::MultiplyShadow;
+        wall.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
+        wall.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
+        wall.template.materials[0].kind = MaterialKind::UnlitAnalytic;
         wall.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         wall.template.primitives.push(body);
         let wall_candidate = super::super::compiler::compile_static_fixture_for_render_test(&wall);
@@ -10091,8 +10093,8 @@ mod tests {
                 &shared.pipelines.world_multiply_analytic,
             ),
             (
-                ScenePipelineClass::WorldMultiplyGlyphMask,
-                &shared.pipelines.world_multiply_glyph_mask,
+                ScenePipelineClass::WorldSourceOverGlyphMask,
+                &shared.pipelines.world_source_over_glyph_mask,
             ),
             (
                 ScenePipelineClass::WorldAdditiveGlyph,
@@ -11769,7 +11771,7 @@ mod tests {
                 (
                     9,
                     SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldMultiplyGlyphMask,
+                    ScenePipelineClass::WorldSourceOverGlyphMask,
                     PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
                     1,
                     9
@@ -11867,7 +11869,7 @@ mod tests {
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverAnalytic), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyph), 8);
         assert_eq!(class_count(ScenePipelineClass::WorldMultiplyAnalytic), 2);
-        assert_eq!(class_count(ScenePipelineClass::WorldMultiplyGlyphMask), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyphMask), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldAdditiveGlyph), 2);
         assert_eq!(class_count(ScenePipelineClass::ChromeAnalytic), 4);
         assert_eq!(class_count(ScenePipelineClass::SealedHudHook), 1);
@@ -11895,7 +11897,7 @@ mod tests {
             [2, 8],
         );
         assert_eq!(
-            bindings_for(ScenePipelineClass::WorldMultiplyGlyphMask),
+            bindings_for(ScenePipelineClass::WorldSourceOverGlyphMask),
             [1],
         );
         assert_eq!(bindings_for(ScenePipelineClass::WorldAdditiveGlyph), [0, 0],);
@@ -13409,9 +13411,9 @@ mod tests {
         wall.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
         wall.template.primitives[0].binding =
             PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id());
-        wall.template.primitives[0].blend = WorldBlend::Multiply;
+        wall.template.primitives[0].blend = WorldBlend::PremultipliedAlpha;
         wall.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
-        wall.template.materials[0].kind = MaterialKind::MultiplyShadow;
+        wall.template.materials[0].kind = MaterialKind::UnlitAnalytic;
         wall.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         wall.template.primitives.push(body);
         let (mut upload, atlas) = prepare(&wall);
@@ -13436,8 +13438,8 @@ mod tests {
         assert_invalid(&malformed, &atlas);
 
         let mutations: [fn(&mut PrimitiveGpuValue); 4] = [
-            |primitive| primitive.blend = 3,
-            |primitive| primitive.material_kind = 2,
+            |primitive| primitive.blend = 4,
+            |primitive| primitive.material_kind = 4,
             |primitive| primitive.depth = 1,
             |primitive| primitive.space = 2,
         ];

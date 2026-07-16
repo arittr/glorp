@@ -265,6 +265,9 @@ pub(crate) const STATUS_CALM_SRGBA: [f32; 4] = [0.36, 0.40, 0.55, 0.80];
 pub(crate) const STATUS_ACTIVE_SRGBA: [f32; 4] = [0.94, 0.65, 0.28, 0.90];
 pub(crate) const TROUBLE_SRGBA: [f32; 4] = [0.92, 0.30, 0.25, 0.95];
 pub(crate) const WALL_SHADOW_SRGB8: [u8; 3] = [118, 114, 142];
+// Retained renders this hue source-over so the rear silhouette survives
+// black-level crush on darker external displays without becoming a glow.
+pub(crate) const RETAINED_WALL_SHADOW_TINT_ALPHA_U8: u8 = 78;
 pub(crate) const MOOD_AURA_RING_ALPHA_U8: u8 = 13;
 pub(crate) const MOOD_CONTENT_SRGBA: [f32; 4] = [0.25, 0.71, 0.60, 1.0];
 pub(crate) const MOOD_HAPPY_SRGBA: [f32; 4] = [0.82, 0.45, 0.62, 1.0];

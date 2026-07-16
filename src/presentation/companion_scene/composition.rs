@@ -168,7 +168,12 @@ pub(crate) fn resolve_companion_composition(
                 [floor_hud_reserve_local[0], floor_hud_reserve_local[2]],
             )
         } else {
-            candidate_anchors(prop.zone, aperture_columns, candidate_rows)
+            candidate_anchors(
+                prop.zone,
+                prop.authored_depth,
+                aperture_columns,
+                candidate_rows,
+            )
         };
         let candidate_hud_reserve = if grounded {
             floor_hud_reserve_cells
@@ -334,7 +339,12 @@ fn grounded_candidate_anchors(
     floor_hud_columns: [i16; 2],
 ) -> Vec<CandidateAnchor> {
     let mut horizontal = grounded_side_lane_anchors(prop.zone, rows, floor_hud_columns);
-    horizontal.extend(candidate_anchors(prop.zone, columns, rows));
+    horizontal.extend(candidate_anchors(
+        prop.zone,
+        prop.authored_depth,
+        columns,
+        rows,
+    ));
     let rows = i16::try_from(rows).unwrap_or(i16::MAX);
 
     let lane = floor_lane(prop);
@@ -376,7 +386,12 @@ fn gauge_inner_radii(input: CompanionCompositionInput<'_>) -> [f32; 2] {
     ]
 }
 
-fn candidate_anchors(zone: PropZoneSnapshot, columns: u16, rows: u16) -> Vec<CandidateAnchor> {
+fn candidate_anchors(
+    zone: PropZoneSnapshot,
+    authored_depth: AuthoredDepthSnapshot,
+    columns: u16,
+    rows: u16,
+) -> Vec<CandidateAnchor> {
     let columns = i16::try_from(columns).unwrap_or(i16::MAX);
     let rows = i16::try_from(rows).unwrap_or(i16::MAX);
     let start_x = |offset| CandidateAxis::Start(offset);
@@ -434,16 +449,36 @@ fn candidate_anchors(zone: PropZoneSnapshot, columns: u16, rows: u16) -> Vec<Can
             anchor(end_x(-2), start_y(4)),
             anchor(end_x(-7), start_y(6)),
         ],
-        PropZoneSnapshot::Ceiling => vec![
-            anchor(center_x(0), start_y(4)),
-            anchor(center_x(-8), start_y(4)),
-            anchor(center_x(8), start_y(4)),
-            anchor(center_x(0), start_y(1)),
-            anchor(center_x(-8), start_y(1)),
-            anchor(center_x(8), start_y(1)),
-            anchor(start_x(3), start_y(1)),
-            anchor(end_x(-3), start_y(1)),
-        ],
+        PropZoneSnapshot::Ceiling => {
+            if authored_depth == AuthoredDepthSnapshot::Foreground {
+                vec![
+                    // Row one is authored first but normally rejected by the
+                    // gauge-safe ellipse. Row two is the highest legal contact
+                    // row on the round companion and keeps a front-layer vine
+                    // visibly attached to the tank ceiling.
+                    anchor(center_x(0), start_y(1)),
+                    anchor(center_x(-8), start_y(1)),
+                    anchor(center_x(8), start_y(1)),
+                    anchor(center_x(0), start_y(2)),
+                    anchor(center_x(-8), start_y(2)),
+                    anchor(center_x(8), start_y(2)),
+                    anchor(center_x(0), start_y(4)),
+                    anchor(center_x(-8), start_y(4)),
+                    anchor(center_x(8), start_y(4)),
+                ]
+            } else {
+                vec![
+                    anchor(center_x(0), start_y(4)),
+                    anchor(center_x(-8), start_y(4)),
+                    anchor(center_x(8), start_y(4)),
+                    anchor(center_x(0), start_y(1)),
+                    anchor(center_x(-8), start_y(1)),
+                    anchor(center_x(8), start_y(1)),
+                    anchor(start_x(3), start_y(1)),
+                    anchor(end_x(-3), start_y(1)),
+                ]
+            }
+        }
     }
 }
 
@@ -880,6 +915,45 @@ mod tests {
             placements[3].bounds_cells[3] <= 13,
             "air prop entered floor band"
         );
+    }
+
+    #[test]
+    fn foreground_ceiling_props_contact_the_top_while_background_props_stay_recessed() {
+        let foreground_vine = prop_topology(
+            crate::game::habitat::TOKEN_HANGING_VINE_25M,
+            0,
+            PropZoneSnapshot::Ceiling,
+            AuthoredDepthSnapshot::Foreground,
+        );
+        let background_lantern = prop_topology(
+            crate::game::habitat::TOKEN_LANTERN_10M,
+            0,
+            PropZoneSnapshot::Ceiling,
+            AuthoredDepthSnapshot::Background,
+        );
+
+        let lantern =
+            resolve_for(std::slice::from_ref(&background_lantern), 360.0, 360.0).prop_placements[0];
+
+        assert!(lantern.visible);
+        assert_eq!(
+            lantern.bounds_cells[1], 4,
+            "background ceiling prop left the rear wall"
+        );
+        for &(width_points, height_points) in SURFACES {
+            let vine = resolve_for(
+                std::slice::from_ref(&foreground_vine),
+                width_points,
+                height_points,
+            )
+            .prop_placements[0];
+            assert!(vine.visible, "{width_points}x{height_points}");
+            let expected_contact_row = if height_points > width_points { 4 } else { 2 };
+            assert_eq!(
+                vine.bounds_cells[1], expected_contact_row,
+                "foreground vine detached from the aperture ceiling at {width_points}x{height_points}"
+            );
+        }
     }
 
     #[test]
