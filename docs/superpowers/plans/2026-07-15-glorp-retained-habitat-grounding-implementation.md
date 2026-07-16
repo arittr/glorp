@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Grounded props retain their rear, middle, or near lane and keep at least one logical cell of inset from the point-space circular aperture. Canonical square contacts remain `15/16/17`; non-square contacts follow the actual circular floor.
+- Grounded props retain their rear, middle, or near lane, keep at least one logical cell of horizontal inset from the point-space circular side rim, and use the full vertical aperture so they contact the floor. Canonical square contacts remain `15/16/17`; non-square contacts follow the actual circular floor.
 - Grounded candidates move inward under competition and hide on exhaustion; they never expand toward the rim, change depth lanes, overlap the HUD, or lose the one-cell prop gutter.
 - The existing reeds reward becomes shared authored `Background` depth; it is not duplicated and its identity, threshold, art, animation, color, zone, and priority do not change.
 - Foreground ceiling attachment uses occupied prop cells against the full circular aperture. Empty rectangular footprint corners do not reject a valid vine, while background ceiling props remain gauge-safe and recessed.
@@ -30,7 +30,7 @@
 
 **Interfaces:**
 - Consumes: `HabitatPropSpec::pet_layer`, `FloorDepthLane`, `grounded_side_lane_anchors`, `candidate_is_safe`, and the existing full-cast composition matrix.
-- Produces: `FLOOR_APERTURE_INSET_CELLS: f32`, `aperture_radii_cells(CompanionCompositionInput) -> [f32; 2]`, `inset_aperture_radii([f32; 2], f32) -> [f32; 2]`, `aperture_floor_extent_rows(u16, f32) -> i16`, inward floor-HUD candidates, and `TOKEN_REEDS_5M` with `HabitatPetLayer::Background`.
+- Produces: `FLOOR_APERTURE_INSET_CELLS: f32`, `aperture_radii_cells(CompanionCompositionInput) -> [f32; 2]`, `grounded_aperture_radii([f32; 2], f32) -> [f32; 2]`, `aperture_floor_extent_rows(u16, f32) -> i16`, inward floor-HUD candidates, and `TOKEN_REEDS_5M` with `HabitatPetLayer::Background`.
 - Preserves: canonical square exclusive floor contacts `15`, `16`, and `17`, stable named depth lanes across surface shapes, all prop identities, and every non-floor placement rule.
 
 - [ ] **Step 1: Add a failing inward-candidate test**
@@ -105,7 +105,7 @@ fn moss_and_reeds_keep_an_inset_and_separate_floor_depths() {
             aperture_radius_points / (width_points / f32::from(COLUMNS)),
             aperture_radius_points / (height_points / f32::from(ROWS)),
         ];
-        let radii = [full_radii[0] - 1.0, full_radii[1] - 1.0];
+        let radii = [full_radii[0] - 1.0, full_radii[1]];
         let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
         let floor_extent = (center[1] + full_radii[1] + 0.5)
             .floor()
@@ -182,8 +182,8 @@ fn aperture_radii_cells(input: CompanionCompositionInput<'_>) -> [f32; 2] {
     ]
 }
 
-fn inset_aperture_radii(radii: [f32; 2], inset_cells: f32) -> [f32; 2] {
-    radii.map(|radius| (radius - inset_cells).max(0.0))
+fn grounded_aperture_radii(radii: [f32; 2], horizontal_inset_cells: f32) -> [f32; 2] {
+    [(radii[0] - horizontal_inset_cells).max(0.0), radii[1]]
 }
 
 fn aperture_floor_extent_rows(rows: u16, radius_rows: f32) -> i16 {
@@ -214,7 +214,7 @@ In `resolve_companion_composition`, derive both axes from point geometry, then a
 ```rust
 let aperture_radius_cells = aperture_radii_cells(input);
 let grounded_radius_cells =
-    inset_aperture_radii(aperture_radius_cells, FLOOR_APERTURE_INSET_CELLS);
+    grounded_aperture_radii(aperture_radius_cells, FLOOR_APERTURE_INSET_CELLS);
 let floor_extent_rows = aperture_floor_extent_rows(input.rows, aperture_radius_cells[1]);
 ```
 
@@ -260,7 +260,7 @@ let aperture_radius_points = width_points.min(height_points) / 2.0;
 let safe_radii = if placement.grounded {
     [
         aperture_radius_points / (width_points / f32::from(COLUMNS)) - 1.0,
-        aperture_radius_points / (height_points / f32::from(ROWS)) - 1.0,
+        aperture_radius_points / (height_points / f32::from(ROWS)),
     ]
 } else {
     expected_radii
@@ -328,7 +328,7 @@ In `tests/retained_scene.rs::retained_full_cast_composition_matrix`, change only
 let prop_safe_radii = if grounded {
     [
         aperture_radius as f32 / cell[0] - 1.0,
-        aperture_radius as f32 / cell[1] - 1.0,
+        aperture_radius as f32 / cell[1],
     ]
 } else {
     safe_radii
@@ -348,7 +348,7 @@ cargo test --test retained_scene retained_full_cast_composition_matrix
 cargo test --lib presentation::companion_scene::composition::tests
 ```
 
-Expected: all focused tests PASS; on square surfaces moss/reeds end on `17/15`, on tall surfaces their named lane offsets follow the circular floor, and every accepted ground footprint satisfies the point-correct inset ellipse.
+Expected: all focused tests PASS; on square surfaces moss/reeds end on `17/15`, on tall surfaces their named lane offsets follow the circular floor, and every accepted ground footprint satisfies the point-correct horizontal side inset while contacting the full vertical floor aperture.
 
 Commit:
 

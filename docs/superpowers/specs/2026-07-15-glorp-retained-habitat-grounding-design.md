@@ -49,16 +49,18 @@ retained GPU resources. Refine their contracts in four focused ways.
 ### Inset grounded horizontal lanes
 
 Grounded candidates use the point-space circular aperture projected into the
-logical cell grid, with one logical cell of visual inset. This matters on tall
-or landscape surfaces, where the circle does not occupy both full grid axes.
-They do not use the gauge's inner ellipse because the gauge intentionally opens
-across the bottom substrate. Candidate fallbacks move inward from the HUD side
-lanes rather than expanding toward the circular edge.
+logical cell grid, with one logical cell of horizontal side-rim inset. The
+vertical radius remains the full aperture so floor props contact the actual
+circular floor instead of floating upward. This matters on tall or landscape
+surfaces, where the circle does not occupy both full grid axes. They do not use
+the gauge's inner ellipse because the gauge intentionally opens across the
+bottom substrate. Candidate fallbacks move inward from the HUD side lanes
+rather than expanding toward the circular edge.
 
 - Left-side fallback positions progress toward the center.
 - Right-side fallback positions progress toward the center.
 - Middle-zone props may use either side of the floor HUD, but every candidate
-  keeps the same inset.
+  keeps the same horizontal side inset.
 - Existing rear, middle, and near lane offsets remain authoritative. On the
   canonical square 18-row grid their exclusive contacts remain `15`, `16`, and
   `17`; non-square surfaces derive equivalent contacts from the actual circular
@@ -70,9 +72,10 @@ lanes rather than expanding toward the circular edge.
   being clipped or moved to another depth lane.
 
 The visible glyph footprint, not merely its anchor, must remain inside the
-inset. Moss and reeds are acceptance fixtures across square, tall, and landscape
-surfaces. Resize keeps each prop in the same named depth lane while recomputing
-the lane's physical contact from the current circular aperture.
+horizontally inset, full-height floor aperture. Moss and reeds are acceptance
+fixtures across square, tall, and landscape surfaces. Resize keeps each prop in
+the same named depth lane while recomputing the lane's physical contact from the
+current circular aperture.
 
 ### Reeds become the rear vegetation anchor
 
@@ -138,9 +141,9 @@ while remaining quieter than the HUD, pet, props, and floor projection.
 
 Add focused failing coverage before implementation:
 
-1. Moss and reeds keep at least a one-cell visible margin inside the circular
-   floor aperture on supported square, tall, and landscape surfaces while the
-   gauge's open bottom remains usable.
+1. Moss and reeds keep at least a one-cell visible margin from the circular side
+   rim on supported square, tall, and landscape surfaces while contacting the
+   full vertical floor aperture and keeping the gauge's open bottom usable.
 2. Same-lane competition tries inward candidates and hides on exhaustion rather
    than expanding outward.
 3. Moss resolves to the near contact and reeds resolve to the rear contact,
