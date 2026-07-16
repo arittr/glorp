@@ -285,7 +285,7 @@ pub(crate) fn wall_texture_sample(
 
 pub(crate) const TANK_DEPTH_TINT_SRGB: [f32; 3] = [0.10, 0.11, 0.20];
 pub(crate) const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
-pub(crate) const TANK_WALL_AMBIENT_LIFT_SRGB: [f32; 3] = [0.025, 0.028, 0.040];
+pub(crate) const TANK_WALL_AMBIENT_LIFT_SRGB: [f32; 3] = [0.050, 0.055, 0.070];
 
 pub(crate) fn biome_background_srgb(primary_biome: &str) -> [f32; 3] {
     match primary_biome {
@@ -486,16 +486,16 @@ mod tests {
             let (day_core, day_rim) = phases[3];
             assert!(night_rim
                 .into_iter()
-                .all(|channel| (17..=32).contains(&channel)));
+                .all(|channel| (23..=39).contains(&channel)));
             assert!(night_core
                 .into_iter()
-                .all(|channel| (21..=40).contains(&channel)));
+                .all(|channel| (24..=44).contains(&channel)));
             assert!(day_rim
                 .into_iter()
-                .all(|channel| (24..=46).contains(&channel)));
+                .all(|channel| (31..=54).contains(&channel)));
             assert!(day_core
                 .into_iter()
-                .all(|channel| (25..=48).contains(&channel)));
+                .all(|channel| (28..=52).contains(&channel)));
             assert!(luma(day_rim) < luma(bed_primary_srgb8(biome)));
             assert!(
                 !day_palettes.contains(&(day_core, day_rim)),
@@ -506,11 +506,11 @@ mod tests {
 
         assert_eq!(
             tank_background_paint_srgb8("starter", 1.0),
-            ([26, 29, 42], [27, 30, 36])
+            ([30, 33, 47], [33, 37, 43])
         );
         assert_eq!(
             tank_background_paint_srgb8("starter", 0.6),
-            ([22, 24, 36], [19, 21, 26])
+            ([25, 28, 41], [25, 28, 33])
         );
     }
 
