@@ -1668,6 +1668,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "round-hud-stale-yesterday".to_string(),
             "round-hud-zero-yesterday".to_string(),
             "round-hud-over-yesterday".to_string(),
+            "round-hud-multi-rollover".to_string(),
             "round-hud-idle-pace".to_string(),
             "round-hud-burst-pace".to_string(),
             "round-active-pulse".to_string(),
@@ -3187,12 +3188,13 @@ fn dev_preview_watch_daycontext_heavy_day_evening_frame_snapshot() {
     insta::assert_snapshot!("watch_daycontext_heavy_day_evening_frame", frame);
 }
 
-const ROUND_IDS: [&str; 14] = [
+const ROUND_IDS: [&str; 15] = [
     "round-normal",
     "round-hud-missing-yesterday",
     "round-hud-stale-yesterday",
     "round-hud-zero-yesterday",
     "round-hud-over-yesterday",
+    "round-hud-multi-rollover",
     "round-hud-idle-pace",
     "round-hud-burst-pace",
     "round-active-pulse",
@@ -3254,6 +3256,7 @@ fn dev_preview_round_writes_companion_hud_artifacts() {
         "round-hud-stale-yesterday",
         "round-hud-zero-yesterday",
         "round-hud-over-yesterday",
+        "round-hud-multi-rollover",
         "round-hud-idle-pace",
         "round-hud-burst-pace",
     ];
@@ -3268,7 +3271,7 @@ fn dev_preview_round_writes_companion_hud_artifacts() {
         assert_artifact_type(&manifest, &format!("{id}-hud"), "hud");
 
         let hud = read_hud(&run, id);
-        assert_eq!(hud["schema_version"], 2);
+        assert_eq!(hud["schema_version"], 3);
         assert_eq!(hud["frame_id"], id);
         assert_eq!(hud["gap_deg"], 70.0);
         assert_eq!(hud["lanes"]["xp"]["cap"], "round");
@@ -3309,7 +3312,7 @@ fn dev_preview_hud_artifacts_cover_daily_and_pace_states() {
     assert_eq!(over["lanes"]["daily"]["fill_fraction"], 1.0);
     let expected_overfill = 842_000_000.0 / 678_000_000.0 - 1.0;
     assert!(
-        (over["lanes"]["daily"]["overfill_fraction"]
+        (over["lanes"]["daily"]["rollover_layers"][0]["fraction"]
             .as_f64()
             .unwrap()
             - expected_overfill)
@@ -3318,6 +3321,19 @@ fn dev_preview_hud_artifacts_cover_daily_and_pace_states() {
         "over-yesterday HUD lane should show only the extra fraction as bright fill"
     );
     assert_eq!(over["text"]["daily_percent"], "124% yday");
+
+    let multi = read_hud(&run, "round-hud-multi-rollover");
+    assert_eq!(multi["lanes"]["daily"]["fill_fraction"], 1.0);
+    let layers = multi["lanes"]["daily"]["rollover_layers"]
+        .as_array()
+        .expect("multi-rollover HUD layers");
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0]["rollover"], 1);
+    assert_eq!(layers[0]["fraction"], 1.0);
+    assert_eq!(layers[1]["rollover"], 2);
+    assert!((layers[1]["fraction"].as_f64().unwrap() - 0.62).abs() < 1e-9);
+    assert!(layers[1]["color"]["g"].as_f64().unwrap() > layers[0]["color"]["g"].as_f64().unwrap());
+    assert_eq!(multi["text"]["daily_percent"], "262% yday");
 
     let idle = read_hud(&run, "round-hud-idle-pace");
     assert_eq!(idle["lanes"]["pace"]["fill_fraction"], 0.0);

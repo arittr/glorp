@@ -1818,6 +1818,8 @@ fn project_analytic_content_with_biome(
                 daily_overage_srgba8: crate::presentation::companion_effects::srgba8(
                     crate::presentation::companion_effects::GAUGE_DAILY_OVERAGE_SRGBA,
                 ),
+                daily_rollover_contract_unorm8:
+                    crate::presentation::companion_effects::daily_rollover_contract_unorm8(),
             }
         } else {
             analytic_paint(semantic, mood, day_phase, biome)

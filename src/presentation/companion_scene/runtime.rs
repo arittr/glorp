@@ -803,7 +803,8 @@ pub(crate) fn validate_snapshot(
             .frame
             .gauge_fractions
             .iter()
-            .any(|value| !(0.0..=1.0).contains(value))
+            .enumerate()
+            .any(|(index, value)| *value < 0.0 || (index != 2 && *value > 1.0))
         || snapshot
             .frame
             .ambient_instances
@@ -5100,6 +5101,23 @@ mod tests {
 
         recent.frame.activity_opacity = 0.0;
         assert_eq!(validate_snapshot(&recent), Ok(()));
+    }
+
+    #[test]
+    fn daily_rollovers_allow_unbounded_private_excess_only_on_the_overage_lane() {
+        let base = snapshot();
+        let mut rollover = (*base).clone();
+        rollover.frame.gauge_fractions[2] = 1.62;
+        rollover.frame.gauge_levels[2] = GaugeLevelSnapshot::Full;
+        assert_eq!(validate_snapshot(&rollover), Ok(()));
+
+        let mut invalid_base_lane = rollover;
+        invalid_base_lane.frame.gauge_fractions[1] = 1.01;
+        invalid_base_lane.frame.gauge_levels[1] = GaugeLevelSnapshot::Full;
+        assert_eq!(
+            validate_snapshot(&invalid_base_lane),
+            Err(SnapshotRejection::InvalidValue)
+        );
     }
 
     #[test]

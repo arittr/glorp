@@ -458,7 +458,7 @@ impl CompanionSceneProjectionInput {
 }
 
 fn project_gauge_fractions(vm: &WatchViewModel) -> [f32; 4] {
-    [
+    let mut gauges = [
         if vm.progress.is_max_stage {
             1.0
         } else {
@@ -467,14 +467,20 @@ fn project_gauge_fractions(vm: &WatchViewModel) -> [f32; 4] {
         daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday) as f32,
         daily_overage_marker_fraction(vm.daily_comparison.fraction_of_yesterday) as f32,
         companion_pace_fraction(vm.rate_momentum.pulse.current_tokens) as f32,
-    ]
-    .map(|value| {
-        if value.is_finite() {
-            value.clamp(0.0, 1.0)
+    ];
+    for index in [0, 1, 3] {
+        gauges[index] = if gauges[index].is_finite() {
+            gauges[index].clamp(0.0, 1.0)
         } else {
             0.0
-        }
-    })
+        };
+    }
+    gauges[2] = if gauges[2].is_finite() {
+        gauges[2].max(0.0)
+    } else {
+        0.0
+    };
+    gauges
 }
 
 const fn companion_day_phase(phase: DayPhase) -> CompanionDayPhase {
@@ -2079,10 +2085,12 @@ mod tests {
     fn privacy_projection_quantizes_live_gauges_instead_of_serializing_exact_ratios() {
         let mut vm = fixture_with_real_pet_art();
         vm.progress.fraction = 0.432_109;
-        vm.daily_comparison.fraction_of_yesterday = Some(0.943_217);
+        vm.daily_comparison.fraction_of_yesterday = Some(2.623_217);
         vm.rate_momentum.pulse.current_tokens = 31_234_567.0;
         let exact_daily =
             super::daily_fraction_for_gauge(vm.daily_comparison.fraction_of_yesterday) as f32;
+        let exact_overage =
+            super::daily_overage_marker_fraction(vm.daily_comparison.fraction_of_yesterday) as f32;
         let exact_pace =
             super::companion_pace_fraction(vm.rate_momentum.pulse.current_tokens) as f32;
 
@@ -2097,13 +2105,7 @@ mod tests {
 
         assert_eq!(
             snapshot.frame.gauge_fractions,
-            [
-                vm.progress.fraction,
-                exact_daily,
-                super::daily_overage_marker_fraction(vm.daily_comparison.fraction_of_yesterday,)
-                    as f32,
-                exact_pace,
-            ]
+            [vm.progress.fraction, exact_daily, exact_overage, exact_pace,]
         );
         assert_eq!(
             snapshot.frame.gauge_levels,
@@ -2113,7 +2115,7 @@ mod tests {
                 .map(|value| GaugeLevelSnapshot::from_fraction(f64::from(value)))
         );
 
-        for exact in [vm.progress.fraction, exact_daily, exact_pace] {
+        for exact in [vm.progress.fraction, exact_overage, exact_pace] {
             let exact = serde_json::to_string(&exact).unwrap();
             assert!(
                 !json.contains(&exact),

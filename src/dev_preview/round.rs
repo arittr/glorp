@@ -110,6 +110,24 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
+    let mut multi_rollover = WatchViewModel::fixture_with_habitat_props();
+    set_daily_comparison(
+        &mut multi_rollover,
+        1_310_000_000.0,
+        Some(500_000_000.0),
+        crate::usage::snapshot::SnapshotState::Current,
+        None,
+    );
+    frames.push(render_round_preview_frame(
+        "round-hud-multi-rollover",
+        "Round HUD Multi Rollover",
+        &multi_rollover,
+        ctx.fixed_now,
+        52,
+        52,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
     let mut idle_pace = WatchViewModel::fixture_with_habitat_props();
     idle_pace.rate_momentum.pulse.current_tokens = 0.0;
     frames.push(render_round_preview_frame(

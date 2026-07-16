@@ -706,13 +706,20 @@ fn encode_analytic_paint(hash: &mut Fnv1a64, paint: AnalyticPaint) {
             hash.u8(ring_count);
             hash.u8(per_ring_alpha_u8);
         }
-        AnalyticPaint::PerimeterGaugeSet { xp, daily, pace, daily_overage_srgba8 } => {
+        AnalyticPaint::PerimeterGaugeSet {
+            xp,
+            daily,
+            pace,
+            daily_overage_srgba8,
+            daily_rollover_contract_unorm8,
+        } => {
             hash.u8(6);
             for lane in [xp, daily, pace] {
                 encode_rgba(hash, lane.track_srgba8);
                 encode_rgba(hash, lane.fill_srgba8);
             }
             encode_rgba(hash, daily_overage_srgba8);
+            encode_rgba(hash, daily_rollover_contract_unorm8);
         }
         AnalyticPaint::TroubleBeacon { color_srgba8 } => {
             hash.u8(7);

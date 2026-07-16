@@ -7216,6 +7216,32 @@ mod tests {
         assert!(!SCENE_SHADER_SOURCE.contains("analytic.payload[4]"));
     }
 
+    #[test]
+    fn gauge_shader_layers_completed_and_current_daily_rollovers() {
+        assert!(SCENE_SHADER_SOURCE.contains("fn daily_rollover_color("));
+        assert!(SCENE_SHADER_SOURCE.contains("packed_rgba8_unorm(content.payload[1].w)"));
+        assert!(SCENE_SHADER_SOURCE.contains("pow(rollover_contract.a, max(rollover - 1.0, 0.0))"));
+        assert!(!SCENE_SHADER_SOURCE.contains("vec3<f32>(0.86, 0.98, 0.56)"));
+        let gauge = SCENE_SHADER_SOURCE
+            .split("fn fs_gauges(")
+            .nth(1)
+            .unwrap()
+            .split("fn fs_trouble(")
+            .next()
+            .unwrap();
+        for required in [
+            "floor(daily_excess)",
+            "daily_excess - completed_rollovers",
+            "daily_rollover_color(first_rollover, rollover_contract, completed_rollovers)",
+            "completed_rollovers + 1.0",
+        ] {
+            assert!(
+                gauge.contains(required),
+                "missing gauge rollover step: {required}"
+            );
+        }
+    }
+
     fn two_weight_atlas(scalar: char) -> super::super::resources::PreparedSceneAtlas {
         two_weight_atlas_for(
             scalar,

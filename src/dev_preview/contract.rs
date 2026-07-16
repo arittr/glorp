@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 pub const CONTRACT_SCHEMA_VERSION: u32 = 1;
-pub const HUD_CONTRACT_SCHEMA_VERSION: u32 = 2;
+pub const HUD_CONTRACT_SCHEMA_VERSION: u32 = 3;
 pub const TANK_LIFE_CONTRACT_SCHEMA_VERSION: u32 = 1;
 const REDACTED_RUNTIME_ID: &str = "redacted";
 
@@ -125,13 +125,18 @@ pub struct PreviewHudLaneArtifact {
     pub track_start_deg: f64,
     pub track_sweep_deg: f64,
     pub fill_fraction: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overfill_fraction: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rollover_layers: Vec<PreviewHudRolloverLayerArtifact>,
     pub cap: String,
     pub track_color: PreviewHudColorArtifact,
     pub fill_color: PreviewHudColorArtifact,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overfill_color: Option<PreviewHudColorArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PreviewHudRolloverLayerArtifact {
+    pub rollover: u32,
+    pub fraction: f64,
+    pub color: PreviewHudColorArtifact,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -460,6 +465,8 @@ impl PreviewHudArtifact {
         let daily_ratio = vm.daily_comparison.fraction_of_yesterday;
         let daily_fraction = crate::round::hud::daily_fraction_for_gauge(daily_ratio);
         let daily_overfill_fraction = crate::round::hud::daily_overage_marker_fraction(daily_ratio);
+        let daily_rollover_layers =
+            crate::round::hud::daily_rollover_layers(daily_overfill_fraction);
         let pace_fraction =
             crate::round::hud::companion_pace_fraction(vm.rate_momentum.pulse.current_tokens);
         let text = crate::round::hud::companion_hud_text(
@@ -481,10 +488,7 @@ impl PreviewHudArtifact {
                 (
                     "daily".to_string(),
                     PreviewHudLaneArtifact::from_lane(&layout.daily, &colors.daily, daily_fraction)
-                        .with_overfill(
-                            daily_overfill_fraction,
-                            crate::round::hud::daily_overage_color(),
-                        ),
+                        .with_rollovers(&daily_rollover_layers),
                 ),
                 (
                     "pace".to_string(),
@@ -521,27 +525,25 @@ impl PreviewHudLaneArtifact {
             track_start_deg: lane.ring.track_start_deg,
             track_sweep_deg: lane.ring.track_sweep_deg,
             fill_fraction: fill_fraction.clamp(0.0, 1.0),
-            overfill_fraction: None,
+            rollover_layers: Vec::new(),
             cap: match lane.cap {
                 crate::round::hud::LineCap::Butt => "butt".to_string(),
                 crate::round::hud::LineCap::Round => "round".to_string(),
             },
             track_color: PreviewHudColorArtifact::from_round_color(colors.track),
             fill_color: PreviewHudColorArtifact::from_round_color(colors.fill),
-            overfill_color: None,
         }
     }
 
-    fn with_overfill(
-        mut self,
-        overfill_fraction: f64,
-        overfill_color: crate::round::draw::RoundColor,
-    ) -> Self {
-        let overfill_fraction = overfill_fraction.clamp(0.0, 1.0);
-        if overfill_fraction > 0.0 {
-            self.overfill_fraction = Some(overfill_fraction);
-            self.overfill_color = Some(PreviewHudColorArtifact::from_round_color(overfill_color));
-        }
+    fn with_rollovers(mut self, layers: &[crate::round::hud::DailyRolloverLayer]) -> Self {
+        self.rollover_layers = layers
+            .iter()
+            .map(|layer| PreviewHudRolloverLayerArtifact {
+                rollover: layer.rollover,
+                fraction: layer.fraction,
+                color: PreviewHudColorArtifact::from_round_color(layer.color),
+            })
+            .collect();
         self
     }
 }

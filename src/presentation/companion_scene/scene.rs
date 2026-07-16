@@ -991,6 +991,8 @@ pub enum AnalyticPaint {
         daily: GaugeLanePaint,
         pace: GaugeLanePaint,
         daily_overage_srgba8: [u8; 4],
+        /// Cap RGB plus remaining-distance factor in the fourth UNORM byte.
+        daily_rollover_contract_unorm8: [u8; 4],
     },
     TroubleBeacon {
         color_srgba8: [u8; 4],
@@ -4567,6 +4569,8 @@ mod tests {
                 daily_overage_srgba8: to_srgba8(
                     crate::presentation::companion_effects::GAUGE_DAILY_OVERAGE_SRGBA,
                 ),
+                daily_rollover_contract_unorm8:
+                    crate::presentation::companion_effects::daily_rollover_contract_unorm8(),
             }
         );
     }
@@ -4911,6 +4915,18 @@ mod tests {
         snapshot.frame.dimmed = dim > 0.0;
         snapshot.frame.dim_amount = dim;
         snapshot
+    }
+
+    #[test]
+    fn scene_generation_accepts_multiple_daily_overage_rollovers() {
+        let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
+        snapshot.frame.gauge_fractions[2] = 1.62;
+        snapshot.frame.gauge_levels[2] = super::super::GaugeLevelSnapshot::Full;
+
+        let generation = build_scene_generation(&snapshot, generation_key(72))
+            .expect("compile a 262% daily gauge scene");
+
+        assert_eq!(generation.frame().gauges[2], 1.62);
     }
 
     fn snapshot_with_private_capture_frame(

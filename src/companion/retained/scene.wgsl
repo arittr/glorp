@@ -744,6 +744,15 @@ fn packed_rgba8_linear(packed: u32) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(straight_srgb.rgb), straight_srgb.a);
 }
 
+fn packed_rgba8_unorm(packed: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(packed & 0xffu),
+        f32((packed >> 8u) & 0xffu),
+        f32((packed >> 16u) & 0xffu),
+        f32((packed >> 24u) & 0xffu),
+    ) / 255.0;
+}
+
 fn packed_rgb8_linear(packed: u32) -> vec3<f32> {
     return srgb_to_linear(vec3<f32>(
         f32(packed & 0xffu),
@@ -1086,6 +1095,18 @@ fn gauge_arc_color(
     return over_premultiplied(fill, track);
 }
 
+fn daily_rollover_color(
+    first_rollover: vec4<f32>,
+    rollover_contract: vec4<f32>,
+    rollover: f32,
+) -> vec4<f32> {
+    let cap_srgb = rollover_contract.rgb;
+    let first_srgb = linear_to_srgb(first_rollover.rgb);
+    let remaining = pow(rollover_contract.a, max(rollover - 1.0, 0.0));
+    let rollover_srgb = mix(cap_srgb, first_srgb, remaining);
+    return vec4<f32>(srgb_to_linear(rollover_srgb), first_rollover.a);
+}
+
 fn fs_gauges(
     input: SceneVertexOutput,
     content: AnalyticContentGpuValue,
@@ -1100,20 +1121,50 @@ fn fs_gauges(
     let daily = gauge_arc_color(input, content, analytic, 1u, frame_buffer.globals.gauges.y);
     let pace = gauge_arc_color(input, content, analytic, 2u, frame_buffer.globals.gauges.w);
     let daily_geometry = gauge_lane_geometry(analytic, 1u);
-    let overage_coverage = round_arc_coverage(
-        input.point_position,
-        analytic.payload[0].xy,
-        daily_geometry.x,
-        daily_geometry.y,
-        daily_geometry.z,
-        daily_geometry.w * clamp(frame_buffer.globals.gauges.z, 0.0, 1.0),
-    );
-    let overage = analytic_premultiply(
-        packed_rgba8_linear(content.payload[1].z),
-        overage_coverage,
-        input.opacity,
-        input.saturation,
-    );
+    let daily_excess = max(frame_buffer.globals.gauges.z, 0.0);
+    let completed_rollovers = floor(daily_excess);
+    let current_fraction = daily_excess - completed_rollovers;
+    let first_rollover = packed_rgba8_linear(content.payload[1].z);
+    let rollover_contract = packed_rgba8_unorm(content.payload[1].w);
+    var completed_overage = vec4<f32>(0.0);
+    if (completed_rollovers >= 1.0) {
+        let completed_coverage = round_arc_coverage(
+            input.point_position,
+            analytic.payload[0].xy,
+            daily_geometry.x,
+            daily_geometry.y,
+            daily_geometry.z,
+            daily_geometry.w,
+        );
+        completed_overage = analytic_premultiply(
+            daily_rollover_color(first_rollover, rollover_contract, completed_rollovers),
+            completed_coverage,
+            input.opacity,
+            input.saturation,
+        );
+    }
+    var current_overage = vec4<f32>(0.0);
+    if (current_fraction > 0.0) {
+        let current_coverage = round_arc_coverage(
+            input.point_position,
+            analytic.payload[0].xy,
+            daily_geometry.x,
+            daily_geometry.y,
+            daily_geometry.z,
+            daily_geometry.w * clamp(current_fraction, 0.0, 1.0),
+        );
+        current_overage = analytic_premultiply(
+            daily_rollover_color(
+                first_rollover,
+                rollover_contract,
+                completed_rollovers + 1.0,
+            ),
+            current_coverage,
+            input.opacity,
+            input.saturation,
+        );
+    }
+    let overage = over_premultiplied(current_overage, completed_overage);
     return over_premultiplied(pace, over_premultiplied(overage, over_premultiplied(daily, xp)));
 }
 

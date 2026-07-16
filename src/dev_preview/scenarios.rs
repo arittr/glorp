@@ -2196,6 +2196,7 @@ mod tests {
                 "round-hud-stale-yesterday",
                 "round-hud-zero-yesterday",
                 "round-hud-over-yesterday",
+                "round-hud-multi-rollover",
                 "round-hud-idle-pace",
                 "round-hud-burst-pace",
                 "round-active-pulse",

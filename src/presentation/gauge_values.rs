@@ -19,7 +19,7 @@ pub fn daily_fraction_for_gauge(fraction_of_yesterday: Option<f64>) -> f64 {
 pub fn daily_overage_marker_fraction(fraction_of_yesterday: Option<f64>) -> f64 {
     fraction_of_yesterday
         .filter(|value| value.is_finite() && *value > 1.0)
-        .map(|value| (value - 1.0).clamp(0.0, 1.0))
+        .map(|value| value - 1.0)
         .unwrap_or(0.0)
 }
 
@@ -73,6 +73,7 @@ mod tests {
         }
         assert!((daily_overage_marker_fraction(Some(1.07)) - 0.07).abs() < 0.001);
         assert_eq!(daily_overage_marker_fraction(Some(2.0)), 1.0);
-        assert_eq!(daily_overage_marker_fraction(Some(3.0)), 1.0);
+        assert!((daily_overage_marker_fraction(Some(2.62)) - 1.62).abs() < 0.001);
+        assert_eq!(daily_overage_marker_fraction(Some(3.0)), 2.0);
     }
 }

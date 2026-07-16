@@ -526,8 +526,8 @@ pub(crate) fn pack_companion_hud_glyphs(
     Ok(PackedCompanionHudGlyphs { slots, occupied_len })
 }
 
-pub fn daily_overage_color() -> RoundColor {
-    let value = crate::presentation::companion_effects::GAUGE_DAILY_OVERAGE_SRGBA;
+pub fn daily_rollover_color(rollover: u32) -> RoundColor {
+    let value = crate::presentation::companion_effects::daily_rollover_srgba(rollover.max(1));
     RoundColor(value[0], value[1], value[2], value[3])
 }
 
@@ -551,6 +551,43 @@ pub struct GaugeFractions {
     pub daily: f64,
     pub daily_overage: f64,
     pub pace: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DailyRolloverLayer {
+    pub rollover: u32,
+    pub fraction: f64,
+    pub color: RoundColor,
+}
+
+/// The visible rollover layers for cumulative daily excess. A full completed
+/// layer replaces all earlier full layers, so the renderer needs at most that
+/// layer plus the current partial one.
+pub fn daily_rollover_layers(excess: f64) -> Vec<DailyRolloverLayer> {
+    if !excess.is_finite() || excess <= 0.0 {
+        return Vec::new();
+    }
+
+    let completed_rollovers = excess.floor();
+    let completed_rollover = completed_rollovers as u32;
+    let mut layers = Vec::with_capacity(2);
+    if completed_rollover > 0 {
+        layers.push(DailyRolloverLayer {
+            rollover: completed_rollover,
+            fraction: 1.0,
+            color: daily_rollover_color(completed_rollover),
+        });
+    }
+    let current_fraction = excess - completed_rollovers;
+    if current_fraction > 0.0 {
+        let rollover = completed_rollover.saturating_add(1);
+        layers.push(DailyRolloverLayer {
+            rollover,
+            fraction: current_fraction,
+            color: daily_rollover_color(rollover),
+        });
+    }
+    layers
 }
 
 /// One perimeter-gauge arc to stroke: a ring, stroke width, cap, angular span, and
@@ -580,20 +617,30 @@ pub fn prepared_perimeter_gauge_arcs(
     let mut arcs = Vec::new();
     push_lane_arcs(&mut arcs, &layout.xp, &colors.xp, fractions.xp);
     push_lane_arcs(&mut arcs, &layout.daily, &colors.daily, fractions.daily);
-    if let Some((start_deg, end_deg)) =
-        daily_overage_marker_arc(&layout.daily.ring, fractions.daily_overage)
-    {
-        arcs.push(PreparedGaugeArc {
-            ring: layout.daily.ring,
-            stroke_width: layout.daily.stroke_width,
-            cap: layout.daily.cap,
-            start_deg,
-            end_deg,
-            color: daily_overage_color(),
-        });
+    for layer in daily_rollover_layers(fractions.daily_overage) {
+        push_daily_rollover_arc(&mut arcs, &layout.daily, layer.rollover, layer.fraction);
     }
     push_lane_arcs(&mut arcs, &layout.pace, &colors.pace, fractions.pace);
     arcs
+}
+
+fn push_daily_rollover_arc(
+    arcs: &mut Vec<PreparedGaugeArc>,
+    lane: &GaugeLane,
+    rollover: u32,
+    fraction: f64,
+) {
+    let Some((start_deg, end_deg)) = daily_overage_marker_arc(&lane.ring, fraction) else {
+        return;
+    };
+    arcs.push(PreparedGaugeArc {
+        ring: lane.ring,
+        stroke_width: lane.stroke_width,
+        cap: lane.cap,
+        start_deg,
+        end_deg,
+        color: daily_rollover_color(rollover),
+    });
 }
 
 /// Appends a lane's full track and, when `fraction` is positive, its fill arc.
@@ -902,12 +949,46 @@ mod tests {
         // xp track, daily track, daily fill, daily overage, pace track = 5 arcs.
         assert_eq!(overage.len(), 5);
         let marker = overage[3];
-        assert_eq!(marker.color, daily_overage_color());
+        assert_eq!(marker.color, daily_rollover_color(1));
         let expected = daily_overage_marker_arc(&layout.daily.ring, 0.25).unwrap();
         assert!((marker.start_deg - expected.0).abs() < 1e-9);
         assert!((marker.end_deg - expected.1).abs() < 1e-9);
         assert_eq!(marker.ring, layout.daily.ring);
         assert_eq!(marker.stroke_width, layout.daily.stroke_width);
+    }
+
+    #[test]
+    fn prepared_gauge_arcs_show_the_completed_and_current_rollovers_at_262_percent() {
+        let layout = perimeter_gauge_layout(180.0, 180.0, 180.0, COMPANION_GAUGE_GAP_DEG);
+        let colors = perimeter_gauge_colors();
+
+        let arcs = prepared_perimeter_gauge_arcs(
+            &layout,
+            &colors,
+            GaugeFractions {
+                xp: 0.0,
+                daily: 1.0,
+                daily_overage: 1.62,
+                pace: 0.0,
+            },
+        );
+
+        // xp track, daily track + base fill, completed rollover, current
+        // rollover, pace track.
+        assert_eq!(arcs.len(), 6);
+        let completed = arcs[3];
+        let current = arcs[4];
+        assert_eq!(completed.color, daily_rollover_color(1));
+        assert_eq!(current.color, daily_rollover_color(2));
+        assert!(
+            (completed.end_deg
+                - (layout.daily.ring.track_start_deg + layout.daily.ring.track_sweep_deg))
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (current.end_deg - growth_ring_fill_end_deg(&layout.daily.ring, 0.62)).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -1015,14 +1096,33 @@ mod tests {
     }
 
     #[test]
-    fn daily_gauge_overage_marker_tracks_extra_fraction_without_recoloring_base_lane() {
+    fn daily_gauge_rollover_colors_brighten_without_washing_out() {
         assert_eq!(daily_overage_marker_fraction(Some(0.99)), 0.0);
         assert!((daily_overage_marker_fraction(Some(1.07)) - 0.07).abs() < 0.001);
         assert!((daily_overage_marker_fraction(Some(1.25)) - 0.25).abs() < 0.001);
-        assert_eq!(daily_overage_marker_fraction(Some(2.5)), 1.0);
+        assert_eq!(daily_overage_marker_fraction(Some(2.5)), 1.5);
         assert_eq!(daily_overage_marker_fraction(None), 0.0);
         assert_eq!(daily_overage_marker_fraction(Some(f64::NAN)), 0.0);
-        assert_eq!(daily_overage_color(), RoundColor(0.72, 0.95, 0.34, 0.95));
+
+        let RoundColor(first_r, first_g, first_b, first_a) = daily_rollover_color(1);
+        let RoundColor(second_r, second_g, second_b, second_a) = daily_rollover_color(2);
+        let RoundColor(late_r, late_g, late_b, late_a) = daily_rollover_color(8);
+        assert!((first_r - 0.36).abs() < 0.001);
+        assert!((first_g - 0.60).abs() < 0.001);
+        assert!((first_b - 0.30).abs() < 0.001);
+        assert!((second_r - 0.585).abs() < 0.001);
+        assert!((second_g - 0.771).abs() < 0.001);
+        assert!((second_b - 0.417).abs() < 0.001);
+        assert!(second_r - first_r >= 0.20);
+        assert!(second_g - first_g >= 0.14);
+        assert!(second_b - first_b >= 0.10);
+        assert!(second_r + second_g + second_b > first_r + first_g + first_b);
+        assert!(late_r + late_g + late_b > second_r + second_g + second_b);
+        assert!(late_g > late_r + 0.10 && late_g > late_b + 0.10);
+        assert!(late_r < 0.86 && late_g < 0.98 && late_b < 0.56);
+        assert_eq!(first_a, 0.95);
+        assert_eq!(second_a, first_a);
+        assert_eq!(late_a, first_a);
     }
 
     #[test]

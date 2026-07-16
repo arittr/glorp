@@ -2128,12 +2128,19 @@ fn pack_analytic_content(value: AnalyticContentSlot) -> AnalyticContentGpuValue 
             payload[1] = u32::from(ring_count);
             payload[2] = u32::from(per_ring_alpha_u8);
         }
-        AnalyticPaint::PerimeterGaugeSet { xp, daily, pace, daily_overage_srgba8 } => {
+        AnalyticPaint::PerimeterGaugeSet {
+            xp,
+            daily,
+            pace,
+            daily_overage_srgba8,
+            daily_rollover_contract_unorm8,
+        } => {
             for (offset, lane) in [xp, daily, pace].into_iter().enumerate() {
                 payload[offset * 2] = pack_rgba8(lane.track_srgba8);
                 payload[offset * 2 + 1] = pack_rgba8(lane.fill_srgba8);
             }
             payload[6] = pack_rgba8(daily_overage_srgba8);
+            payload[7] = pack_rgba8(daily_rollover_contract_unorm8);
         }
         AnalyticPaint::TroubleBeacon { color_srgba8 } => {
             payload[0] = pack_rgba8(color_srgba8);
@@ -3895,6 +3902,7 @@ mod tests {
                 daily: lane(40),
                 pace: lane(48),
                 daily_overage_srgba8: [56, 57, 58, 59],
+                daily_rollover_contract_unorm8: [64, 65, 66, 67],
             },
             AnalyticPaint::TroubleBeacon { color_srgba8: [60, 61, 62, 63] },
             AnalyticPaint::DimOverlay { color_srgb8: [64, 65, 66] },
@@ -3931,7 +3939,7 @@ mod tests {
                 packed_rgba([48, 49, 50, 51]),
                 packed_rgba([52, 53, 54, 55]),
                 packed_rgba([56, 57, 58, 59]),
-                0,
+                packed_rgba([64, 65, 66, 67]),
             ],
             [packed_rgba([60, 61, 62, 63]), 0, 0, 0, 0, 0, 0, 0],
             [packed_rgb([64, 65, 66]), 0, 0, 0, 0, 0, 0, 0],

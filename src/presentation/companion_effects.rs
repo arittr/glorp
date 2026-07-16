@@ -256,11 +256,13 @@ pub(crate) fn perimeter_gauge_layout(
 
 pub(crate) const GAUGE_XP_TRACK_SRGBA: [f32; 4] = [0.71, 0.71, 0.78, 0.16];
 pub(crate) const GAUGE_XP_FILL_SRGBA: [f32; 4] = [0.61, 0.48, 0.88, 0.90];
-pub(crate) const GAUGE_DAILY_TRACK_SRGBA: [f32; 4] = [0.47, 0.63, 0.43, 0.12];
-pub(crate) const GAUGE_DAILY_FILL_SRGBA: [f32; 4] = [0.50, 0.74, 0.56, 0.76];
+pub(crate) const GAUGE_DAILY_TRACK_SRGBA: [f32; 4] = [0.22, 0.36, 0.23, 0.12];
+pub(crate) const GAUGE_DAILY_FILL_SRGBA: [f32; 4] = [0.24, 0.43, 0.24, 0.78];
 pub(crate) const GAUGE_PACE_TRACK_SRGBA: [f32; 4] = [0.96, 0.68, 0.31, 0.13];
 pub(crate) const GAUGE_PACE_FILL_SRGBA: [f32; 4] = [0.98, 0.67, 0.27, 0.86];
-pub(crate) const GAUGE_DAILY_OVERAGE_SRGBA: [f32; 4] = [0.72, 0.95, 0.34, 0.95];
+pub(crate) const GAUGE_DAILY_OVERAGE_SRGBA: [f32; 4] = [0.36, 0.60, 0.30, 0.95];
+pub(crate) const GAUGE_DAILY_ROLLOVER_CAP_SRGB: [f32; 3] = [0.86, 0.98, 0.56];
+pub(crate) const GAUGE_DAILY_ROLLOVER_REMAINING_FACTOR: f32 = 0.55;
 pub(crate) const STATUS_CALM_SRGBA: [f32; 4] = [0.36, 0.40, 0.55, 0.80];
 pub(crate) const STATUS_ACTIVE_SRGBA: [f32; 4] = [0.94, 0.65, 0.28, 0.90];
 pub(crate) const TROUBLE_SRGBA: [f32; 4] = [0.92, 0.30, 0.25, 0.95];
@@ -276,6 +278,26 @@ pub(crate) const MOOD_HUNGRY_SRGBA: [f32; 4] = [0.85, 0.62, 0.30, 1.0];
 pub(crate) const MOOD_SAD_SRGBA: [f32; 4] = [0.40, 0.50, 0.78, 1.0];
 pub(crate) const MOOD_SLEEPY_SRGBA: [f32; 4] = [0.55, 0.50, 0.80, 1.0];
 pub(crate) const MOOD_WILTED_SRGBA: [f32; 4] = [0.45, 0.40, 0.48, 1.0];
+
+pub(crate) fn daily_rollover_srgba(rollover: u32) -> [f32; 4] {
+    let remaining = GAUGE_DAILY_ROLLOVER_REMAINING_FACTOR.powf(rollover.saturating_sub(1) as f32);
+    let mut color = GAUGE_DAILY_OVERAGE_SRGBA;
+    for (channel, cap) in color[..3].iter_mut().zip(GAUGE_DAILY_ROLLOVER_CAP_SRGB) {
+        *channel = cap + (*channel - cap) * remaining;
+    }
+    color
+}
+
+/// Packed shader contract: cap RGB followed by the per-rollover amount of
+/// color distance that remains, all as unsigned normalized bytes.
+pub(crate) fn daily_rollover_contract_unorm8() -> [u8; 4] {
+    srgba8([
+        GAUGE_DAILY_ROLLOVER_CAP_SRGB[0],
+        GAUGE_DAILY_ROLLOVER_CAP_SRGB[1],
+        GAUGE_DAILY_ROLLOVER_CAP_SRGB[2],
+        GAUGE_DAILY_ROLLOVER_REMAINING_FACTOR,
+    ])
+}
 
 pub(crate) fn srgba8(color: [f32; 4]) -> [u8; 4] {
     color.map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8)

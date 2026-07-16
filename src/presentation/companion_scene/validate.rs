@@ -665,9 +665,7 @@ fn prepare_accepted_frame_delta(
         effective_camera,
     )?;
     if let Some(gauges) = delta.gauges {
-        for gauge in gauges {
-            validate_unit_interval(gauge)?;
-        }
+        validate_gauge_fractions(gauges)?;
     }
     if let Some(dim_amount) = delta.dim_amount {
         validate_unit_interval(dim_amount)?;
@@ -1741,12 +1739,19 @@ fn validate_analytic_paint(
         }
         (
             AnalyticSemantic::Gauges,
-            AnalyticPaint::PerimeterGaugeSet { xp, daily, pace, daily_overage_srgba8 },
+            AnalyticPaint::PerimeterGaugeSet {
+                xp,
+                daily,
+                pace,
+                daily_overage_srgba8,
+                daily_rollover_contract_unorm8,
+            },
         ) => {
             [xp, daily, pace]
                 .into_iter()
                 .all(|lane| rgba(lane.track_srgba8) && rgba(lane.fill_srgba8))
                 && rgba(daily_overage_srgba8)
+                && daily_rollover_contract_unorm8[3] > 0
         }
         (AnalyticSemantic::Trouble, AnalyticPaint::TroubleBeacon { color_srgba8 }) => {
             rgba(color_srgba8)
@@ -2432,12 +2437,26 @@ fn validate_frame_scalars(
     dim_amount: f32,
     lights: &[LightFrame],
 ) -> Result<(), SceneValidationError> {
-    for gauge in gauges {
-        validate_unit_interval(gauge)?;
-    }
+    validate_gauge_fractions(gauges)?;
     validate_unit_interval(dim_amount)?;
     for light in lights {
         validate_light(*light)?;
+    }
+    Ok(())
+}
+
+fn validate_gauge_fractions(gauges: [f32; 4]) -> Result<(), SceneValidationError> {
+    for (index, gauge) in gauges.into_iter().enumerate() {
+        if index == 2 {
+            if !gauge.is_finite() {
+                return Err(SceneValidationError::NonFiniteFrameValue);
+            }
+            if gauge < 0.0 {
+                return Err(SceneValidationError::InvalidFrameValue);
+            }
+        } else {
+            validate_unit_interval(gauge)?;
+        }
     }
     Ok(())
 }
@@ -3816,6 +3835,21 @@ mod tests {
         let wrapped_audit = wrapped_state.apply_frame_delta(&delta).unwrap();
         assert_eq!(prepared_audit, wrapped_audit);
         assert_eq!(prepared_state, wrapped_state);
+    }
+
+    #[test]
+    fn frame_delta_accepts_multiple_daily_overage_rollovers() {
+        let fixture = SceneFixture::valid();
+        let mut state =
+            validate_full_generation(&fixture.template, &fixture.content, &fixture.frame).unwrap();
+        let mut delta = FrameDelta::empty();
+        delta.gauges = Some([0.25, 1.0, 1.62, 0.75]);
+
+        state
+            .apply_frame_delta(&delta)
+            .expect("accept a 262% daily gauge delta");
+
+        assert_eq!(state.frame().frame().gauges[2], 1.62);
     }
 
     #[test]
