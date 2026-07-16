@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use ratatui::layout::Rect;
 
 use crate::pet::generation::Species;
-use crate::pet::render::{ART_HEIGHT, ART_WIDTH, FRAME_HEIGHT, FRAME_WIDTH};
+use crate::pet::render::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::presentation::smooth::{
-    smooth_pet_bob, transformed_smooth_bounds, validate_smooth_layer, CompanionChromeReservation,
+    transformed_smooth_bounds, validate_smooth_layer, CompanionChromeReservation,
     CompanionViewport, SmoothBlendMode, SmoothBounds, SmoothClassicFlattenCompat, SmoothClip,
     SmoothCompanionLayer, SmoothCompanionPet, SmoothCompanionPrivacyClaims,
     SmoothCompanionScenePlan, SmoothGeometryError, SmoothLayerId, SmoothLayerItem,
@@ -13,10 +13,7 @@ use crate::presentation::smooth::{
     SmoothTransform,
 };
 use crate::presentation::PetSceneModel;
-use crate::round::depth::{
-    depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError, SMOOTH_PERSPECTIVE_Y_MAX,
-    SMOOTH_PET_NEAR_SCALE,
-};
+use crate::round::depth::{depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError};
 use crate::round::layout::{
     layout_round_scene, RoundAnchorKind, RoundAperture, RoundRenderCapabilities,
 };
@@ -37,6 +34,7 @@ pub enum SmoothScenePlanError {
     MissingPetBody,
     InvalidParallaxGeometry,
     InvalidDepth(SmoothDepthError),
+    InvalidDepthPlacement(crate::round::placement::RoundDepthPlacementError),
     InvalidLayerGeometry(SmoothGeometryError),
 }
 
@@ -48,6 +46,9 @@ impl std::fmt::Display for SmoothScenePlanError {
                 f.write_str("smooth scene has invalid parallax geometry")
             }
             SmoothScenePlanError::InvalidDepth(error) => write!(f, "smooth scene depth: {error}"),
+            SmoothScenePlanError::InvalidDepthPlacement(error) => {
+                write!(f, "smooth scene depth placement: {error}")
+            }
             SmoothScenePlanError::InvalidLayerGeometry(error) => {
                 write!(f, "smooth scene layer geometry: {error:?}")
             }
@@ -64,6 +65,10 @@ impl std::error::Error for SmoothScenePlanError {}
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SmoothSceneBuildOptions {
     pub depth_override: Option<f32>,
+    /// Native callers provide the logical view extent so physical circle safety
+    /// uses the same non-square cells as drawing. Deterministic grid-only callers
+    /// leave this unset and use the established 2:1 cell geometry.
+    pub viewport_points: Option<[f32; 2]>,
 }
 
 pub fn try_build_round_smooth_scene_plan(
@@ -119,14 +124,6 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         .find(|layer| layer.role == SmoothLayerRole::PetBody)
         .ok_or(SmoothScenePlanError::MissingPetBody)?;
     let pet_body_classic_anchor = pet_body_source.anchor;
-    let smooth_base_anchor = SmoothPoint {
-        x: placement.fractional_motion_top_left.x,
-        y: placement.fractional_motion_top_left.y,
-    };
-    let pet_anchor_delta = SmoothPoint {
-        x: smooth_base_anchor.x - pet_body_classic_anchor.x,
-        y: smooth_base_anchor.y - pet_body_classic_anchor.y,
-    };
     let parallax_focus_offset = SmoothPoint {
         x: placement.fractional_motion_top_left.x - placement.fractional_motion_origin_top_left.x,
         y: placement.fractional_motion_top_left.y - placement.fractional_motion_origin_top_left.y,
@@ -144,6 +141,31 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         depth_lifecycle_scale(round_scene.lifecycle.asleep, round_scene.lifecycle.calm),
     )
     .map_err(SmoothScenePlanError::InvalidDepth)?;
+    let viewport_points = options
+        .viewport_points
+        .unwrap_or([f32::from(grid_cols), f32::from(grid_rows) * 2.0]);
+    let mut motion_projection = placement.motion_projection;
+    motion_projection.bob_offset_y_cells = crate::round::motion::round_companion_bob(elapsed_ms);
+    let depth_placement = crate::round::placement::resolve_round_depth_placement(
+        motion_projection,
+        depth,
+        crate::round::motion::RoundCompanionMotionViewport {
+            grid_columns: grid_cols,
+            grid_rows,
+            width_points: viewport_points[0],
+            height_points: viewport_points[1],
+            clearance: crate::round::scene::current_round_motion_clearance(grid_rows),
+        },
+    )
+    .map_err(SmoothScenePlanError::InvalidDepthPlacement)?;
+    let smooth_base_anchor = SmoothPoint {
+        x: depth_placement.anchor_top_left_cells.x,
+        y: depth_placement.anchor_top_left_cells.y,
+    };
+    let pet_anchor_delta = SmoothPoint {
+        x: smooth_base_anchor.x - pet_body_classic_anchor.x,
+        y: smooth_base_anchor.y - pet_body_classic_anchor.y,
+    };
     let perspective_offset = SmoothPoint { x: 0.0, y: depth.perspective_y };
 
     // The pet anchor is the particle frame's top-left and the creature art is
@@ -161,15 +183,19 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         x: pet_body_classic_anchor.x + frame_center.x,
         y: pet_body_classic_anchor.y + frame_center.y,
     };
-    // The pet's roam centre, free of idle bob and perspective. This is the point
-    // the roam envelope clamps, so the clearance promise is expressed around it.
-    let roam_center = SmoothPoint {
-        x: smooth_base_anchor.x + frame_center.x,
-        y: smooth_base_anchor.y + frame_center.y,
+    // The resolver validates bob-inclusive maximum-scale ink against the physical
+    // aperture. Its anchor already removes the bob and perspective translations
+    // applied below, so the existing transforms land on this exact final center.
+    let resolved_pet_center = SmoothPoint {
+        x: depth_placement.final_center_cells.x,
+        y: depth_placement.final_center_cells.y,
     };
-    let max_scale_clearance = max_scale_clearance_bounds(roam_center);
+    let max_scale_clearance = depth_placement.max_scale_bounds_cells;
 
-    let bob_offset = SmoothPoint { x: 0.0, y: smooth_pet_bob(elapsed_ms) };
+    let bob_offset = SmoothPoint {
+        x: 0.0,
+        y: motion_projection.bob_offset_y_cells,
+    };
     let aperture_center = SmoothPoint {
         x: f32::from(grid_cols) / 2.0,
         y: f32::from(grid_rows) / 2.0,
@@ -195,7 +221,7 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         0.25,
     ));
 
-    let pet_center_x = roam_center.x;
+    let pet_center_x = resolved_pet_center.x;
     for mut layer in layered.layers {
         match layer.motion_binding {
             SmoothLayerMotionBinding::PetAttached => {
@@ -294,10 +320,7 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         .find(|layer| layer.role == SmoothLayerRole::PetBody)
         .ok_or(SmoothScenePlanError::MissingPetBody)?;
     let classic_snap_anchor = pet_body.anchor;
-    let base_anchor = SmoothPoint {
-        x: pet_body.anchor.x + pet_body.transform.translation.x - bob_offset.x,
-        y: pet_body.anchor.y + pet_body.transform.translation.y - bob_offset.y,
-    };
+    let base_anchor = smooth_base_anchor;
     let final_anchor = SmoothPoint {
         x: pet_body.anchor.x + pet_body.transform.translation.x,
         y: pet_body.anchor.y + pet_body.transform.translation.y,
@@ -482,27 +505,6 @@ const WALL_SHADOW_MULTIPLY: crate::pet::palette::Rgb = crate::pet::palette::Rgb 
     g: crate::presentation::companion_effects::SMOOTH_WALL_SHADOW_MULTIPLY_SRGB8[1],
     b: crate::presentation::companion_effects::SMOOTH_WALL_SHADOW_MULTIPLY_SRGB8[2],
 };
-
-/// The worst case the pet can ever occupy around a roam centre: creature ink at
-/// the maximum depth scale, plus the full perspective excursion in both
-/// directions. `smooth_roam_envelope` clamps the roam centre so this stays inside
-/// the aperture, the gauges, and the HUD reserve. Clearance is reserved against
-/// the art rather than the particle frame; the frame's ambient gutter may graze
-/// the HUD reserve, over which the native HUD draws.
-fn max_scale_clearance_bounds(roam_center: SmoothPoint) -> SmoothBounds {
-    let half_w = ART_WIDTH as f32 / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    let half_h = ART_HEIGHT as f32 / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    SmoothBounds {
-        min: SmoothPoint {
-            x: roam_center.x - half_w,
-            y: roam_center.y - half_h - SMOOTH_PERSPECTIVE_Y_MAX,
-        },
-        max: SmoothPoint {
-            x: roam_center.x + half_w,
-            y: roam_center.y + half_h + SMOOTH_PERSPECTIVE_Y_MAX,
-        },
-    }
-}
 
 fn shape_bounds(shapes: &[SmoothShape]) -> SmoothBounds {
     let mut result = SmoothBounds {

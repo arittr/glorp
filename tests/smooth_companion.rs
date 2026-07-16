@@ -18,6 +18,8 @@ use time::macros::datetime;
 
 const GRID_COLS: u16 = 44;
 const GRID_ROWS: u16 = 18;
+const VIEWPORT_WIDTH_POINTS: f32 = 440.0;
+const VIEWPORT_HEIGHT_POINTS: f32 = 360.0;
 const NOW: time::OffsetDateTime = datetime!(2026-06-13 18:00 UTC);
 const PET_W: u16 = 13;
 const PET_H: u16 = 10;
@@ -491,17 +493,8 @@ fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
     vm.progress.rate_per_hour = 50_000_000.0;
     vm.breath_offset_y = 1;
     let motion = glorp::round::scene::companion_roam_motion();
-    let hud_start = GRID_ROWS
-        - glorp::round::scene::round_tank_life_geometry(GRID_COLS, GRID_ROWS).reserved_regions[0]
-            .height;
-    // The anchor is the particle frame's top-left; the creature ink is concentric
-    // inside it, so the ink center sits half a frame from the anchor. Clearance is
-    // reserved for the ink at maximum scale, not for the ambient particle gutter.
-    let frame_half_w = f32::from(PET_W) / 2.0;
-    let frame_half_h = f32::from(PET_H) / 2.0;
-    let scaled_ink_half_w = f32::from(PET_INK_W) / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    let scaled_ink_half_h = f32::from(PET_INK_H) / 2.0 * SMOOTH_PET_NEAR_SCALE;
-    let mut roam_ys = Vec::new();
+    let mut lowest_center_y = f32::INFINITY;
+    let mut highest_center_y = f32::NEG_INFINITY;
 
     for step in 0..=(motion.drift_period_secs * 2 * 20) {
         let now = NOW + time::Duration::milliseconds((step * 50) as i64);
@@ -513,43 +506,37 @@ fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
             "adding Z must not change Classic placement at {now}"
         );
 
-        let center_x = placement.fractional_motion_top_left.x + frame_half_w;
-        let center_y = placement.fractional_motion_top_left.y + frame_half_h;
-        let min_x = center_x - scaled_ink_half_w;
-        let max_x = center_x + scaled_ink_half_w;
-        let min_y = center_y - scaled_ink_half_h;
-        let max_y = center_y + scaled_ink_half_h;
-        assert!(min_x >= 0.0 && max_x <= f32::from(GRID_COLS));
+        let plan = glorp::round::smooth::try_build_round_smooth_scene_plan_with_options(
+            &vm,
+            now,
+            GRID_COLS,
+            GRID_ROWS,
+            &motion,
+            step * 50,
+            glorp::round::smooth::SmoothSceneBuildOptions {
+                viewport_points: Some([VIEWPORT_WIDTH_POINTS, VIEWPORT_HEIGHT_POINTS]),
+                ..Default::default()
+            },
+        )
+        .expect("production viewport resolves depth placement");
+        let clearance = plan.pet.max_scale_clearance;
+        let rendered_center_y = center_y(clearance);
+        lowest_center_y = lowest_center_y.min(rendered_center_y);
+        highest_center_y = highest_center_y.max(rendered_center_y);
+        let viewport = glorp::round::motion::RoundCompanionMotionViewport {
+            grid_columns: GRID_COLS,
+            grid_rows: GRID_ROWS,
+            width_points: VIEWPORT_WIDTH_POINTS,
+            height_points: VIEWPORT_HEIGHT_POINTS,
+            clearance: glorp::round::scene::current_round_motion_clearance(GRID_ROWS),
+        };
         assert!(
-            min_y >= 0.0,
-            "maximum-scale pet crossed the aperture top at {now}"
+            glorp::round::placement::bounds_inside_round_aperture_for_test(clearance, viewport,)
         );
-        assert!(
-            max_y <= f32::from(hud_start),
-            "maximum-scale pet entered the HUD reserve at {now}: max_y={max_y}"
-        );
-        roam_ys.push(placement.fractional_motion_top_left.y);
     }
 
-    // Clearance alone is satisfiable by pinning the pet against the envelope, which
-    // would silently trade the free-swimming composition for safety. Reserving
-    // against the maximum scale is only allowed to shrink the roam *slightly*.
-    let lowest = roam_ys.iter().copied().fold(f32::MAX, f32::min);
-    let highest = roam_ys.iter().copied().fold(f32::MIN, f32::max);
-    assert!(
-        highest - lowest >= 2.0,
-        "max-scale clearance crushed the vertical roam to {:.2} cells of travel",
-        highest - lowest
-    );
-    let pinned = roam_ys
-        .iter()
-        .filter(|y| (**y - lowest).abs() < 1e-3 || (**y - highest).abs() < 1e-3)
-        .count();
-    assert!(
-        pinned * 2 < roam_ys.len(),
-        "pet sat pinned against the roam envelope for {pinned}/{} of the cycle",
-        roam_ys.len()
-    );
+    assert!(lowest_center_y < f32::from(GRID_ROWS) * 0.35);
+    assert!(highest_center_y > f32::from(GRID_ROWS) * 0.65);
 }
 
 #[test]
@@ -1155,9 +1142,12 @@ fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata_and_aura() {
         plan.pet.base_anchor.x,
         pet_body.anchor.x + pet_body.transform.translation.x
     );
-    assert_eq!(
-        plan.pet.base_anchor.y,
-        pet_body.anchor.y + pet_body.transform.translation.y - plan.pet.bob_offset.y
+    let expected_base_y = pet_body.anchor.y + pet_body.transform.translation.y
+        - plan.pet.bob_offset.y
+        - plan.pet.perspective_offset.y;
+    assert!(
+        (plan.pet.base_anchor.y - expected_base_y).abs() < 1e-5,
+        "prepared anchor must precompensate bob and perspective"
     );
     assert_eq!(plan.pet.final_anchor, fractional_anchor);
     assert_eq!(plan.pet.fractional_bounds, fractional_bounds);
@@ -1313,7 +1303,10 @@ fn plan_at_depth(
         GRID_ROWS,
         &glorp::round::scene::companion_roam_motion(),
         elapsed_ms,
-        glorp::round::smooth::SmoothSceneBuildOptions { depth_override: Some(depth) },
+        glorp::round::smooth::SmoothSceneBuildOptions {
+            depth_override: Some(depth),
+            viewport_points: Some([VIEWPORT_WIDTH_POINTS, VIEWPORT_HEIGHT_POINTS]),
+        },
     )
     .expect("normal fixture builds a smooth plan")
 }
@@ -1386,17 +1379,46 @@ fn depth_transform_maps_far_neutral_and_near_onto_scale_and_perspective() {
         }
     }
 
-    // The perspective translation moves the body and the cue by exactly the same
-    // amount. The wall shadow adds its own depth-driven detachment on top, so it
-    // is covered by the wall-distance test instead.
+    // The shared placement moves the anchor across the tank, then the existing
+    // perspective translation is still applied exactly once. The wall shadow adds
+    // its own depth-driven detachment on top and is covered separately.
     for role in [SmoothLayerRole::PetBody, SmoothLayerRole::PerformanceCue] {
         let step = near.layer_by_role(role).unwrap().transform.translation.y
             - neutral.layer_by_role(role).unwrap().transform.translation.y;
+        let anchor_step = near.pet.base_anchor.y - neutral.pet.base_anchor.y;
         assert!(
-            (step - SMOOTH_PERSPECTIVE_Y_MAX).abs() < 1e-5,
-            "{role:?} moved {step} for a near depth step, expected {SMOOTH_PERSPECTIVE_Y_MAX}"
+            (step - anchor_step - SMOOTH_PERSPECTIVE_Y_MAX).abs() < 1e-5,
+            "{role:?} applied the perspective offset more than once"
         );
     }
+}
+
+fn depth_center_without_bob(plan: &glorp::presentation::smooth::SmoothCompanionScenePlan) -> f32 {
+    // Depth placement is defined around the centered 13x10 particle frame. The
+    // fixture's sparse pet glyph bounds are intentionally smaller and asymmetric,
+    // so their bounding-box center is not the renderer-neutral pet center.
+    plan.pet.final_anchor.y + f32::from(PET_H) / 2.0 - plan.pet.bob_offset.y
+}
+
+#[test]
+fn depth_transform_reaches_the_full_rear_and_front_visual_envelope() {
+    let vm = normal_lifecycle_fixture();
+    let far = plan_at_depth(&vm, 0, -1.0);
+    let neutral = plan_at_depth(&vm, 0, 0.0);
+    let near = plan_at_depth(&vm, 0, 1.0);
+
+    let fractions = [
+        depth_center_without_bob(&far) / f32::from(GRID_ROWS),
+        depth_center_without_bob(&neutral) / f32::from(GRID_ROWS),
+        depth_center_without_bob(&near) / f32::from(GRID_ROWS),
+    ];
+    for (actual, expected) in fractions.into_iter().zip([0.27, 0.50, 0.73]) {
+        assert!(
+            (actual - expected).abs() < 0.015,
+            "expected {expected}, got {actual}"
+        );
+    }
+    assert!(depth_center_without_bob(&near) > f32::from(GRID_ROWS) / 2.0);
 }
 
 #[test]
@@ -1414,6 +1436,10 @@ fn awake_calm_depth_reaches_the_same_tank_endpoints_as_active() {
         assert_eq!(
             calm_plan.pet.perspective_offset,
             active_plan.pet.perspective_offset
+        );
+        assert!(
+            (depth_center_without_bob(&calm_plan) - depth_center_without_bob(&active_plan)).abs()
+                < 1.0e-4
         );
     }
 
@@ -1512,9 +1538,10 @@ fn depth_transform_keeps_idle_bob_on_the_pet_body_alone() {
         SmoothLayerRole::PerformanceCue,
         SmoothLayerRole::FloorProjection,
     ] {
-        assert_eq!(
-            early.layer_by_role(role).unwrap().transform.translation.y,
-            late.layer_by_role(role).unwrap().transform.translation.y,
+        let early_y = early.layer_by_role(role).unwrap().transform.translation.y;
+        let late_y = late.layer_by_role(role).unwrap().transform.translation.y;
+        assert!(
+            (early_y - late_y).abs() < 1e-5,
             "{role:?} must not inherit the pet's idle bob"
         );
     }
@@ -1665,46 +1692,50 @@ fn floor_projection_is_one_bed_anchored_ellipse_that_tracks_depth() {
 }
 
 #[test]
-fn composed_plan_publishes_max_scale_clearance_inside_the_protected_regions() {
+fn composed_plan_publishes_max_scale_clearance_inside_the_aperture() {
     let vm = normal_lifecycle_fixture();
-    let hud_start = GRID_ROWS
-        - glorp::round::scene::round_tank_life_geometry(GRID_COLS, GRID_ROWS).reserved_regions[0]
-            .height;
 
     for step in 0..240 {
         let now = DEPTH_NOW + time::Duration::milliseconds((step * 250) as i64);
-        let plan = glorp::round::smooth::try_build_round_smooth_scene_plan(
+        let plan = glorp::round::smooth::try_build_round_smooth_scene_plan_with_options(
             &vm,
             now,
             GRID_COLS,
             GRID_ROWS,
             &glorp::round::scene::companion_roam_motion(),
             (step * 250) as u64,
+            glorp::round::smooth::SmoothSceneBuildOptions {
+                viewport_points: Some([VIEWPORT_WIDTH_POINTS, VIEWPORT_HEIGHT_POINTS]),
+                ..Default::default()
+            },
         )
         .expect("plan builds across the roam cycle");
 
         let clearance = plan.pet.max_scale_clearance;
+        let viewport = glorp::round::motion::RoundCompanionMotionViewport {
+            grid_columns: GRID_COLS,
+            grid_rows: GRID_ROWS,
+            width_points: VIEWPORT_WIDTH_POINTS,
+            height_points: VIEWPORT_HEIGHT_POINTS,
+            clearance: glorp::round::scene::current_round_motion_clearance(GRID_ROWS),
+        };
         assert!(
-            clearance.min.x >= -1e-4 && clearance.max.x <= f32::from(GRID_COLS) + 1e-4,
-            "max-scale clearance left the aperture at {now}: {clearance:?}"
-        );
-        assert!(
-            clearance.min.y >= -1e-4,
-            "max-scale clearance rose above the aperture at {now}: {clearance:?}"
-        );
-        assert!(
-            clearance.max.y <= f32::from(hud_start) + 1e-4,
-            "max-scale clearance entered the HUD reserve at {now}: {clearance:?}"
+            glorp::round::placement::bounds_inside_round_aperture_for_test(clearance, viewport,)
         );
 
-        // The clearance is the promise the roam envelope makes: the creature ink at
-        // maximum scale, plus the full perspective excursion in both directions.
+        // Clearance is bob-inclusive maximum-scale creature ink at the validated
+        // rendered center; perspective is pre-accounted in the prepared anchor.
         let expected_w = f32::from(PET_INK_W) * SMOOTH_PET_NEAR_SCALE;
-        let expected_h =
-            f32::from(PET_INK_H) * SMOOTH_PET_NEAR_SCALE + 2.0 * SMOOTH_PERSPECTIVE_Y_MAX;
+        let expected_h = f32::from(PET_INK_H) * SMOOTH_PET_NEAR_SCALE;
         assert!((clearance.max.x - clearance.min.x - expected_w).abs() < 1e-3);
         assert!((clearance.max.y - clearance.min.y - expected_h).abs() < 1e-3);
     }
+
+    let near = plan_at_depth(&vm, 0, 1.0);
+    let hud_start = GRID_ROWS
+        - glorp::round::scene::round_tank_life_geometry(GRID_COLS, GRID_ROWS).reserved_regions[0]
+            .height;
+    assert!(near.pet.max_scale_clearance.max.y > f32::from(hud_start));
 }
 
 #[test]
@@ -1717,7 +1748,10 @@ fn composed_plan_rejects_a_nonfinite_depth_override_without_blaming_parallax() {
         GRID_ROWS,
         &glorp::round::scene::companion_roam_motion(),
         250,
-        glorp::round::smooth::SmoothSceneBuildOptions { depth_override: Some(f32::NAN) },
+        glorp::round::smooth::SmoothSceneBuildOptions {
+            depth_override: Some(f32::NAN),
+            viewport_points: Some([VIEWPORT_WIDTH_POINTS, VIEWPORT_HEIGHT_POINTS]),
+        },
     )
     .expect_err("a nonfinite depth override must not reach the renderer");
 

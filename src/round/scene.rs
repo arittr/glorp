@@ -42,6 +42,7 @@ pub struct SmoothPetAnchor {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompanionPetPlacement {
+    pub(crate) motion_projection: RoundCompanionMotionProjection,
     pub fractional_motion_top_left: SmoothPetAnchor,
     pub fractional_motion_origin_top_left: SmoothPetAnchor,
     pub fractional_top_left: SmoothPetAnchor,
@@ -189,6 +190,7 @@ fn placement_from_projection(
     let classic_x = projection.classic_top_left_cells[0];
     let classic_y = projection.classic_top_left_cells[1];
     CompanionPetPlacement {
+        motion_projection: projection,
         fractional_motion_top_left: SmoothPetAnchor { x, y },
         fractional_motion_origin_top_left: SmoothPetAnchor {
             x: projection.motion_origin_top_left_cells.x,

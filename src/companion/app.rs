@@ -506,7 +506,13 @@ fn prepare_companion_frame_at(
                 metrics.grid_rows,
                 &companion_motion(),
                 elapsed_ms,
-                crate::round::smooth::SmoothSceneBuildOptions { depth_override },
+                crate::round::smooth::SmoothSceneBuildOptions {
+                    depth_override,
+                    viewport_points: Some([
+                        prepared_bounds.width_f64 as f32,
+                        prepared_bounds.height_f64 as f32,
+                    ]),
+                },
             )
             .map_err(|err| match err {
                 SmoothScenePlanError::MissingPetBody => {
@@ -516,6 +522,9 @@ fn prepare_companion_frame_at(
                     CompanionFramePreparationError::SmoothInvalidParallaxGeometry
                 }
                 SmoothScenePlanError::InvalidDepth(_) => {
+                    CompanionFramePreparationError::SmoothInvalidDepth
+                }
+                SmoothScenePlanError::InvalidDepthPlacement(_) => {
                     CompanionFramePreparationError::SmoothInvalidDepth
                 }
                 SmoothScenePlanError::InvalidLayerGeometry(_) => {

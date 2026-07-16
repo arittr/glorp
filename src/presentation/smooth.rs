@@ -612,9 +612,9 @@ pub struct SmoothCompanionPet {
     pub perspective_offset: SmoothPoint,
     /// The pet body's bounds after scale, perspective, and idle bob.
     pub transformed_bounds: SmoothBounds,
-    /// The creature ink at maximum depth scale plus the full perspective
-    /// excursion in both directions. The roam envelope keeps this inside the
-    /// aperture, the gauges, and the HUD reserve at every point of the cycle.
+    /// Bob-inclusive creature ink at maximum depth scale, centered on the final
+    /// resolved placement. It stays inside the physical aperture and may overlap
+    /// front-glass HUD bounds.
     pub max_scale_clearance: SmoothBounds,
 }
 
