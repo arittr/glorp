@@ -75,6 +75,10 @@ pub struct RoundCompanionMotionProjection {
     pub motion_top_left_cells: MotionPoint,
     pub motion_origin_top_left_cells: MotionPoint,
     pub motion_top_left_points: [f32; 2],
+    /// Energy-scaled planar displacement before the non-Classic placement resolver.
+    /// Classic and parallax keep their existing clamped fields; tank depth uses this
+    /// value so the HUD reservation cannot erase local Y motion.
+    pub planar_offset_cells: MotionPoint,
     pub classic_top_left_cells: [u16; 2],
     pub normalized_depth: f32,
     pub facing: i8,
@@ -223,6 +227,7 @@ pub(crate) fn project_round_companion_motion_from_offsets(
             motion_top_left.x * point_scale_x,
             motion_top_left.y * point_scale_y,
         ],
+        planar_offset_cells: MotionPoint { x: offset_x, y: offset_y },
         classic_top_left_cells: [classic_x, classic_y],
         normalized_depth,
         facing: normalize_facing(facing),

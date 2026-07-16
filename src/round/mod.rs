@@ -6,6 +6,7 @@ pub mod model;
 pub mod motion;
 pub mod parallax;
 pub mod pixel_fit;
+pub mod placement;
 #[cfg(feature = "dev-preview")]
 pub mod preview;
 pub mod scene;
