@@ -36,15 +36,59 @@ fn draw_scene_consumes_only_the_last_prepared_frame() {
 }
 
 #[test]
-fn appkit_front_glass_hud_is_painted_after_the_renderer_payload() {
-    let source = std::fs::read_to_string("src/companion/app.rs").unwrap();
-    let paint_start = source.find("fn paint_prepared_frame(").unwrap();
-    let paint = &source[paint_start..];
-    let renderer = paint.find("match &frame.renderer").unwrap();
-    let hud_plane = paint.find("match frame.hud_plane").unwrap();
-    let dim = paint.find("if dim_overlay").unwrap();
-    assert!(renderer < hud_plane);
-    assert!(hud_plane < dim);
+fn appkit_front_glass_hud_follows_renderer_gauges_and_status_before_dim() {
+    let paint = source_between(
+        APP_SOURCE,
+        "\nfn paint_prepared_frame(",
+        "\n/// Paints the frozen prepared frame",
+    );
+    let stages = [
+        (
+            "renderer payload",
+            paint
+                .find("match &frame.renderer")
+                .expect("paint_prepared_frame must paint the renderer payload"),
+        ),
+        (
+            "perimeter gauge preparation",
+            paint
+                .find("let arcs = prepared_perimeter_gauge_arcs(")
+                .expect("paint_prepared_frame must prepare perimeter gauges"),
+        ),
+        (
+            "perimeter gauge draw",
+            paint
+                .find("draw_prepared_gauge_arc(arc);")
+                .expect("paint_prepared_frame must draw perimeter gauges"),
+        ),
+        (
+            "status/trouble command loop",
+            paint
+                .find("RoundDrawKind::Halo | RoundDrawKind::Trouble")
+                .expect("paint_prepared_frame must draw status/trouble commands"),
+        ),
+        (
+            "front-glass HUD",
+            paint
+                .find("match frame.hud_plane")
+                .expect("paint_prepared_frame must interpret the HUD depth plane"),
+        ),
+        (
+            "dim overlay",
+            paint
+                .find("if dim_overlay")
+                .expect("paint_prepared_frame must apply the dim overlay"),
+        ),
+    ];
+
+    for pair in stages.windows(2) {
+        let (before_name, before_index) = pair[0];
+        let (after_name, after_index) = pair[1];
+        assert!(
+            before_index < after_index,
+            "{before_name} must be painted before {after_name}"
+        );
+    }
 }
 
 #[test]
