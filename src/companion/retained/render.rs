@@ -9033,6 +9033,59 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn assert_wall_shadow_tint_readback(
+        shadowed: &SceneRenderOutcome,
+        unshadowed: &SceneRenderOutcome,
+        authored_max_alpha: f32,
+    ) {
+        let tint_linear = crate::presentation::companion_effects::WALL_SHADOW_SRGB8
+            .map(|channel| scene_srgb_to_linear(f32::from(channel) / 255.0));
+        let strongest = shadowed
+            .rgba
+            .chunks_exact(4)
+            .zip(unshadowed.rgba.chunks_exact(4))
+            .filter(|(_, room)| room[3] == 255 && room[..3].iter().all(|channel| *channel <= 64))
+            .map(|(shadow, room)| {
+                let shadow_linear: [f32; 3] = std::array::from_fn(|channel| {
+                    scene_srgb_to_linear(f32::from(shadow[channel]) / 255.0)
+                });
+                let room_linear: [f32; 3] = std::array::from_fn(|channel| {
+                    scene_srgb_to_linear(f32::from(room[channel]) / 255.0)
+                });
+                let delta: [f32; 3] =
+                    std::array::from_fn(|channel| shadow_linear[channel] - room_linear[channel]);
+                let score = delta.iter().copied().sum::<f32>();
+                (score, delta, room_linear, shadow, room)
+            })
+            .max_by(|left, right| left.0.total_cmp(&right.0))
+            .expect("the production scene includes opaque dark rear-wall pixels");
+
+        let (score, delta, room_linear, shadow, room) = strongest;
+        assert!(
+            score > 0.01 && delta.iter().all(|channel| *channel > 0.0),
+            "the rear silhouette must lift dark wall pixels: shadow={shadow:?}, room={room:?}, delta={delta:?}",
+        );
+        assert!(
+            delta[2] > delta[0] && delta[2] > delta[1],
+            "the visible lift must retain the authored violet bias: shadow={shadow:?}, room={room:?}, delta={delta:?}",
+        );
+
+        let observed_alpha = delta
+            .iter()
+            .enumerate()
+            .map(|(channel, delta)| {
+                delta / (tint_linear[channel] - room_linear[channel]).max(f32::EPSILON)
+            })
+            .sum::<f32>()
+            / 3.0;
+        assert!(
+            observed_alpha >= authored_max_alpha * 0.75
+                && observed_alpha <= authored_max_alpha + 0.03,
+            "rear tint must be visible but restrained by authored opacity: observed={observed_alpha}, authored_max={authored_max_alpha}, shadow={shadow:?}, room={room:?}",
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     fn retained_full_cast_snapshot() -> crate::presentation::companion_scene::CompanionSceneSnapshot
     {
         use crate::presentation::companion_scene::{
@@ -11608,6 +11661,124 @@ mod tests {
                 timeout: None,
             })
             .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rear_wall_tint_lifts_dark_pixels_with_depth_bounded_alpha() {
+        use crate::pet::generation::Species;
+        use crate::presentation::companion_scene::{
+            scene::NodeId, AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration,
+            SceneGenerationKey, PET_LATTICE_HEIGHT,
+        };
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let mut snapshot = super::super::compiler::projected_full_scene_snapshot_for_render_test(0);
+        snapshot.content.pet_lines =
+            vec!["             ".to_owned(); usize::from(PET_LATTICE_HEIGHT)];
+        snapshot.content.pet_lines[5] = "      ▓      ".to_owned();
+        snapshot.content.pet_roles.clear();
+        let generation_key = SceneGenerationKey {
+            device: DeviceEpoch(141),
+            layout: LayoutGeneration(142),
+            resources: ResourceGeneration(143),
+        };
+        let revisions = AppliedRevisions::new(30, 31);
+        let cpu = compile_retained_full_cast_snapshot(snapshot, generation_key, revisions);
+        const EXPECTED_TINT_ALPHA_U8: u8 = 78;
+        assert_eq!(
+            crate::presentation::companion_effects::RETAINED_WALL_SHADOW_TINT_ALPHA_U8,
+            EXPECTED_TINT_ALPHA_U8,
+            "the dark-display tint contract must not drift with its test oracle",
+        );
+        let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+            CompanionContentIdentity::for_pet(Species::Fuzz),
+            2.0,
+        );
+        let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+            .expect("controlled wall-shadow repertoire compiles");
+        let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+            resources.atlas(),
+            generation_key.resources,
+        )
+        .expect("controlled wall-shadow atlas prepares");
+        let upload = prepare_scene_upload(&cpu, &atlas).expect("wall-shadow upload prepares");
+        let wall_primitive = upload
+            .draws
+            .iter()
+            .position(|draw| {
+                draw.source == PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask)
+            })
+            .and_then(|index| u32::try_from(index).ok())
+            .expect("wall-shadow glyph-mask draw exists");
+        let room_primitive = upload
+            .draws
+            .iter()
+            .enumerate()
+            .find_map(|(index, draw)| {
+                (draw.source == PrimitiveSource::Analytic
+                    && upload.primitives[index].binding_index == 0)
+                    .then(|| u32::try_from(index).expect("primitive index fits u32"))
+            })
+            .expect("room background draw exists");
+
+        let wall_shadow_node = NodeId::from_alias(
+            &CanonicalAlias::new("pet.shadow.wall").expect("canonical wall-shadow alias"),
+        );
+        let wall_shadow_strength = cpu
+            .accepted_frame_for_test()
+            .nodes
+            .iter()
+            .find(|node| node.node == wall_shadow_node)
+            .expect("controlled frame has the wall-shadow node")
+            .opacity;
+        let wall_shadow_max_alpha =
+            wall_shadow_strength * f32::from(EXPECTED_TINT_ALPHA_U8) / 255.0;
+
+        let (device, queue) = native_device();
+        let shared = SceneGpuShared::create(&device, generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let retain_only = |plan: &mut SceneDrawPlan, retained: &[u32]| {
+            for draw in plan
+                .opaque
+                .iter_mut()
+                .chain(plan.world_blended_unsorted.iter_mut())
+                .chain(plan.chrome.prefix.iter_mut())
+                .chain(plan.chrome.suffix.iter_mut())
+            {
+                if !retained.contains(&draw.primitive_index) {
+                    draw.instance_range = 0..0;
+                }
+            }
+        };
+        retain_only(&mut candidate.draw_plan, &[room_primitive, wall_primitive]);
+        let hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            generation_key.resources,
+        );
+        let request = render_request_fixture(
+            generation_key,
+            revisions,
+            cpu.logical_viewport_points(),
+            2.0,
+        );
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+        let shadowed = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            )
+            .expect("controlled rear tint renders");
+        retain_only(&mut candidate.draw_plan, &[room_primitive]);
+        let unshadowed = renderer
+            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .expect("controlled dark-room baseline renders");
+
+        assert_wall_shadow_tint_readback(&shadowed, &unshadowed, wall_shadow_max_alpha);
     }
 
     #[cfg(target_os = "macos")]
