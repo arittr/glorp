@@ -824,11 +824,14 @@ fn bounded_depth_parallax_points(
         motion.motion_top_left_cells.x - motion.motion_origin_top_left_cells.x,
         motion.motion_top_left_cells.y - motion.motion_origin_top_left_cells.y,
     ];
+    let cap_cells = [
+        crate::presentation::companion_effects::PARALLAX_MAX_X_CELLS,
+        crate::presentation::companion_effects::PARALLAX_MAX_Y_CELLS,
+    ];
     std::array::from_fn(|axis| {
-        (displacement_cells[axis] * multiplier * glyph_grid.cell_extent_points[axis]).clamp(
-            -glyph_grid.cell_extent_points[axis] * 0.5,
-            glyph_grid.cell_extent_points[axis] * 0.5,
-        )
+        let cap = glyph_grid.cell_extent_points[axis] * cap_cells[axis];
+        (displacement_cells[axis] * multiplier * glyph_grid.cell_extent_points[axis])
+            .clamp(-cap, cap)
     })
 }
 
@@ -2482,7 +2485,7 @@ mod tests {
     }
 
     #[test]
-    fn depth_parallax_is_bounded_to_half_a_cell() {
+    fn depth_parallax_uses_canonical_multipliers_and_axis_caps() {
         use crate::presentation::companion_scene::{
             AuthoredDepthSnapshot, CompanionGlyphGrid, LogicalGlyphAnchor, LogicalGlyphScale,
         };
@@ -2520,7 +2523,7 @@ mod tests {
                 1.0,
                 false,
             ),
-            [0.8, -2.0],
+            [0.48, -1.2],
         );
         assert_close(
             super::bounded_depth_parallax_points(
@@ -2530,7 +2533,7 @@ mod tests {
                 1.0,
                 false,
             ),
-            [2.4, -6.0],
+            [1.12, -2.8],
         );
         assert_close(
             super::bounded_depth_parallax_points(
@@ -2540,7 +2543,7 @@ mod tests {
                 1.0,
                 false,
             ),
-            [3.6, -9.0],
+            [1.76, -3.0],
         );
         let far_motion = crate::round::motion::RoundCompanionMotionProjection {
             motion_top_left_cells: crate::round::motion::MotionPoint { x: 200.0, y: -200.0 },
@@ -2554,7 +2557,7 @@ mod tests {
                 1.0,
                 false,
             ),
-            [4.0, -10.0]
+            [2.0, -3.0]
         );
     }
 

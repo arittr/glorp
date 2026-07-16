@@ -360,9 +360,11 @@ pub enum AuthoredDepthSnapshot {
 impl AuthoredDepthSnapshot {
     pub(crate) const fn parallax_multiplier(self) -> f32 {
         match self {
-            Self::Background => 0.010,
-            Self::BehindPet => 0.030,
-            Self::Foreground => 0.045,
+            Self::Background => crate::presentation::companion_effects::PARALLAX_FAR_MULTIPLIER,
+            Self::BehindPet => crate::presentation::companion_effects::PARALLAX_BEHIND_MULTIPLIER,
+            Self::Foreground => {
+                crate::presentation::companion_effects::PARALLAX_FOREGROUND_MULTIPLIER
+            }
         }
     }
 

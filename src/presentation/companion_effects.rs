@@ -9,8 +9,15 @@ pub(crate) struct WallShadowDepthCue {
     pub strength: f32,
 }
 
-const WALL_SHADOW_DETACH_FAR: f32 = 0.35;
-const WALL_SHADOW_DETACH_NEAR: f32 = 2.4;
+pub(crate) const PARALLAX_FAR_MULTIPLIER: f32 = 0.006;
+pub(crate) const PARALLAX_MID_MULTIPLIER: f32 = 0.010;
+pub(crate) const PARALLAX_BEHIND_MULTIPLIER: f32 = 0.014;
+pub(crate) const PARALLAX_FOREGROUND_MULTIPLIER: f32 = 0.022;
+pub(crate) const PARALLAX_MAX_X_CELLS: f32 = 0.25;
+pub(crate) const PARALLAX_MAX_Y_CELLS: f32 = 0.15;
+
+const WALL_SHADOW_DETACH_FAR: f32 = 0.45;
+const WALL_SHADOW_DETACH_NEAR: f32 = 1.2;
 const WALL_SHADOW_STRENGTH_FAR: f32 = 1.0;
 const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.6;
 
@@ -38,8 +45,12 @@ pub(crate) fn wall_shadow_depth_cue(effective_z: f32) -> WallShadowDepthCue {
 
 const PROJECTION_ALPHA_FAR: f32 = 165.0;
 const PROJECTION_ALPHA_NEAR: f32 = 235.0;
-const PROJECTION_BAND_FAR: f32 = 0.10;
-const PROJECTION_BAND_NEAR: f32 = 0.45;
+const PROJECTION_BAND_FAR: f32 = 0.18;
+const PROJECTION_BAND_NEAR: f32 = 0.32;
+const PROJECTION_RADIUS_X_FAR: f32 = 0.085;
+const PROJECTION_RADIUS_X_NEAR: f32 = 0.11;
+const PROJECTION_RADIUS_Y_FAR: f32 = 0.022;
+const PROJECTION_RADIUS_Y_NEAR: f32 = 0.032;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FloorProjectionMetrics {
@@ -82,8 +93,16 @@ pub(crate) fn floor_projection_metrics(
         horizon_y + PROJECTION_BAND_NEAR * bed_height,
         depth01,
     );
-    let radius_x = lerp(0.07 * width, 0.13 * width, depth01);
-    let radius_y = lerp(0.016 * height, 0.04 * height, depth01);
+    let radius_x = lerp(
+        PROJECTION_RADIUS_X_FAR * width,
+        PROJECTION_RADIUS_X_NEAR * width,
+        depth01,
+    );
+    let radius_y = lerp(
+        PROJECTION_RADIUS_Y_FAR * height,
+        PROJECTION_RADIUS_Y_NEAR * height,
+        depth01,
+    );
     if !center_y.is_finite()
         || !radius_x.is_finite()
         || radius_x <= 0.0
@@ -363,6 +382,36 @@ fn lerp(from: f32, to: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1.0e-5,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn shallow_tank_wall_and_floor_geometry_matches_approved_endpoints() {
+        let far_wall = wall_shadow_depth_cue(-1.0);
+        let near_wall = wall_shadow_depth_cue(1.0);
+        assert_close(far_wall.detach_cells, 0.45);
+        assert_close(near_wall.detach_cells, 1.2);
+        assert_close(far_wall.strength, 1.0);
+        assert_close(near_wall.strength, 0.6);
+
+        let far_floor = floor_projection_metrics(100.0, 100.0, 20.0, 80.0, 50.0, -1.0)
+            .expect("valid far floor projection");
+        let near_floor = floor_projection_metrics(100.0, 100.0, 20.0, 80.0, 50.0, 1.0)
+            .expect("valid near floor projection");
+        assert_close(far_floor.center_y, 30.8);
+        assert_close(near_floor.center_y, 39.2);
+        assert_close(far_floor.radius_x, 8.5);
+        assert_close(near_floor.radius_x, 11.0);
+        assert_close(far_floor.radius_y, 2.2);
+        assert_close(near_floor.radius_y, 3.2);
+        assert_eq!(far_floor.alpha, 165);
+        assert_eq!(near_floor.alpha, 235);
+    }
 
     #[test]
     fn bed_texture_biome_palette_is_deterministic_visible_and_bounded() {

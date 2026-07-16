@@ -346,12 +346,18 @@ fn retained_habitat_depth_cues_match_the_smooth_depth_plane_order() {
 
 #[test]
 fn smooth_depth_resolver_maps_bounds_lifecycle_and_rejects_invalid_inputs() {
+    let far = resolve_smooth_depth(-1.0, 1.0).unwrap();
+    let neutral = resolve_smooth_depth(0.0, 1.0).unwrap();
+    let near = resolve_smooth_depth(1.0, 1.0).unwrap();
+    assert_eq!([far.scale, neutral.scale, near.scale], [0.97, 1.0, 1.035]);
     assert_eq!(
-        resolve_smooth_depth(-1.0, 1.0).unwrap().scale,
-        SMOOTH_PET_FAR_SCALE
+        [far.perspective_y, neutral.perspective_y, near.perspective_y],
+        [-0.10, 0.0, 0.10]
     );
-    assert_eq!(resolve_smooth_depth(0.0, 1.0).unwrap().scale, 1.0);
-    assert_eq!(resolve_smooth_depth(1.0, 1.0).unwrap().scale, 1.12);
+    assert_eq!(
+        [far.atmosphere, neutral.atmosphere, near.atmosphere],
+        [0.93, 1.0, 1.0]
+    );
     assert_eq!(depth_lifecycle_scale(false, false), 1.0);
     assert_eq!(depth_lifecycle_scale(false, true), 0.5);
     assert_eq!(depth_lifecycle_scale(true, false), 0.25);
@@ -991,7 +997,7 @@ fn smooth_round_plan_floor_projection_stays_below_props_and_moves_pet_attached_l
     // The wall shadow tracks the body plus its depth-driven detachment; the
     // detachment contract itself is pinned by the wall-distance test.
     let depth01 = (plan.pet.depth + 1.0) * 0.5;
-    let expected_detach_extra = 0.35 + (2.4 - 0.35) * depth01 - plan.pet.scale;
+    let expected_detach_extra = 0.45 + (1.2 - 0.45) * depth01 - plan.pet.scale;
     assert!(
         (wall_shadow.transform.translation.x
             - (pet_body.transform.translation.x + expected_detach_extra))
@@ -1418,8 +1424,8 @@ fn wall_shadow_detachment_and_strength_encode_wall_distance() {
         far_offset < neutral_offset && neutral_offset < near_offset,
         "detachment must grow toward the glass: {far_offset} / {neutral_offset} / {near_offset}"
     );
-    assert!((far_offset - 0.35).abs() < 1e-4, "got {far_offset}");
-    assert!((near_offset - 2.4).abs() < 1e-4, "got {near_offset}");
+    assert!((far_offset - 0.45).abs() < 1e-4, "got {far_offset}");
+    assert!((near_offset - 1.2).abs() < 1e-4, "got {near_offset}");
 
     // Detachment is diagonal: the same extra distance on both axes.
     for plan in [&far, &neutral, &near] {

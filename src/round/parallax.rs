@@ -1,15 +1,13 @@
+use crate::presentation::companion_effects::{
+    PARALLAX_BEHIND_MULTIPLIER, PARALLAX_FAR_MULTIPLIER, PARALLAX_FOREGROUND_MULTIPLIER,
+    PARALLAX_MAX_X_CELLS, PARALLAX_MAX_Y_CELLS, PARALLAX_MID_MULTIPLIER,
+};
 use crate::presentation::smooth::{
     CompanionChromeReservation, CompanionViewport, SmoothBounds, SmoothCompanionLayer,
     SmoothDepthPlane, SmoothLayerItem, SmoothLayerMotionBinding, SmoothPoint,
 };
 
-const FAR_MULTIPLIER: f32 = 0.01;
-const MID_MULTIPLIER: f32 = 0.02;
-const BEHIND_MULTIPLIER: f32 = 0.03;
-const FOREGROUND_MULTIPLIER: f32 = 0.045;
 const VERTICAL_AXIS_SCALE: f32 = 0.75;
-const MAX_PARALLAX_X: f32 = 0.5;
-const MAX_PARALLAX_Y: f32 = 0.25;
 const SAFETY_SCALES: [f32; 5] = [1.0, 0.75, 0.5, 0.25, 0.0];
 const OVERLAP_EPSILON: f32 = 0.000_01;
 
@@ -32,10 +30,10 @@ pub const fn parallax_lifecycle_scale(asleep: bool, calm: bool) -> f32 {
 
 fn plane_multiplier(plane: SmoothDepthPlane) -> f32 {
     match plane {
-        SmoothDepthPlane::Far => FAR_MULTIPLIER,
-        SmoothDepthPlane::Mid => MID_MULTIPLIER,
-        SmoothDepthPlane::Behind => BEHIND_MULTIPLIER,
-        SmoothDepthPlane::Foreground => FOREGROUND_MULTIPLIER,
+        SmoothDepthPlane::Far => PARALLAX_FAR_MULTIPLIER,
+        SmoothDepthPlane::Mid => PARALLAX_MID_MULTIPLIER,
+        SmoothDepthPlane::Behind => PARALLAX_BEHIND_MULTIPLIER,
+        SmoothDepthPlane::Foreground => PARALLAX_FOREGROUND_MULTIPLIER,
     }
 }
 
@@ -51,9 +49,10 @@ fn raw_plane_delta(
 
     let multiplier = plane_multiplier(plane);
     let delta = SmoothPoint {
-        x: (focus.x * multiplier * lifecycle_scale).clamp(-MAX_PARALLAX_X, MAX_PARALLAX_X),
+        x: (focus.x * multiplier * lifecycle_scale)
+            .clamp(-PARALLAX_MAX_X_CELLS, PARALLAX_MAX_X_CELLS),
         y: (focus.y * multiplier * VERTICAL_AXIS_SCALE * lifecycle_scale)
-            .clamp(-MAX_PARALLAX_Y, MAX_PARALLAX_Y),
+            .clamp(-PARALLAX_MAX_Y_CELLS, PARALLAX_MAX_Y_CELLS),
     };
     if !point_is_finite(delta) {
         return Err(ParallaxResolveError::NonFiniteGeometry);
@@ -381,6 +380,24 @@ mod tests {
     }
 
     #[test]
+    fn raw_plane_projection_uses_the_shallow_tank_contract() {
+        let focus = SmoothPoint { x: 4.0, y: 4.0 };
+        for (plane, expected) in [
+            (SmoothDepthPlane::Far, SmoothPoint { x: 0.024, y: 0.018 }),
+            (SmoothDepthPlane::Mid, SmoothPoint { x: 0.040, y: 0.030 }),
+            (SmoothDepthPlane::Behind, SmoothPoint { x: 0.056, y: 0.042 }),
+            (
+                SmoothDepthPlane::Foreground,
+                SmoothPoint { x: 0.088, y: 0.066 },
+            ),
+        ] {
+            let actual = raw_plane_delta(focus, 1.0, plane).unwrap();
+            assert!((actual.x - expected.x).abs() < 1.0e-6);
+            assert!((actual.y - expected.y).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
     fn raw_plane_delta_caps_axes_independently() {
         let delta = raw_plane_delta(
             SmoothPoint { x: 10_000.0, y: -10_000.0 },
@@ -389,8 +406,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delta.x, MAX_PARALLAX_X);
-        assert_eq!(delta.y, -MAX_PARALLAX_Y);
+        assert_eq!(
+            delta.x,
+            crate::presentation::companion_effects::PARALLAX_MAX_X_CELLS
+        );
+        assert_eq!(
+            delta.y,
+            -crate::presentation::companion_effects::PARALLAX_MAX_Y_CELLS
+        );
     }
 
     #[test]
@@ -585,7 +608,7 @@ mod tests {
             &[(0, 0)],
         );
         let chrome = CompanionChromeReservation {
-            hud_bounds: vec![bounds(1.4, 0.0, 2.0, 1.0)],
+            hud_bounds: vec![bounds(1.2, 0.0, 2.0, 1.0)],
             gauge_bounds: Vec::new(),
         };
 
@@ -598,7 +621,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delta, SmoothPoint { x: 0.375, y: 0.0 });
+        assert_eq!(delta, SmoothPoint { x: 0.1875, y: 0.0 });
     }
 
     #[test]
@@ -706,7 +729,7 @@ mod tests {
                 &CompanionChromeReservation::default(),
             )
             .unwrap(),
-            SmoothPoint { x: 0.12, y: 0.0 }
+            SmoothPoint { x: 0.056, y: 0.0 }
         );
     }
 
@@ -731,7 +754,7 @@ mod tests {
                 &chrome,
             )
             .unwrap(),
-            SmoothPoint { x: -0.5, y: 0.0 }
+            SmoothPoint { x: -0.25, y: 0.0 }
         );
     }
 }

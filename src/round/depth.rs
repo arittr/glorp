@@ -1,14 +1,12 @@
-/// The tank is deliberately shallow: the pet never recedes far enough to get
-/// lost in the murk, and the wall shadow's detachment carries the Z story
-/// across the small excursion.
-pub const SMOOTH_PET_FAR_SCALE: f32 = 0.92;
-pub const SMOOTH_PET_NEAR_SCALE: f32 = 1.12;
-pub const SMOOTH_PERSPECTIVE_Y_MAX: f32 = 0.30;
+/// The pet keeps a visible front-to-back excursion without reading as though it
+/// crosses a room-sized volume. Shadow separation carries the remaining Z cue.
+pub const SMOOTH_PET_FAR_SCALE: f32 = 0.97;
+pub const SMOOTH_PET_NEAR_SCALE: f32 = 1.035;
+pub const SMOOTH_PERSPECTIVE_Y_MAX: f32 = 0.10;
 
-/// Atmospheric perspective: things seen through more water lose contrast to it.
-/// The far plane keeps this fraction of its ink; the near plane is fully present.
-/// Size alone is a weak depth cue at a 12% excursion — this is what sells it.
-pub const SMOOTH_FAR_ATMOSPHERE: f32 = 0.82;
+/// The far plane keeps most of its ink in the deliberately shallow tank; the
+/// neutral and near planes remain fully present.
+pub const SMOOTH_FAR_ATMOSPHERE: f32 = 0.93;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothDepthSample {

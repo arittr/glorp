@@ -3087,11 +3087,13 @@ mod tests {
             motion.motion_top_left_cells.x - motion.motion_origin_top_left_cells.x,
             motion.motion_top_left_cells.y - motion.motion_origin_top_left_cells.y,
         ];
+        let cap_cells = [
+            crate::presentation::companion_effects::PARALLAX_MAX_X_CELLS,
+            crate::presentation::companion_effects::PARALLAX_MAX_Y_CELLS,
+        ];
         std::array::from_fn(|axis| {
-            (displacement[axis] * multiplier * grid.cell_extent_points[axis]).clamp(
-                -grid.cell_extent_points[axis] * 0.5,
-                grid.cell_extent_points[axis] * 0.5,
-            )
+            let cap = grid.cell_extent_points[axis] * cap_cells[axis];
+            (displacement[axis] * multiplier * grid.cell_extent_points[axis]).clamp(-cap, cap)
         })
     }
 
@@ -4300,7 +4302,11 @@ mod tests {
                 duration_ms: 900,
                 curve: super::super::EaseCurve::SmoothStep,
             };
-        let depth_parallax = expected_depth_parallax(&previous, clock, 0.045);
+        let depth_parallax = expected_depth_parallax(
+            &previous,
+            clock,
+            AuthoredDepthSnapshot::Foreground.parallax_multiplier(),
+        );
         let expected_prop_parallax = [depth_parallax[0], -depth_parallax[1]];
         assert!(
             expected_prop_parallax != [0.0; 2],
@@ -4356,7 +4362,11 @@ mod tests {
             )
             .unwrap()
             .frame;
-        let expected_parallax = expected_depth_parallax(&previous, clock, 0.030);
+        let expected_parallax = expected_depth_parallax(
+            &previous,
+            clock,
+            AuthoredDepthSnapshot::BehindPet.parallax_multiplier(),
+        );
         assert!(
             expected_parallax != [0.0; 2],
             "fixture needs nonzero displacement"
