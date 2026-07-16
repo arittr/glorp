@@ -1164,19 +1164,34 @@ fn downsample_rgba(rgba: &[u8], width: usize, block: usize) -> (Vec<u8>, usize) 
 }
 ```
 
-Replace `retained_bed_lower_roi_has_stable_texture_variance` with `retained_bed_lower_roi_has_structured_logical_texture`:
+Replace `retained_bed_lower_roi_has_stable_texture_variance` with
+`retained_bed_lower_roi_has_structured_logical_texture`. Add helpers that
+compute 5x5 local-trend luminance residuals and Pearson correlation over equal
+logical grids. The correlation is the backing-scale contract; the existing
+structured-versus-smooth variance comparison remains a separate quality check:
 
 ```rust
 #[cfg(target_os = "macos")]
 #[test]
 fn retained_bed_lower_roi_has_structured_logical_texture() {
     let (device, queue) = native_device();
-    let [first, repeated] = room_only_offscreen(&device, &queue, 1.0);
-    assert_eq!(first.rgba, repeated.rgba, "bed texture must be byte-stable");
+    let [at_1x, repeated_1x] = room_only_offscreen(&device, &queue, 1.0);
+    assert_eq!(at_1x.rgba, repeated_1x.rgba, "1x bed texture must be byte-stable");
+    let [at_2x, repeated_2x] = room_only_offscreen(&device, &queue, 2.0);
+    assert_eq!(at_2x.rgba, repeated_2x.rgba, "2x bed texture must be byte-stable");
 
-    let lower = rgba_roi(&first, [100.0, 285.0, 160.0, 48.0], 1.0);
-    let upper = rgba_roi(&first, [100.0, 120.0, 160.0, 96.0], 1.0);
-    let (lower_coarse, lower_width) = downsample_rgba(&lower, 160, 4);
+    let lower_1x = rgba_roi(&at_1x, [100.0, 285.0, 160.0, 48.0], 1.0);
+    let lower_2x = rgba_roi(&at_2x, [100.0, 285.0, 160.0, 48.0], 2.0);
+    let (lower_coarse, lower_width) = downsample_rgba(&lower_1x, 160, 4);
+    let (lower_2x_coarse, lower_2x_width) = downsample_rgba(&lower_2x, 320, 8);
+    assert_eq!(lower_width, lower_2x_width);
+    let scale_correlation = pearson_correlation(
+        &local_trend_residuals(&lower_coarse, lower_width),
+        &local_trend_residuals(&lower_2x_coarse, lower_2x_width),
+    );
+    assert!(scale_correlation >= 0.8, "cross-scale texture correlation={scale_correlation}");
+
+    let upper = rgba_roi(&at_1x, [100.0, 120.0, 160.0, 96.0], 1.0);
     let (upper_coarse, upper_width) = downsample_rgba(&upper, 160, 4);
     let structured = local_trend_residual_variance(&lower_coarse, lower_width);
     let smooth = local_trend_residual_variance(&upper_coarse, upper_width);
@@ -1187,7 +1202,13 @@ fn retained_bed_lower_roi_has_structured_logical_texture() {
 }
 ```
 
-Update `retained_bed_upper_roi_has_no_substrate_flecks` to call `room_only_offscreen(&device, &queue, 1.0)` and keep its upper-room threshold. Run the native test before changing WGSL and record the measured RED value; the current isolated pixel noise should average away below the new structured threshold.
+Update `retained_bed_upper_roi_has_no_substrate_flecks` to call
+`room_only_offscreen(&device, &queue, 1.0)` and keep its upper-room threshold.
+Run the native test before changing WGSL and record the measured RED value. The
+old physical-pixel shader must fail the normalized 1x/2x correlation floor; on
+the implementation machine it measured `0.5515661565204638` against the `0.8`
+requirement. Do not accept the structured-versus-smooth threshold alone as RED,
+because the old shader can already satisfy it on Metal.
 
 - [ ] **Step 6: Run GREEN checks and commit Task 3**
 
