@@ -1700,7 +1700,7 @@ fn analytic_paint(
             }
         }
         AnalyticSemantic::WallShadow => AnalyticPaint::PetShadowTint {
-            color_srgb8: crate::presentation::companion_effects::WALL_SHADOW_SRGB8,
+            color_srgb8: crate::presentation::companion_effects::RETAINED_WALL_SHADOW_TINT_SRGB8,
             opacity_u8: crate::presentation::companion_effects::RETAINED_WALL_SHADOW_TINT_ALPHA_U8,
         },
         AnalyticSemantic::FloorProjection => AnalyticPaint::FloorShadowMultiplySilhouette {

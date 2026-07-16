@@ -242,6 +242,7 @@ pub(crate) fn bed_texture_sample(
 
 pub(crate) const TANK_DEPTH_TINT_SRGB: [f32; 3] = [0.10, 0.11, 0.20];
 pub(crate) const TANK_CORE_TINT_WEIGHT: f32 = 0.42;
+pub(crate) const TANK_WALL_AMBIENT_LIFT_SRGB: [f32; 3] = [0.025, 0.028, 0.040];
 
 pub(crate) fn biome_background_srgb(primary_biome: &str) -> [f32; 3] {
     match primary_biome {
@@ -269,7 +270,10 @@ pub(crate) fn tank_background_paint_srgb8(
     primary_biome: &str,
     phase_scale: f32,
 ) -> ([u8; 3], [u8; 3]) {
-    let rim = phase_dim_background_srgb(primary_biome, phase_scale);
+    let dimmed = phase_dim_background_srgb(primary_biome, phase_scale);
+    let rim = std::array::from_fn(|channel| {
+        (dimmed[channel] + TANK_WALL_AMBIENT_LIFT_SRGB[channel]).clamp(0.0, 1.0)
+    });
     (srgb8(tank_core_srgb(rim)), srgb8(rim))
 }
 
@@ -330,9 +334,8 @@ pub(crate) const GAUGE_DAILY_ROLLOVER_REMAINING_FACTOR: f32 = 0.55;
 pub(crate) const STATUS_CALM_SRGBA: [f32; 4] = [0.36, 0.40, 0.55, 0.80];
 pub(crate) const STATUS_ACTIVE_SRGBA: [f32; 4] = [0.94, 0.65, 0.28, 0.90];
 pub(crate) const TROUBLE_SRGBA: [f32; 4] = [0.92, 0.30, 0.25, 0.95];
-pub(crate) const WALL_SHADOW_SRGB8: [u8; 3] = [118, 114, 142];
-// Retained renders this hue source-over so the rear silhouette survives
-// black-level crush on darker external displays without becoming a glow.
+pub(crate) const RETAINED_WALL_SHADOW_TINT_SRGB8: [u8; 3] = [10, 12, 18];
+pub(crate) const SMOOTH_WALL_SHADOW_MULTIPLY_SRGB8: [u8; 3] = [118, 114, 142];
 pub(crate) const RETAINED_WALL_SHADOW_TINT_ALPHA_U8: u8 = 78;
 pub(crate) const MOOD_AURA_RING_ALPHA_U8: u8 = 13;
 pub(crate) const MOOD_CONTENT_SRGBA: [f32; 4] = [0.25, 0.71, 0.60, 1.0];
@@ -411,6 +414,61 @@ mod tests {
         assert_close(near_floor.radius_y, 3.2);
         assert_eq!(far_floor.alpha, 165);
         assert_eq!(near_floor.alpha, 235);
+    }
+
+    #[test]
+    fn tank_wall_palette_stays_dark_readable_and_phase_ordered() {
+        let luma = |rgb: [u8; 3]| {
+            0.2126 * f32::from(rgb[0]) + 0.7152 * f32::from(rgb[1]) + 0.0722 * f32::from(rgb[2])
+        };
+        let mut day_palettes = Vec::new();
+        for biome in [
+            "starter",
+            "botanical",
+            "technical",
+            "celestial",
+            "artifact",
+            "cozy",
+        ] {
+            let phases =
+                [0.60, 0.80, 0.85, 1.00].map(|scale| tank_background_paint_srgb8(biome, scale));
+            for pair in phases.windows(2) {
+                assert!(
+                    luma(pair[0].1) < luma(pair[1].1),
+                    "{biome} phase ordering: {phases:?}",
+                );
+            }
+
+            let (night_core, night_rim) = phases[0];
+            let (day_core, day_rim) = phases[3];
+            assert!(night_rim
+                .into_iter()
+                .all(|channel| (17..=32).contains(&channel)));
+            assert!(night_core
+                .into_iter()
+                .all(|channel| (21..=40).contains(&channel)));
+            assert!(day_rim
+                .into_iter()
+                .all(|channel| (24..=46).contains(&channel)));
+            assert!(day_core
+                .into_iter()
+                .all(|channel| (25..=48).contains(&channel)));
+            assert!(luma(day_rim) < luma(bed_primary_srgb8(biome)));
+            assert!(
+                !day_palettes.contains(&(day_core, day_rim)),
+                "{biome} keeps a distinct tank palette",
+            );
+            day_palettes.push((day_core, day_rim));
+        }
+
+        assert_eq!(
+            tank_background_paint_srgb8("starter", 1.0),
+            ([26, 29, 42], [27, 30, 36])
+        );
+        assert_eq!(
+            tank_background_paint_srgb8("starter", 0.6),
+            ([22, 24, 36], [19, 21, 26])
+        );
     }
 
     #[test]

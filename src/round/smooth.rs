@@ -478,9 +478,9 @@ const WALL_SHADOW_BAKED_OFFSET: f32 = 1.0;
 /// Multiply factor for the smooth wall shadow: darkens what it covers by not
 /// quite half, with a slightly cool cast so it reads as shade rather than dirt.
 const WALL_SHADOW_MULTIPLY: crate::pet::palette::Rgb = crate::pet::palette::Rgb {
-    r: crate::presentation::companion_effects::WALL_SHADOW_SRGB8[0],
-    g: crate::presentation::companion_effects::WALL_SHADOW_SRGB8[1],
-    b: crate::presentation::companion_effects::WALL_SHADOW_SRGB8[2],
+    r: crate::presentation::companion_effects::SMOOTH_WALL_SHADOW_MULTIPLY_SRGB8[0],
+    g: crate::presentation::companion_effects::SMOOTH_WALL_SHADOW_MULTIPLY_SRGB8[1],
+    b: crate::presentation::companion_effects::SMOOTH_WALL_SHADOW_MULTIPLY_SRGB8[2],
 };
 
 /// The worst case the pet can ever occupy around a roam centre: creature ink at

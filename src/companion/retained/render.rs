@@ -9287,13 +9287,20 @@ mod tests {
         unshadowed: &SceneRenderOutcome,
         authored_max_alpha: f32,
     ) {
-        let tint_linear = crate::presentation::companion_effects::WALL_SHADOW_SRGB8
+        let tint_linear = crate::presentation::companion_effects::RETAINED_WALL_SHADOW_TINT_SRGB8
             .map(|channel| scene_srgb_to_linear(f32::from(channel) / 255.0));
         let strongest = shadowed
             .rgba
             .chunks_exact(4)
             .zip(unshadowed.rgba.chunks_exact(4))
-            .filter(|(_, room)| room[3] == 255 && room[..3].iter().all(|channel| *channel <= 64))
+            .filter(|(_, room)| {
+                room[3] == 255
+                    && room
+                        .iter()
+                        .take(3)
+                        .zip(tint_linear)
+                        .all(|(room, tint)| scene_srgb_to_linear(f32::from(*room) / 255.0) > tint)
+            })
             .map(|(shadow, room)| {
                 let shadow_linear: [f32; 3] = std::array::from_fn(|channel| {
                     scene_srgb_to_linear(f32::from(shadow[channel]) / 255.0)
@@ -9301,36 +9308,36 @@ mod tests {
                 let room_linear: [f32; 3] = std::array::from_fn(|channel| {
                     scene_srgb_to_linear(f32::from(room[channel]) / 255.0)
                 });
-                let delta: [f32; 3] =
-                    std::array::from_fn(|channel| shadow_linear[channel] - room_linear[channel]);
-                let score = delta.iter().copied().sum::<f32>();
-                (score, delta, room_linear, shadow, room)
+                let drop: [f32; 3] =
+                    std::array::from_fn(|channel| room_linear[channel] - shadow_linear[channel]);
+                let score = drop.iter().copied().sum::<f32>();
+                (score, drop, room_linear, shadow_linear, shadow, room)
             })
             .max_by(|left, right| left.0.total_cmp(&right.0))
-            .expect("the production scene includes opaque dark rear-wall pixels");
+            .expect("the production scene includes opaque wall pixels above the retained tint");
 
-        let (score, delta, room_linear, shadow, room) = strongest;
+        let (score, drop, room_linear, shadow_linear, shadow, room) = strongest;
         assert!(
-            score > 0.01 && delta.iter().all(|channel| *channel > 0.0),
-            "the rear silhouette must lift dark wall pixels: shadow={shadow:?}, room={room:?}, delta={delta:?}",
+            score > 0.005 && drop.iter().all(|channel| *channel > 0.0),
+            "the rear silhouette must darken wall pixels: shadow={shadow:?}, room={room:?}, drop={drop:?}",
         );
         assert!(
-            delta[2] > delta[0] && delta[2] > delta[1],
-            "the visible lift must retain the authored violet bias: shadow={shadow:?}, room={room:?}, delta={delta:?}",
+            shadow_linear[2] > shadow_linear[0] && shadow_linear[2] > shadow_linear[1],
+            "the dark shadow must retain a restrained violet bias: shadow={shadow:?}",
         );
 
-        let observed_alpha = delta
+        let observed_alpha = drop
             .iter()
             .enumerate()
-            .map(|(channel, delta)| {
-                delta / (tint_linear[channel] - room_linear[channel]).max(f32::EPSILON)
+            .map(|(channel, drop)| {
+                drop / (room_linear[channel] - tint_linear[channel]).max(f32::EPSILON)
             })
             .sum::<f32>()
             / 3.0;
         assert!(
             observed_alpha >= authored_max_alpha * 0.75
                 && observed_alpha <= authored_max_alpha + 0.03,
-            "rear tint must be visible but restrained by authored opacity: observed={observed_alpha}, authored_max={authored_max_alpha}, shadow={shadow:?}, room={room:?}",
+            "rear shadow alpha escaped its authored bound: observed={observed_alpha}, authored_max={authored_max_alpha}, shadow={shadow:?}, room={room:?}",
         );
     }
 
@@ -12085,7 +12092,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn rear_wall_tint_lifts_dark_pixels_with_depth_bounded_alpha() {
+    fn rear_wall_shadow_darkens_rock_wall_with_depth_bounded_alpha() {
         use crate::pet::generation::Species;
         use crate::presentation::companion_scene::{
             scene::NodeId, AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration,
