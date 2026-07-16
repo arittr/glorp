@@ -143,6 +143,7 @@ pub(super) struct PreparedCompanionFrame {
     background: RoundColor,
     mood_aura_color: RoundColor,
     dim_overlay: bool,
+    hud_plane: crate::round::hud::CompanionHudDepthPlane,
     renderer: PreparedRendererFrame,
     gauges: PreparedGaugeFrame,
     hud: CompanionHudText,
@@ -279,6 +280,7 @@ impl PreparedCompanionFrame {
             background: RoundColor(0.05, 0.06, 0.10, 1.0),
             mood_aura_color: RoundColor(0.30, 0.40, 0.55, 0.80),
             dim_overlay: false,
+            hud_plane: crate::round::hud::COMPANION_HUD_DEPTH_PLANE,
             renderer: PreparedRendererFrame::Pixel {
                 frame: PixelFrame::transparent(PixelViewport::companion_default()),
             },
@@ -636,6 +638,7 @@ fn prepare_companion_frame_at(
         background,
         mood_aura_color: crate::round::hud::mood_aura_color(scene.pet.mood),
         dim_overlay,
+        hud_plane: crate::round::hud::COMPANION_HUD_DEPTH_PLANE,
         renderer,
         gauges,
         hud,
@@ -3312,7 +3315,11 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
         // Ambient HUD — drawn after halo beads and before the sleep/calm dim,
         // so the dim overlay softens the HUD when the pet is resting.
         // Pass the derived font size so HUD elements scale with the display.
-        draw_hud(bounds, &aperture, hud_text, hud_font_size);
+        match frame.hud_plane {
+            crate::round::hud::CompanionHudDepthPlane::FrontGlass => {
+                draw_hud(bounds, &aperture, hud_text, hud_font_size);
+            }
+        }
 
         if dim_overlay {
             let dim = NSBezierPath::bezierPathWithRect(bounds);

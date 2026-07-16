@@ -36,6 +36,18 @@ fn draw_scene_consumes_only_the_last_prepared_frame() {
 }
 
 #[test]
+fn appkit_front_glass_hud_is_painted_after_the_renderer_payload() {
+    let source = std::fs::read_to_string("src/companion/app.rs").unwrap();
+    let paint_start = source.find("fn paint_prepared_frame(").unwrap();
+    let paint = &source[paint_start..];
+    let renderer = paint.find("match &frame.renderer").unwrap();
+    let hud_plane = paint.find("match frame.hud_plane").unwrap();
+    let dim = paint.find("if dim_overlay").unwrap();
+    assert!(renderer < hud_plane);
+    assert!(hud_plane < dim);
+}
+
+#[test]
 fn ui_tick_owns_preparation_and_smooth_uses_the_fallible_planner() {
     let tick = source_between(
         APP_SOURCE,

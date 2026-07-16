@@ -1470,16 +1470,18 @@ fn build_template(
         PrimitiveBinding::Analytic(AnalyticSemantic::Trouble.id()),
         PrimitiveSpace::Screen,
     )?;
-    push(
-        "chrome.hud",
-        PrimitiveKind::InstanceQuad,
-        "material.screen-chrome",
-        "resource.hud-glyph-atlas",
-        WorldBlend::PremultipliedAlpha,
-        DepthBehavior::ScreenNoDepth,
-        PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
-        PrimitiveSpace::Screen,
-    )?;
+    match crate::round::hud::COMPANION_HUD_DEPTH_PLANE {
+        crate::round::hud::CompanionHudDepthPlane::FrontGlass => push(
+            "chrome.hud",
+            PrimitiveKind::InstanceQuad,
+            "material.screen-chrome",
+            "resource.hud-glyph-atlas",
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::ScreenNoDepth,
+            PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
+            PrimitiveSpace::Screen,
+        )?,
+    }
     push(
         "chrome.dim",
         PrimitiveKind::AnalyticShape,
@@ -2504,6 +2506,69 @@ fn build_frame(
 mod tests {
     use super::*;
     use crate::pet::generation::Species;
+
+    #[test]
+    fn front_glass_hud_compiles_after_pet_as_screen_chrome() {
+        let mut vm = crate::tui::view_model::WatchViewModel::fixture_with_habitat_props();
+        let pet = crate::pet::generation::generate_pet("front-glass-hud-fixture")
+            .with_species(Species::Fuzz);
+        let rendered = crate::pet::render::render_pet(
+            &pet,
+            crate::game::evolution::Stage::S3,
+            crate::game::metabolism::Mood::Content,
+            crate::pet::render::AnimationFrame::default(),
+        );
+        vm.pet_render.seed = pet.seed;
+        vm.pet_render.generated_species = Species::Fuzz;
+        vm.pet_render.stage = crate::game::evolution::Stage::S3;
+        vm.pet_render.mood = crate::game::metabolism::Mood::Content;
+        vm.pet_art = rendered.lines;
+        vm.pet_spans = rendered.spans;
+        let input = crate::presentation::companion_scene::CompanionSceneProjectionInput::round(
+            crate::presentation::companion_scene::CompanionProjectionClock::new(
+                time::OffsetDateTime::UNIX_EPOCH,
+                0,
+            ),
+            crate::presentation::companion_scene::CompanionLogicalLayout::round(360.0, 360.0),
+            44,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        );
+        let snapshot =
+            crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input(
+                &vm, input,
+            )
+            .unwrap();
+        let template = build_template(&snapshot).unwrap();
+        let hud = template
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    &primitive.binding,
+                    PrimitiveBinding::Instances(InstanceGroupBinding::Hud)
+                )
+            })
+            .unwrap();
+        let pet = template
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    &primitive.binding,
+                    PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body))
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            crate::round::hud::COMPANION_HUD_DEPTH_PLANE,
+            crate::round::hud::CompanionHudDepthPlane::FrontGlass
+        );
+        assert!(hud.authored_order > pet.authored_order);
+        assert_eq!(hud.depth, DepthBehavior::ScreenNoDepth);
+        assert_eq!(hud.space, PrimitiveSpace::Screen);
+    }
 
     #[test]
     fn retained_sprite_adapter_preserves_canonical_local_cells() {
