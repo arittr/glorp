@@ -10718,11 +10718,30 @@ mod tests {
             }
         }
         let without_glyph = renderer
-            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            )
             .expect("glyph-isolation control renders");
-        candidate.draw_plan = baseline_plan;
+        for draw in &mut candidate.draw_plan.opaque {
+            draw.instance_range = 0..0;
+        }
+        for draw in &mut candidate.draw_plan.world_blended_unsorted {
+            if draw.primitive_index != prop_primitive {
+                draw.instance_range = 0..0;
+            }
+        }
+        let glyph_only = renderer
+            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .expect("opaque-glyph coverage control renders");
+        candidate.draw_plan = baseline_plan.clone();
         let glyph_pixels = rgba_roi(&baseline, prop_roi, 1.0);
         let without_glyph_pixels = rgba_roi(&without_glyph, prop_roi, 1.0);
+        let glyph_only_pixels = rgba_roi(&glyph_only, prop_roi, 1.0);
 
         let frame = cpu.accepted_frame_for_test().prop_slots[shadow_slot];
         let cell = [360.0 / 44.0, 360.0 / 18.0];
@@ -10762,6 +10781,8 @@ mod tests {
         frame_delta.to = to;
         frame_delta.prop_slots.push(shadow_frame);
         let logical_viewport_points = cpu.logical_viewport_points();
+        let shadowed_request =
+            render_request_fixture(generation_key, to, logical_viewport_points, 1.0);
         let shadowed = renderer
             .render_offscreen_with_delta(
                 &device,
@@ -10771,7 +10792,7 @@ mod tests {
                 &mut candidate,
                 &content_delta,
                 &frame_delta,
-                render_request_fixture(generation_key, to, logical_viewport_points, 1.0),
+                shadowed_request.clone(),
                 &hud,
             )
             .expect("positive-strength shadow frame renders");
@@ -10791,21 +10812,55 @@ mod tests {
         );
 
         let shadowed_glyph_pixels = rgba_roi(&shadowed, prop_roi, 1.0);
+        for draw in &mut candidate.draw_plan.world_blended_unsorted {
+            if draw.primitive_index == prop_primitive {
+                draw.instance_range = 0..0;
+            }
+        }
+        let shadowed_without_glyph = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                shadowed_request,
+                &hud,
+            )
+            .expect("shadowed glyph-isolation control renders");
+        candidate.draw_plan = baseline_plan;
+        let shadowed_without_glyph_pixels = rgba_roi(&shadowed_without_glyph, prop_roi, 1.0);
+        let glyph_core_coverage = glyph_only_pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .max()
+            .expect("glyph coverage control has pixels");
+        assert!(glyph_core_coverage >= 192);
         let strongest_glyph_pixel = glyph_pixels
             .chunks_exact(4)
             .zip(without_glyph_pixels.chunks_exact(4))
+            .zip(glyph_only_pixels.chunks_exact(4))
+            .zip(shadowed_without_glyph_pixels.chunks_exact(4))
             .enumerate()
-            .map(|(index, (glyph, room))| {
+            .filter_map(|(index, (((glyph, room), glyph_only), shadowed_room))| {
+                let background_darkened = shadowed_room[..3]
+                    .iter()
+                    .zip(&room[..3])
+                    .all(|(shadowed, unshadowed)| shadowed <= unshadowed)
+                    && shadowed_room[..3] != room[..3];
                 let contrast = glyph[..3]
                     .iter()
                     .zip(&room[..3])
                     .map(|(glyph, room)| u16::from(glyph.abs_diff(*room)))
                     .sum::<u16>();
-                (index, contrast)
+                (background_darkened && contrast >= 48).then_some((index, glyph_only[3]))
             })
-            .max_by_key(|(_, contrast)| *contrast)
-            .expect("glyph ROI has pixels");
-        assert!(strongest_glyph_pixel.1 >= 48);
+            .max_by_key(|(_, coverage)| *coverage)
+            .expect("the shadow darkens background beneath a visible glyph pixel");
+        assert!(
+            strongest_glyph_pixel.1 >= glyph_core_coverage.saturating_sub(32),
+            "the shadow misses the glyph core: overlap={}, core={glyph_core_coverage}",
+            strongest_glyph_pixel.1,
+        );
         let index = strongest_glyph_pixel.0;
         assert_eq!(
             glyph_pixels[index * 4..index * 4 + 4],
