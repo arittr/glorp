@@ -273,17 +273,23 @@ assert_eq!(passes.foreground_roles(), [
 
 For depths `-1.0`, `0.0`, `0.72`, `f32::from_bits(0.72_f32.to_bits() + 1)`, and `1.0`, assert the pet pass is before statistics for the first three and after statistics for the last two. Assert mood aura follows that same branch even though it is painted externally.
 
-Replace `tests/companion_draw_boundary.rs::appkit_front_glass_hud_follows_renderer_gauges_and_status_before_dim` with a depth-aware boundary test that prohibits these operations inside `paint_prepared_frame`:
+Replace `tests/companion_draw_boundary.rs::appkit_front_glass_hud_follows_renderer_gauges_and_status_before_dim` with a behavior-level prepared paint-schedule test. The prepared schedule must expose semantic steps for world, crossing pet, statistics, foreground, each gauge lane, status/trouble, and dim so the test can assert the consumer-visible ordering at each depth without scanning source text.
 
 ```rust
-for forbidden in [
-    "prepared_perimeter_gauge_arcs(",
-    ".sort_by",
-    ".sort_by_key",
-    "COMPANION_STATISTICS_Z",
-] {
-    assert!(!paint_body.contains(forbidden), "paint callback derived {forbidden}");
-}
+assert_eq!(
+    smooth_appkit_paint_schedule(PetStatisticsOrder::InFrontOfStatistics),
+    [
+        SmoothAppKitPaintStep::WorldBeforeStatistics,
+        SmoothAppKitPaintStep::Statistics,
+        SmoothAppKitPaintStep::PetFront,
+        SmoothAppKitPaintStep::Foreground,
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Xp),
+        SmoothAppKitPaintStep::StatusTrouble,
+        SmoothAppKitPaintStep::Dim,
+    ]
+);
 ```
 
 - [ ] **Step 2: Run the pass tests and verify failure**
@@ -295,7 +301,7 @@ cargo test --lib companion::app::tests::smooth_appkit_pass_plan -- --nocapture
 cargo test --test companion_draw_boundary
 ```
 
-Expected: FAIL because Smooth still stores one flat `draw_order` and prepares gauge arcs inside the native callback.
+Expected: FAIL because Smooth still stores one flat `draw_order` and has no semantic prepared paint schedule.
 
 - [ ] **Step 3: Implement semantic pass preparation**
 
@@ -345,7 +351,7 @@ fn smooth_depth_bucket(role: SmoothLayerRole) -> SmoothDepthBucket {
 }
 ```
 
-Prepare the three index vectors from the existing stable `smooth_layer_draw_order`; do not sort a second time. Store `CompanionDepthComposition` and `PreparedSmoothDepthPasses` in `PreparedRendererFrame::Smooth`.
+Prepare the three index vectors from the existing stable `smooth_layer_draw_order`; do not sort a second time. Store `CompanionDepthComposition`, `PreparedSmoothDepthPasses`, and the derived `SmoothAppKitPaintStep` schedule in `PreparedRendererFrame::Smooth`.
 
 Move `prepared_perimeter_gauge_arcs` into `prepare_companion_frame_at` and store the resulting `Vec<PreparedGaugeArc>` on `PreparedCompanionFrame`. The paint callback only iterates it.
 
@@ -379,7 +385,7 @@ cargo test --features retained-renderer --lib companion::paired_review::tests
 cargo test --features retained-renderer --test retained_renderer_boundary
 ```
 
-Expected: PASS. Source-boundary tests confirm preparation owns allocation/sorting and the callback only consumes prepared passes.
+Expected: PASS. Behavior-level schedule and frame-preparation tests confirm the callback receives a complete precomputed composition contract.
 
 - [ ] **Step 5: Commit**
 
@@ -856,11 +862,11 @@ Expected: PASS and clean output. If a broad pre-existing failure appears, record
 
 ```bash
 git status --short --branch
-git diff --check HEAD~6..HEAD
+git diff --check 3bc4d32..HEAD
 git log --oneline -8
 ```
 
-Expected: no tracked or untracked implementation residue; six intentional feature/test commits follow the approved design and plan commits.
+Expected: no tracked or untracked implementation residue; intentional feature/test commits follow the approved design and plan commits.
 
 - [ ] **Step 4: Rebuild and relaunch the optimized companion**
 
