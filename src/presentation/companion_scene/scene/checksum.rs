@@ -931,3 +931,38 @@ fn encode_option_bool(hash: &mut Fnv1a64, value: Option<bool>) {
         None => hash.u8(0),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_silhouette_paint_checksum_locks_tag_and_rgba_order() {
+        let mut hash = Fnv1a64::domain(b"");
+        encode_analytic_paint(
+            &mut hash,
+            AnalyticPaint::FloorShadowMultiplySilhouette { color_srgba8: [0x12, 0x34, 0x56, 0xeb] },
+        );
+
+        // FNV-1a over canonical bytes: tag 3, then RGBA in authored order.
+        assert_eq!(hash.finish(), 0x7321_816e_90e7_302f);
+    }
+
+    #[test]
+    fn floor_silhouette_geometry_checksum_locks_tag_mask_and_signed_facing() {
+        // FNV-1a over canonical bytes [tag 3, PetBody mask 1, facing byte].
+        for (facing, expected) in [(1, 0xe1f9_f218_70fa_0fd8), (-1, 0xe1f9_6018_70f9_17c2)] {
+            let mut hash = Fnv1a64::domain(b"");
+            encode_analytic_geometry(
+                &mut hash,
+                AnalyticGeometry::PetFloorProjection {
+                    mask: AnalyticMaskSource::PetBody,
+                    facing,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(hash.finish(), expected, "facing {facing}");
+        }
+    }
+}
