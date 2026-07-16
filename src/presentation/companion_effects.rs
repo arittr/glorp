@@ -208,17 +208,22 @@ fn substrate_mark(point: [f32; 2], cell_size: f32, radius: f32, density: f32, sa
 }
 
 #[cfg(test)]
+fn room_bed_mix(logical_point_y_down: [f32; 2], logical_extent: [f32; 2]) -> f32 {
+    let normalized_x = logical_point_y_down[0] / logical_extent[0] - 0.5;
+    let horizon_y = logical_extent[1] * (0.76 + 0.04 * normalized_x * normalized_x);
+    let bed_feather = (logical_extent[1] * 0.12).max(1.0);
+    let bed_t = ((logical_point_y_down[1] - horizon_y) / bed_feather).clamp(0.0, 1.0);
+    bed_t * bed_t * (3.0 - 2.0 * bed_t)
+}
+
+#[cfg(test)]
 pub(crate) fn bed_texture_sample(
     logical_point_y_down: [f32; 2],
     logical_extent: [f32; 2],
     backing_scale: f32,
     primary_biome: &str,
 ) -> BedTextureSample {
-    let normalized_x = logical_point_y_down[0] / logical_extent[0] - 0.5;
-    let horizon_y = logical_extent[1] * (0.76 + 0.04 * normalized_x * normalized_x);
-    let bed_feather = (logical_extent[1] * 0.12).max(1.0);
-    let bed_t = ((logical_point_y_down[1] - horizon_y) / bed_feather).clamp(0.0, 1.0);
-    let bed_mix = bed_t * bed_t * (3.0 - 2.0 * bed_t);
+    let bed_mix = room_bed_mix(logical_point_y_down, logical_extent);
 
     let texture_gate = texture_smooth_step(0.18, 0.82, bed_mix);
     let broad_tone_levels = (substrate_value_noise(logical_point_y_down, 36.0, 0xC13F_A9A9) - 0.5)
@@ -237,6 +242,44 @@ pub(crate) fn bed_texture_sample(
         fleck_mix,
         bed_srgb8: bed_primary_srgb8(primary_biome),
         fleck_srgb8: bed_fleck_srgb8(primary_biome),
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct WallTextureSample {
+    pub(crate) bed_mix: f32,
+    pub(crate) wall_gate: f32,
+    pub(crate) broad_tone_levels: f32,
+    pub(crate) strata_levels: f32,
+    pub(crate) mineral_levels: f32,
+}
+
+#[cfg(test)]
+pub(crate) fn wall_texture_sample(
+    logical_point_y_down: [f32; 2],
+    logical_extent: [f32; 2],
+    backing_scale: f32,
+) -> WallTextureSample {
+    let bed_mix = room_bed_mix(logical_point_y_down, logical_extent);
+    let wall_gate = 1.0 - texture_smooth_step(0.02, 0.68, bed_mix);
+    let rock_point = [logical_point_y_down[0] * 0.55, logical_point_y_down[1]];
+    let rock_field = substrate_value_noise(rock_point, 54.0, 0x4A11_5EED);
+    let broad_tone_levels = (rock_field - 0.5) * 10.0 * wall_gate;
+    let strata_phase = (logical_point_y_down[1] + (rock_field - 0.5) * 24.0) / 38.0;
+    let strata_fraction = strata_phase - strata_phase.floor();
+    let strata_distance = (strata_fraction - 0.5).abs();
+    let strata_levels = (1.0 - texture_smooth_step(0.025, 0.10, strata_distance)) * 4.0 * wall_gate;
+    let mineral_levels =
+        substrate_mark(logical_point_y_down, 24.0, 1.4, 0.18, 0x6D2B_79F5) * 4.0 * wall_gate;
+    let _ = backing_scale;
+
+    WallTextureSample {
+        bed_mix,
+        wall_gate,
+        broad_tone_levels,
+        strata_levels,
+        mineral_levels,
     }
 }
 
@@ -541,6 +584,48 @@ mod tests {
             .any(|sample| sample.broad_tone_levels.abs() >= 2.0));
         assert!(samples.iter().any(|sample| sample.grain_mix >= 0.10));
         assert!(samples.iter().any(|sample| sample.fleck_mix >= 0.20));
+    }
+
+    #[test]
+    fn wall_texture_is_invariant_to_backing_scale() {
+        let at_1x = wall_texture_sample([144.5, 120.5], [360.0; 2], 1.0);
+        let at_2x = wall_texture_sample([144.5, 120.5], [360.0; 2], 2.0);
+        assert_eq!(at_1x, at_2x);
+        assert_eq!(at_1x.bed_mix, 0.0);
+        assert_eq!(at_1x.wall_gate, 1.0);
+    }
+
+    #[test]
+    fn wall_texture_has_broad_strata_and_sparse_mineral_structure() {
+        let samples = (36..=240)
+            .step_by(2)
+            .flat_map(|y| {
+                (36..=324).step_by(2).map(move |x| {
+                    wall_texture_sample([x as f32 + 0.5, y as f32 + 0.5], [360.0; 2], 1.0)
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(samples
+            .iter()
+            .any(|sample| sample.broad_tone_levels.abs() >= 2.0));
+        assert!(samples.iter().any(|sample| sample.strata_levels >= 2.5));
+        assert!(samples.iter().any(|sample| sample.mineral_levels >= 2.0));
+        assert!(samples.iter().all(|sample| {
+            (sample.broad_tone_levels - sample.strata_levels + sample.mineral_levels).abs() <= 14.0
+        }));
+    }
+
+    #[test]
+    fn wall_texture_fades_out_before_ground_substrate() {
+        for y in (320..=356).step_by(4) {
+            for x in (48..=312).step_by(12) {
+                let sample = wall_texture_sample([x as f32 + 0.5, y as f32 + 0.5], [360.0; 2], 2.0);
+                assert_eq!(sample.wall_gate, 0.0, "sample=({x}, {y})");
+                assert_eq!(sample.broad_tone_levels, 0.0);
+                assert_eq!(sample.strata_levels, 0.0);
+                assert_eq!(sample.mineral_levels, 0.0);
+            }
+        }
     }
 
     #[test]

@@ -856,6 +856,26 @@ fn substrate_mark(
     return 1.0 - smoothstep(radius - 0.75, radius + 0.75, distance(local, center));
 }
 
+fn wall_rock_levels(point_y_down: vec2<f32>, bed_mix: f32) -> vec3<f32> {
+    let wall_gate = 1.0 - smoothstep(0.02, 0.68, bed_mix);
+    let rock_point = vec2<f32>(point_y_down.x * 0.55, point_y_down.y);
+    let rock_field = substrate_value_noise(rock_point, 54.0, 0x4a115eedu);
+    let broad_tone_levels = (rock_field - 0.5) * 10.0 * wall_gate;
+    let strata_phase =
+        (point_y_down.y + (rock_field - 0.5) * 24.0) / 38.0;
+    let strata_distance = abs(fract(strata_phase) - 0.5);
+    let strata_levels =
+        (1.0 - smoothstep(0.025, 0.10, strata_distance)) * 4.0 * wall_gate;
+    let mineral_levels = substrate_mark(
+        point_y_down,
+        24.0,
+        1.4,
+        0.18,
+        0x6d2b79f5u,
+    ) * 4.0 * wall_gate;
+    return vec3<f32>(broad_tone_levels, strata_levels, mineral_levels);
+}
+
 fn fs_room_aperture(
     input: SceneVertexOutput,
     content: AnalyticContentGpuValue,
@@ -902,9 +922,16 @@ fn fs_room_aperture(
         0xd1b54a35u,
     ) * 0.48 * texture_gate;
 
-    var room = mix(core, rim, radial);
+    let wall_levels = wall_rock_levels(point_y_down, bed_mix);
+    var room_srgb = clamp(
+        linear_to_srgb(mix(core, rim, radial))
+            + vec3<f32>((wall_levels.x - wall_levels.y + wall_levels.z) / 255.0),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    var room = srgb_to_linear(room_srgb);
     room = mix(room, bed, bed_mix * 0.72);
-    var room_srgb = linear_to_srgb(room);
+    room_srgb = linear_to_srgb(room);
     room_srgb = clamp(
         room_srgb + vec3<f32>(broad_tone_levels / 255.0),
         vec3<f32>(0.0),

@@ -229,7 +229,7 @@ pub(super) const ATLAS_PACKING_VERSION: u32 = 1;
 /// in gamma to match Smooth. Version 4 adds the biome-tinted tank bed to the room
 /// analytic. A shader change bumps this so entries from an older shader can be
 /// invalidated.
-pub(super) const SHADER_RESOURCE_VERSION: u32 = 4;
+pub(super) const SHADER_RESOURCE_VERSION: u32 = 5;
 
 /// Antialiasing the atlas rasterizes under. The retained atlas draws through the
 /// default AppKit grayscale smoothing path, matching Smooth's on-screen text.
@@ -1605,8 +1605,8 @@ mod glyph_tests {
     use super::*;
 
     #[test]
-    fn shader_resource_version_tracks_tank_bed_shader_change() {
-        assert_eq!(SHADER_RESOURCE_VERSION, 4);
+    fn shader_resource_version_tracks_tank_surface_shader_change() {
+        assert_eq!(SHADER_RESOURCE_VERSION, 5);
     }
 
     #[test]

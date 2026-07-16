@@ -9964,28 +9964,58 @@ mod tests {
             "logical lower-bed texture lost cross-scale coherence after backing-scale normalization: correlation={scale_correlation}, mean_difference={scale_difference}",
         );
 
-        let upper_1x = rgba_roi(&at_1x, [100.0, 120.0, 160.0, 96.0], 1.0);
-        let (upper_coarse, upper_width) = downsample_rgba(&upper_1x, 160, 4);
         let structured = local_trend_residual_variance(&lower_coarse, lower_width);
-        let smooth = local_trend_residual_variance(&upper_coarse, upper_width);
         assert!(
-            structured > 0.25 && structured > smooth * 2.0,
-            "lower bed lacks coherent texture: structured={structured}, smooth={smooth}",
+            structured > 0.25,
+            "lower bed lost coherent texture: structured={structured}"
         );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn retained_bed_upper_roi_has_no_substrate_flecks() {
+    fn retained_wall_upper_roi_has_logical_rock_texture() {
         let (device, queue) = native_device();
-        let [first, second] = room_only_offscreen(&device, &queue, 1.0);
-        assert_eq!(first.rgba, second.rgba, "room dither must be byte-stable");
+        let [at_1x, repeated_1x] = room_only_offscreen(&device, &queue, 1.0);
+        assert_eq!(
+            at_1x.rgba, repeated_1x.rgba,
+            "1x wall texture must be byte-stable"
+        );
+        let [at_2x, repeated_2x] = room_only_offscreen(&device, &queue, 2.0);
+        assert_eq!(
+            at_2x.rgba, repeated_2x.rgba,
+            "2x wall texture must be byte-stable"
+        );
 
-        let upper = rgba_roi(&first, [100.0, 120.0, 160.0, 96.0], 1.0);
-        let variance = local_trend_residual_variance(&upper, 160);
+        let wall_1x = rgba_roi(&at_1x, [100.0, 120.0, 160.0, 96.0], 1.0);
+        let wall_2x = rgba_roi(&at_2x, [100.0, 120.0, 160.0, 96.0], 2.0);
+        let (wall_coarse, wall_width) = downsample_rgba(&wall_1x, 160, 4);
+        let (wall_2x_coarse, wall_2x_width) = downsample_rgba(&wall_2x, 320, 8);
+        assert_eq!(wall_width, wall_2x_width);
+
+        let wall_residuals = local_trend_residuals(&wall_coarse, wall_width);
+        let wall_2x_residuals = local_trend_residuals(&wall_2x_coarse, wall_2x_width);
+        let variance = wall_residuals
+            .iter()
+            .map(|residual| residual * residual)
+            .sum::<f64>()
+            / wall_residuals.len() as f64;
+        let correlation = pearson_correlation(&wall_residuals, &wall_2x_residuals);
+        let mean_difference = mean_rgb_absolute_difference(&wall_coarse, &wall_2x_coarse);
         assert!(
-            variance < 1.0,
-            "upper room departed from its smooth dithered reference: variance={variance}"
+            (0.20..=4.0).contains(&variance),
+            "wall texture is either flat or too noisy: variance={variance}",
+        );
+        assert!(
+            correlation >= 0.80,
+            "wall texture lost logical backing-scale coherence: correlation={correlation}, mean_difference={mean_difference}",
+        );
+
+        let bed = rgba_roi(&at_1x, [100.0, 285.0, 160.0, 48.0], 1.0);
+        let (bed_coarse, bed_width) = downsample_rgba(&bed, 160, 4);
+        let bed_variance = local_trend_residual_variance(&bed_coarse, bed_width);
+        assert!(
+            variance < bed_variance,
+            "wall must stay quieter than ground: wall={variance}, bed={bed_variance}"
         );
     }
 
