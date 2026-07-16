@@ -70,6 +70,34 @@ These are visual envelopes, not a requirement that every channel fit the range;
 biome hue and the violet depth component may place an individual channel just
 outside it. Relative luminance and hierarchy are authoritative.
 
+### Approved real-display wall calibration
+
+The first optimized implementation proved the ground, strata, and mineral
+structure on the normal display, but its rear wall still collapsed toward black
+in the live companion. Raise only the tank-local ambient lift from
+`[0.025, 0.028, 0.040]` to `[0.050, 0.055, 0.070]`.
+This real-display calibration supersedes the initial numeric envelope above.
+
+This is a palette calibration, not a shader redesign:
+
+- Keep the wall rock field, strata, mineral grain, horizon gate, ground mix,
+  and every texture amplitude and scale unchanged.
+- Keep the retained shadow tint, authored opacity, source-over path, and Smooth
+  multiply factor unchanged. The brighter wall should increase the visible
+  separation from the already-dark retained shadow.
+- Keep the shared application background and all ground, prop, pet, gauge, and
+  HUD paint unchanged.
+- Keep night and dusk darker than dawn and day. Ordinary night wall channels
+  should land roughly in the low `20` to mid `40` range; ordinary day wall
+  channels should land roughly in the high `20` to mid `50` range.
+- The wall must remain visibly darker and quieter than the textured ground and
+  foreground content. It should read as dark slate rock, not a lit backdrop.
+
+The implementation changes only `TANK_WALL_AMBIENT_LIFT_SRGB` and the palette
+behavior expectations that directly encode its approved output. Retained native
+wall-variance, wall-below-ground, dark-shadow, ABI, and resource-preservation
+tests remain unchanged and must stay green.
+
 ### Medium rock strata and mineral grain
 
 Add a wall-only logical texture to the existing room fragment. It has three
