@@ -53,6 +53,8 @@ struct CandidateAnchor {
     y: CandidateAxis,
 }
 
+const FLOOR_APERTURE_INSET_CELLS: f32 = 1.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FloorDepthLane {
     Rear,
@@ -99,6 +101,36 @@ fn floor_lane(prop: &PropTopologySnapshot) -> FloorDepthLane {
     }
 }
 
+fn aperture_radii_cells(input: CompanionCompositionInput<'_>) -> [f32; 2] {
+    if input.columns == 0
+        || input.rows == 0
+        || !input.width_points.is_finite()
+        || !input.height_points.is_finite()
+        || input.width_points <= 0.0
+        || input.height_points <= 0.0
+    {
+        return [0.0; 2];
+    }
+    let radius_points = input.width_points.min(input.height_points) / 2.0;
+    [
+        radius_points / (input.width_points / f32::from(input.columns)),
+        radius_points / (input.height_points / f32::from(input.rows)),
+    ]
+}
+
+fn grounded_aperture_radii(radii: [f32; 2], horizontal_inset_cells: f32) -> [f32; 2] {
+    [(radii[0] - horizontal_inset_cells).max(0.0), radii[1]]
+}
+
+fn aperture_floor_extent_rows(rows: u16, radius_rows: f32) -> i16 {
+    if rows == 0 {
+        return 0;
+    }
+    (f32::from(rows) / 2.0 + radius_rows + 0.5)
+        .floor()
+        .clamp(1.0, f32::from(rows)) as i16
+}
+
 impl CandidateAnchor {
     fn resolve(self, footprint: [i16; 2]) -> [i16; 2] {
         [self.x.resolve(footprint[0]), self.y.resolve(footprint[1])]
@@ -128,10 +160,10 @@ pub(crate) fn resolve_companion_composition(
         rows,
     ];
     let gauge_inner_radius_cells = gauge_inner_radii(input);
-    let aperture_radius_cells = [
-        f32::from(aperture_columns) / 2.0,
-        f32::from(input.rows) / 2.0,
-    ];
+    let aperture_radius_cells = aperture_radii_cells(input);
+    let grounded_radius_cells =
+        grounded_aperture_radii(aperture_radius_cells, FLOOR_APERTURE_INSET_CELLS);
+    let floor_extent_rows = aperture_floor_extent_rows(input.rows, aperture_radius_cells[1]);
     let mut accepted_bounds = Vec::<[i16; 4]>::new();
     let mut prop_placements = Vec::with_capacity(input.props.len());
     let mut tank_foreground_reserved_regions = Vec::new();
@@ -165,6 +197,7 @@ pub(crate) fn resolve_companion_composition(
                 prop,
                 aperture_columns,
                 candidate_rows,
+                floor_extent_rows,
                 [floor_hud_reserve_local[0], floor_hud_reserve_local[2]],
             )
         } else {
@@ -203,7 +236,7 @@ pub(crate) fn resolve_companion_composition(
                     columns,
                     rows,
                     if grounded {
-                        aperture_radius_cells
+                        grounded_radius_cells
                     } else {
                         gauge_inner_radius_cells
                     },
@@ -315,18 +348,22 @@ fn grounded_side_lane_anchors(
 ) -> Vec<CandidateAnchor> {
     let rows = i16::try_from(rows).unwrap_or(i16::MAX);
     let grounded_y = CandidateAxis::End { extent: rows, offset: -1 };
-    let left = [0, -2, -4].map(|offset| CandidateAnchor {
+    let left = [0, 2, 4].map(|offset| CandidateAnchor {
         x: CandidateAxis::End { extent: floor_hud_columns[0], offset },
         y: grounded_y,
     });
-    let right = [0, 2, 4].map(|offset| CandidateAnchor {
+    let right = [0, -2, -4].map(|offset| CandidateAnchor {
         x: CandidateAxis::Start(floor_hud_columns[1].saturating_add(offset)),
         y: grounded_y,
     });
 
     match zone {
         PropZoneSnapshot::FloorLeft => left.to_vec(),
-        PropZoneSnapshot::FloorMid => vec![left[0], right[0], left[1], right[1], left[2], right[2]],
+        PropZoneSnapshot::FloorMid => {
+            // Exhaust the left side before borrowing the right-side lane so a
+            // centered prop cannot starve a FloorRight prop at the HUD edge.
+            vec![left[0], left[1], left[2], right[0], right[1], right[2]]
+        }
         PropZoneSnapshot::FloorRight => right.to_vec(),
         _ => Vec::new(),
     }
@@ -336,6 +373,7 @@ fn grounded_candidate_anchors(
     prop: &PropTopologySnapshot,
     columns: u16,
     rows: u16,
+    floor_extent_rows: i16,
     floor_hud_columns: [i16; 2],
 ) -> Vec<CandidateAnchor> {
     let mut horizontal = grounded_side_lane_anchors(prop.zone, rows, floor_hud_columns);
@@ -345,15 +383,13 @@ fn grounded_candidate_anchors(
         columns,
         rows,
     ));
-    let rows = i16::try_from(rows).unwrap_or(i16::MAX);
-
     let lane = floor_lane(prop);
     horizontal
         .into_iter()
         .map(|candidate| CandidateAnchor {
             x: candidate.x,
             y: CandidateAxis::End {
-                extent: rows,
+                extent: floor_extent_rows,
                 offset: lane.bottom_offset(),
             },
         })
@@ -661,6 +697,82 @@ mod tests {
     }
 
     #[test]
+    fn grounded_side_lane_fallbacks_move_inward_from_the_hud() {
+        let floor_hud_columns = [13, 31];
+        let footprint = [1, 1];
+        let left = grounded_side_lane_anchors(PropZoneSnapshot::FloorLeft, ROWS, floor_hud_columns)
+            .into_iter()
+            .map(|candidate| candidate.resolve(footprint)[0])
+            .collect::<Vec<_>>();
+        let right =
+            grounded_side_lane_anchors(PropZoneSnapshot::FloorRight, ROWS, floor_hud_columns)
+                .into_iter()
+                .map(|candidate| candidate.resolve(footprint)[0])
+                .collect::<Vec<_>>();
+
+        assert_eq!(left, vec![12, 14, 16]);
+        assert_eq!(right, vec![31, 29, 27]);
+    }
+
+    #[test]
+    fn moss_and_reeds_keep_an_inset_and_separate_floor_depths() {
+        for &(width_points, height_points) in SURFACES {
+            let props = [
+                crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+                crate::game::habitat::TOKEN_REEDS_5M,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(stable_order, catalog_id)| {
+                let spec = crate::game::habitat::catalog_prop_by_str(catalog_id)
+                    .expect("ground vegetation catalog entry");
+                prop_topology(
+                    spec.id,
+                    u8::try_from(stable_order).unwrap(),
+                    spec.zone.into(),
+                    spec.pet_layer.into(),
+                )
+            })
+            .collect::<Vec<_>>();
+            let composition = resolve_for(&props, width_points, height_points);
+            let aperture_radius_points = width_points.min(height_points) / 2.0;
+            let full_radii = [
+                aperture_radius_points / (width_points / f32::from(COLUMNS)),
+                aperture_radius_points / (height_points / f32::from(ROWS)),
+            ];
+            let radii = [full_radii[0] - 1.0, full_radii[1]];
+            let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
+            let floor_extent = (center[1] + full_radii[1] + 0.5)
+                .floor()
+                .clamp(1.0, f32::from(ROWS)) as i16;
+
+            assert_eq!(composition.prop_placements.len(), 2);
+            for placement in &composition.prop_placements {
+                assert!(placement.visible, "{width_points}x{height_points}");
+                assert!(placement.grounded);
+                for col in [placement.bounds_cells[0], placement.bounds_cells[2] - 1] {
+                    for row in [placement.bounds_cells[1], placement.bounds_cells[3] - 1] {
+                        let dx = (f32::from(col) + 0.5 - center[0]) / radii[0];
+                        let dy = (f32::from(row) + 0.5 - center[1]) / radii[1];
+                        assert!(
+                            dx * dx + dy * dy <= 1.0,
+                            "{width_points}x{height_points} clipped {placement:?}",
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                composition.prop_placements[0].bounds_cells[3],
+                floor_extent - 1
+            );
+            assert_eq!(
+                composition.prop_placements[1].bounds_cells[3],
+                floor_extent - 3
+            );
+        }
+    }
+
+    #[test]
     fn grounded_props_use_rear_middle_and_near_floor_contacts() {
         let props = [
             prop_topology(
@@ -699,7 +811,7 @@ mod tests {
 
     #[test]
     fn floor_lane_choice_ignores_stable_order_and_surface_shape() {
-        let resolve_contact = |stable_order, width_points, height_points| {
+        let resolve_lane_offset = |stable_order, width_points, height_points| {
             let props = [prop_topology(
                 crate::game::habitat::TOKEN_PEBBLE_25K,
                 stable_order,
@@ -708,13 +820,18 @@ mod tests {
             )];
             let placement = resolve_for(&props, width_points, height_points).prop_placements[0];
             assert!(placement.visible);
-            placement.bounds_cells[3]
+            let aperture_radius_rows =
+                width_points.min(height_points) / 2.0 / (height_points / f32::from(ROWS));
+            let floor_extent_rows = (f32::from(ROWS) / 2.0 + aperture_radius_rows + 0.5)
+                .floor()
+                .clamp(1.0, f32::from(ROWS)) as i16;
+            floor_extent_rows - placement.bounds_cells[3]
         };
 
-        assert_eq!(resolve_contact(0, 360.0, 360.0), 16);
-        assert_eq!(resolve_contact(7, 360.0, 360.0), 16);
-        assert_eq!(resolve_contact(3, 480.0, 360.0), 16);
-        assert_eq!(resolve_contact(5, 360.0, 480.0), 16);
+        assert_eq!(resolve_lane_offset(0, 360.0, 360.0), 2);
+        assert_eq!(resolve_lane_offset(7, 360.0, 360.0), 2);
+        assert_eq!(resolve_lane_offset(3, 480.0, 360.0), 2);
+        assert_eq!(resolve_lane_offset(5, 360.0, 480.0), 2);
     }
 
     #[test]
@@ -784,6 +901,11 @@ mod tests {
         ];
 
         for &(width_points, height_points) in SURFACES {
+            let aperture_radius_rows =
+                width_points.min(height_points) / 2.0 / (height_points / f32::from(ROWS));
+            let floor_extent_rows = (f32::from(ROWS) / 2.0 + aperture_radius_rows + 0.5)
+                .floor()
+                .clamp(1.0, f32::from(ROWS)) as i16;
             for arrangement in &arrangements {
                 let props = arrangement
                     .iter()
@@ -802,7 +924,8 @@ mod tests {
                 for (prop, placement) in props.iter().zip(&composition.prop_placements) {
                     if placement.visible {
                         assert_eq!(
-                            placement.bounds_cells[3], 16,
+                            floor_extent_rows - placement.bounds_cells[3],
+                            2,
                             "{width_points}x{height_points} {arrangement:?} {} changed lanes",
                             prop.catalog_id
                         );
@@ -810,6 +933,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn same_lane_competition_hides_after_inset_candidates_are_exhausted() {
+        let fixtures = [
+            crate::game::habitat::TOKEN_PEBBLE_25K,
+            crate::game::habitat::TOKEN_SHELL_100K,
+            crate::game::habitat::TOKEN_MOSS_TUFT_250K,
+            crate::game::habitat::TOKEN_SHARD_1M,
+            crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            crate::game::habitat::TOKEN_ORBIT_5M,
+            crate::game::habitat::TOKEN_REEDS_5M,
+            crate::game::habitat::WILT_RECOVERY_SPROUT,
+        ];
+        let props = fixtures
+            .into_iter()
+            .enumerate()
+            .map(|(stable_order, catalog_id)| {
+                prop_topology(
+                    catalog_id,
+                    u8::try_from(stable_order).unwrap(),
+                    PropZoneSnapshot::FloorLeft,
+                    AuthoredDepthSnapshot::Foreground,
+                )
+            })
+            .collect::<Vec<_>>();
+        let composition = resolve_for(&props, 360.0, 360.0);
+        let visible = composition
+            .prop_placements
+            .iter()
+            .filter(|placement| placement.visible)
+            .collect::<Vec<_>>();
+
+        assert!(
+            visible.len() < props.len(),
+            "competition did not exhaust candidates"
+        );
+        assert!(visible
+            .iter()
+            .all(|placement| placement.bounds_cells[3] == 17));
     }
 
     #[test]
@@ -1143,12 +1306,11 @@ mod tests {
                 );
                 let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
                 let safe_radii = if placement.grounded {
-                    let aperture_columns = if width_points > height_points {
-                        36.0
-                    } else {
-                        44.0
-                    };
-                    [aperture_columns / 2.0, f32::from(ROWS) / 2.0]
+                    let aperture_radius_points = width_points.min(height_points) / 2.0;
+                    [
+                        aperture_radius_points / (width_points / f32::from(COLUMNS)) - 1.0,
+                        aperture_radius_points / (height_points / f32::from(ROWS)),
+                    ]
                 } else {
                     expected_radii
                 };
@@ -1189,6 +1351,12 @@ mod tests {
                     ([9, 10, 35, 17], [13, 10, 31, 15], [9, 10, 26, 7])
                 };
             let expected_bottom = [0, 13, 44, 18];
+            let aperture_radius_rows =
+                width_points.min(height_points) / 2.0 / (height_points / f32::from(ROWS));
+            let floor_extent = (f32::from(ROWS) / 2.0 + aperture_radius_rows + 0.5)
+                .floor()
+                .clamp(1.0, f32::from(ROWS)) as i16;
+            let floor_contacts = [floor_extent - 3, floor_extent - 2, floor_extent - 1];
             assert_eq!(composition.hud_reserve_cells, expected_hud);
             assert_eq!(composition.tank_reserved_regions.len(), 2);
             assert_eq!(
@@ -1222,7 +1390,7 @@ mod tests {
                         placement.bounds_cells,
                         expected_floor_hud,
                     );
-                    assert!([15, 16, 17].contains(&placement.bounds_cells[3]));
+                    assert!(floor_contacts.contains(&placement.bounds_cells[3]));
                 } else {
                     assert!(!intersects(placement.bounds_cells, expected_hud));
                     assert!(!intersects(placement.bounds_cells, expected_bottom));

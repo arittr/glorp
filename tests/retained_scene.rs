@@ -499,6 +499,7 @@ fn retained_full_cast_composition_matrix() {
             inner_radius as f32 / cell[1] - 0.5,
         ];
         let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
+        let floor_extent = (f32::from(ROWS) / 2.0 + aperture_radius as f32 / cell[1] + 0.5).floor();
         let aperture_columns =
             (width_points.min(height_points) / width_points * f32::from(COLUMNS)).round();
         let aperture_start = ((f32::from(COLUMNS) - aperture_columns) / 2.0).floor();
@@ -561,7 +562,10 @@ fn retained_full_cast_composition_matrix() {
                         | PropZoneSnapshot::FloorRight
                 );
                 let prop_safe_radii = if grounded {
-                    [aperture_columns / 2.0, f32::from(ROWS) / 2.0]
+                    [
+                        aperture_radius as f32 / cell[0] - 1.0,
+                        aperture_radius as f32 / cell[1],
+                    ]
                 } else {
                     safe_radii
                 };
@@ -583,7 +587,7 @@ fn retained_full_cast_composition_matrix() {
                 );
                 if grounded {
                     assert!(
-                        [15.0, 16.0, 17.0]
+                        [floor_extent - 3.0, floor_extent - 2.0, floor_extent - 1.0]
                             .into_iter()
                             .any(|contact| (bounds[3] - contact).abs() < 0.0001),
                         "{label} slot {} lost its grounded baseline",
