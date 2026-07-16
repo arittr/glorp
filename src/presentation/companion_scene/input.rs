@@ -283,6 +283,12 @@ impl CompanionSceneSnapshot {
             crate::round::depth::depth_lifecycle_scale(asleep, calm),
         )
         .map_err(|_| CompanionSceneProjectionError::InvalidDepthProjection)?;
+        let depth_placement = crate::round::placement::resolve_round_depth_placement(
+            motion,
+            depth,
+            input.motion_viewport(),
+        )
+        .map_err(|_| CompanionSceneProjectionError::InvalidDepthProjection)?;
 
         Ok(Self {
             schema_version: COMPANION_SCENE_SCHEMA_VERSION,
@@ -319,7 +325,7 @@ impl CompanionSceneSnapshot {
             }),
             frame: FrameSnapshot {
                 elapsed_ms,
-                pet_anchor_points: motion.motion_top_left_points,
+                pet_anchor_points: depth_placement.anchor_top_left_points,
                 pet_depth: motion.normalized_depth,
                 pet_depth_cue: DepthCue {
                     scale: depth.scale,
@@ -403,9 +409,15 @@ impl CompanionSceneSnapshot {
             crate::round::depth::depth_lifecycle_scale(self.frame.asleep, self.frame.calm),
         )
         .map_err(|_| CompanionSceneProjectionError::InvalidDepthProjection)?;
+        let depth_placement = crate::round::placement::resolve_round_depth_placement(
+            motion,
+            depth,
+            input.motion_viewport(),
+        )
+        .map_err(|_| CompanionSceneProjectionError::InvalidDepthProjection)?;
         let mut frame = self.frame.clone();
         frame.elapsed_ms = clock.elapsed_ms;
-        frame.pet_anchor_points = motion.motion_top_left_points;
+        frame.pet_anchor_points = depth_placement.anchor_top_left_points;
         frame.pet_depth = motion.normalized_depth;
         frame.pet_depth_cue = DepthCue {
             scale: depth.scale,
@@ -1534,6 +1546,15 @@ mod tests {
 
         assert_eq!(initial.frame, replay.frame);
         assert_eq!(initial.frame.bob_offset_y_points, 0.0);
+        assert_eq!(initial.frame.pet_depth, 0.0);
+        assert_eq!(
+            initial.frame.pet_depth_cue,
+            crate::presentation::companion_scene::DepthCue::NEUTRAL
+        );
+        let cell_h = initial.topology.glyph_grid.cell_extent_points[1];
+        let reduced_center_y =
+            initial.frame.pet_anchor_points[1] / cell_h + f32::from(PET_LATTICE_HEIGHT) / 2.0;
+        assert!((reduced_center_y / f32::from(input.grid_rows) - 0.5).abs() < 1.0e-4);
         assert!(initial
             .frame
             .prop_instances
@@ -1893,6 +1914,23 @@ mod tests {
         assert_eq!(
             CompanionSceneSnapshot::project_with_input(&vm, underflow_layout),
             Err(CompanionSceneProjectionError::InvalidProjectionLayout)
+        );
+    }
+
+    #[test]
+    fn projection_propagates_depth_placement_failure_without_a_fallback_anchor() {
+        let vm = fixture_with_real_pet_art();
+        let input = CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(datetime!(2026-07-11 12:00 UTC), 500),
+            CompanionLogicalLayout::round(240.0, 240.0),
+            12,
+            12,
+            crate::round::scene::current_round_motion_clearance(12),
+        );
+
+        assert_eq!(
+            CompanionSceneSnapshot::project_with_input(&vm, input),
+            Err(CompanionSceneProjectionError::InvalidDepthProjection)
         );
     }
 
@@ -2326,11 +2364,22 @@ mod tests {
             input.motion_viewport(),
             &crate::round::motion::companion_roam_motion(),
         );
+        let depth = crate::round::depth::resolve_smooth_depth(
+            shared.normalized_depth,
+            crate::round::depth::depth_lifecycle_scale(false, false),
+        )
+        .unwrap();
+        let expected_placement = crate::round::placement::resolve_round_depth_placement(
+            shared,
+            depth,
+            input.motion_viewport(),
+        )
+        .unwrap();
 
         assert_eq!(snapshot.frame.elapsed_ms, elapsed_ms);
         assert_eq!(
             snapshot.frame.pet_anchor_points,
-            shared.motion_top_left_points
+            expected_placement.anchor_top_left_points
         );
         assert_eq!(snapshot.frame.pet_depth, shared.normalized_depth);
         assert_eq!(snapshot.frame.facing, shared.facing);
@@ -3780,9 +3829,28 @@ mod tests {
             );
             assert_eq!(snapshot.frame.pet_depth_cue.opacity, expected.atmosphere);
             assert_eq!(snapshot.frame.pet_depth_cue.saturation, 1.0);
+            assert_ne!(
+                shared.bob_offset_y_cells, 0.0,
+                "the parity fixture must exercise retained idle bob"
+            );
+            let expected_placement = crate::round::placement::resolve_round_depth_placement(
+                shared,
+                expected,
+                input.motion_viewport(),
+            )
+            .unwrap();
             assert_eq!(
                 snapshot.frame.pet_anchor_points,
-                shared.motion_top_left_points
+                expected_placement.anchor_top_left_points
+            );
+            let cell_h = snapshot.topology.glyph_grid.cell_extent_points[1];
+            let rendered_center_y = snapshot.frame.pet_anchor_points[1] / cell_h
+                + f32::from(PET_LATTICE_HEIGHT) / 2.0
+                + snapshot.frame.bob_offset_y_points / cell_h
+                - snapshot.frame.pet_depth_cue.y_offset_points_up / cell_h;
+            assert!(
+                (rendered_center_y - expected_placement.final_center_cells.y).abs() < 1.0e-4,
+                "retained bob and perspective must land on the resolved rendered center"
             );
         }
     }
@@ -3828,14 +3896,36 @@ mod tests {
             input.motion_viewport(),
             &crate::round::motion::companion_roam_motion(),
         );
+        let active_depth = crate::round::depth::resolve_smooth_depth(
+            active_shared.normalized_depth,
+            crate::round::depth::depth_lifecycle_scale(false, false),
+        )
+        .unwrap();
+        let resting_depth = crate::round::depth::resolve_smooth_depth(
+            resting_shared.normalized_depth,
+            crate::round::depth::depth_lifecycle_scale(true, true),
+        )
+        .unwrap();
+        let active_expected = crate::round::placement::resolve_round_depth_placement(
+            active_shared,
+            active_depth,
+            input.motion_viewport(),
+        )
+        .unwrap();
+        let resting_expected = crate::round::placement::resolve_round_depth_placement(
+            resting_shared,
+            resting_depth,
+            input.motion_viewport(),
+        )
+        .unwrap();
 
         assert_eq!(
             active_snapshot.frame.pet_anchor_points,
-            active_shared.motion_top_left_points
+            active_expected.anchor_top_left_points
         );
         assert_eq!(
             resting_snapshot.frame.pet_anchor_points,
-            resting_shared.motion_top_left_points
+            resting_expected.anchor_top_left_points
         );
         assert_eq!(
             resting_snapshot.frame.bob_offset_y_points,

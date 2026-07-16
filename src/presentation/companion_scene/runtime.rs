@@ -707,6 +707,37 @@ pub enum SnapshotRejection {
     FixedCapacity,
 }
 
+fn snapshot_pet_clearance(
+    snapshot: &CompanionSceneSnapshot,
+) -> crate::presentation::smooth::SmoothBounds {
+    let cell = snapshot.topology.glyph_grid.cell_extent_points;
+    let final_center = crate::presentation::smooth::SmoothPoint {
+        x: snapshot.frame.pet_anchor_points[0] / cell[0] + f32::from(PET_LATTICE_WIDTH) / 2.0,
+        // `pet_transform` converts the top-left anchor into Y-up space after
+        // adding downward bob, then applies the signed Y-up perspective cue.
+        // Converted back to the resolver's Y-down cell space, the rendered
+        // center therefore adds bob and subtracts the stored Y-up cue once.
+        y: snapshot.frame.pet_anchor_points[1] / cell[1]
+            + f32::from(PET_LATTICE_HEIGHT) / 2.0
+            + snapshot.frame.bob_offset_y_points / cell[1]
+            - snapshot.frame.pet_depth_cue.y_offset_points_up / cell[1],
+    };
+    let half_w =
+        crate::pet::render::ART_WIDTH as f32 / 2.0 * crate::round::depth::SMOOTH_PET_NEAR_SCALE;
+    let half_h =
+        crate::pet::render::ART_HEIGHT as f32 / 2.0 * crate::round::depth::SMOOTH_PET_NEAR_SCALE;
+    crate::presentation::smooth::SmoothBounds {
+        min: crate::presentation::smooth::SmoothPoint {
+            x: final_center.x - half_w,
+            y: final_center.y - half_h,
+        },
+        max: crate::presentation::smooth::SmoothPoint {
+            x: final_center.x + half_w,
+            y: final_center.y + half_h,
+        },
+    }
+}
+
 pub(crate) fn validate_snapshot(
     snapshot: &CompanionSceneSnapshot,
 ) -> Result<(), SnapshotRejection> {
@@ -881,6 +912,19 @@ pub(crate) fn validate_snapshot(
         })
     {
         return Err(SnapshotRejection::InconsistentIdentity);
+    }
+    let motion_viewport = crate::round::motion::RoundCompanionMotionViewport {
+        grid_columns: grid.columns,
+        grid_rows: grid.rows,
+        width_points: layout.width_points,
+        height_points: layout.height_points,
+        clearance: crate::round::scene::current_round_motion_clearance(grid.rows),
+    };
+    if !crate::round::placement::bounds_inside_round_aperture(
+        snapshot_pet_clearance(snapshot),
+        motion_viewport,
+    ) {
+        return Err(SnapshotRejection::InvalidValue);
     }
     if snapshot
         .content
@@ -5038,6 +5082,26 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn snapshot_rejects_pet_clearance_outside_aperture() {
+        let mut invalid = (*snapshot()).clone();
+        assert_ne!(invalid.frame.bob_offset_y_points, 0.0);
+        assert_ne!(invalid.frame.pet_depth_cue.y_offset_points_up, 0.0);
+
+        // On this 360x360, 60x30 fixture, y=236.8 keeps the maximum-scale
+        // corners inside if the five-point bob is omitted. The actual retained
+        // transform adds that bob and the depth perspective, moving the lower
+        // corners just outside the physical circle.
+        invalid.frame.pet_anchor_points[1] = 236.8;
+        let mut without_bob = invalid.clone();
+        without_bob.frame.bob_offset_y_points = 0.0;
+        assert_eq!(validate_snapshot(&without_bob), Ok(()));
+        assert_eq!(
+            validate_snapshot(&invalid),
+            Err(SnapshotRejection::InvalidValue)
+        );
     }
 
     #[test]

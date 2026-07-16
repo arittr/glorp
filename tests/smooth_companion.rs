@@ -1422,6 +1422,70 @@ fn depth_transform_reaches_the_full_rear_and_front_visual_envelope() {
 }
 
 #[test]
+fn smooth_and_direct_scene_share_depth_driven_pet_centers() {
+    use glorp::presentation::companion_scene::{
+        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+        CompanionSceneSnapshot,
+    };
+
+    let mut vm = normal_lifecycle_fixture();
+    let rendered = glorp::pet::render::render_pet(
+        &glorp::pet::generation::generate_pet(&vm.pet_render.seed)
+            .with_species(vm.pet_render.generated_species),
+        vm.pet_render.stage,
+        vm.pet_render.mood,
+        glorp::pet::render::AnimationFrame::default(),
+    );
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+    let elapsed_ms = 500;
+    for depth in [-1.0, 0.0, 1.0] {
+        let smooth = plan_at_depth(&vm, elapsed_ms, depth);
+        let input = CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(DEPTH_NOW, elapsed_ms),
+            CompanionLogicalLayout::round(VIEWPORT_WIDTH_POINTS, VIEWPORT_HEIGHT_POINTS),
+            GRID_COLS,
+            GRID_ROWS,
+            glorp::round::scene::current_round_motion_clearance(GRID_ROWS),
+        )
+        .with_depth_override(depth);
+        let direct = CompanionSceneSnapshot::project_with_input(&vm, input).unwrap();
+        let cell = direct.topology.glyph_grid.cell_extent_points;
+        assert_ne!(
+            direct.frame.bob_offset_y_points, 0.0,
+            "the parity fixture must exercise retained idle bob"
+        );
+        assert!(
+            (smooth.pet.bob_offset.y - direct.frame.bob_offset_y_points / cell[1]).abs() < 1.0e-4
+        );
+
+        let smooth_center = SmoothPoint {
+            x: smooth.pet.final_anchor.x + f32::from(PET_W) / 2.0,
+            y: smooth.pet.final_anchor.y + f32::from(PET_H) / 2.0,
+        };
+        let direct_center = SmoothPoint {
+            x: direct.frame.pet_anchor_points[0] / cell[0] + f32::from(PET_W) / 2.0,
+            y: direct.frame.pet_anchor_points[1] / cell[1]
+                + f32::from(PET_H) / 2.0
+                + direct.frame.bob_offset_y_points / cell[1]
+                - direct.frame.pet_depth_cue.y_offset_points_up / cell[1],
+        };
+        assert!(
+            (smooth_center.x - direct_center.x).abs() < 1.0e-4,
+            "depth {depth}: smooth x={} direct x={}",
+            smooth_center.x,
+            direct_center.x
+        );
+        assert!(
+            (smooth_center.y - direct_center.y).abs() < 1.0e-4,
+            "depth {depth}: smooth y={} direct y={}",
+            smooth_center.y,
+            direct_center.y
+        );
+    }
+}
+
+#[test]
 fn awake_calm_depth_reaches_the_same_tank_endpoints_as_active() {
     let active = normal_lifecycle_fixture();
     let mut calm = active.clone();
