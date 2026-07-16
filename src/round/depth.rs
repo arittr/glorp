@@ -56,6 +56,48 @@ pub fn resolve_smooth_depth(
 
     let effective_z =
         crate::presentation::companion_effects::effective_depth(raw_z, lifecycle_scale);
+    let (scale, perspective_y, atmosphere) = canonical_smooth_depth_cues(effective_z);
+    validate_smooth_depth_sample(SmoothDepthSample {
+        raw_z,
+        effective_z,
+        scale,
+        perspective_y,
+        atmosphere,
+    })
+}
+
+pub(crate) fn validate_smooth_depth_sample(
+    sample: SmoothDepthSample,
+) -> Result<SmoothDepthSample, SmoothDepthError> {
+    let (expected_scale, expected_perspective_y, expected_atmosphere) =
+        canonical_smooth_depth_cues(sample.effective_z);
+    let clamped_raw_z = sample.raw_z.clamp(-1.0, 1.0);
+    let effective_depth_is_reachable = if clamped_raw_z >= 0.0 {
+        (0.0..=clamped_raw_z).contains(&sample.effective_z)
+    } else {
+        (clamped_raw_z..=0.0).contains(&sample.effective_z)
+    };
+    if !sample.raw_z.is_finite()
+        || !sample.effective_z.is_finite()
+        || !(-1.0..=1.0).contains(&sample.effective_z)
+        || !sample.scale.is_finite()
+        || !(SMOOTH_PET_FAR_SCALE..=SMOOTH_PET_NEAR_SCALE).contains(&sample.scale)
+        || !sample.perspective_y.is_finite()
+        || sample.perspective_y.abs() > SMOOTH_PERSPECTIVE_Y_MAX
+        || sample.perspective_y.abs() >= 1.0
+        || !sample.atmosphere.is_finite()
+        || !(SMOOTH_FAR_ATMOSPHERE..=1.0).contains(&sample.atmosphere)
+        || sample.scale != expected_scale
+        || sample.perspective_y != expected_perspective_y
+        || sample.atmosphere != expected_atmosphere
+        || !effective_depth_is_reachable
+    {
+        return Err(SmoothDepthError::InvalidOutput);
+    }
+    Ok(sample)
+}
+
+fn canonical_smooth_depth_cues(effective_z: f32) -> (f32, f32, f32) {
     // The neutral plane renders the art at exactly 1.0 for Classic parity, so the
     // asymmetric excursion is mapped piecewise around it: a shallow back half and
     // a slightly deeper front half.
@@ -68,32 +110,7 @@ pub fn resolve_smooth_depth(
     // Only the back half of the tank carries murk: from neutral to the glass the
     // pet is fully present.
     let atmosphere = 1.0 + effective_z.min(0.0) * (1.0 - SMOOTH_FAR_ATMOSPHERE);
-    validate_smooth_depth_sample(SmoothDepthSample {
-        raw_z,
-        effective_z,
-        scale,
-        perspective_y,
-        atmosphere,
-    })
-}
-
-fn validate_smooth_depth_sample(
-    sample: SmoothDepthSample,
-) -> Result<SmoothDepthSample, SmoothDepthError> {
-    if !sample.raw_z.is_finite()
-        || !sample.effective_z.is_finite()
-        || !(-1.0..=1.0).contains(&sample.effective_z)
-        || !sample.scale.is_finite()
-        || !(SMOOTH_PET_FAR_SCALE..=SMOOTH_PET_NEAR_SCALE).contains(&sample.scale)
-        || !sample.perspective_y.is_finite()
-        || sample.perspective_y.abs() > SMOOTH_PERSPECTIVE_Y_MAX
-        || sample.perspective_y.abs() >= 1.0
-        || !sample.atmosphere.is_finite()
-        || !(SMOOTH_FAR_ATMOSPHERE..=1.0).contains(&sample.atmosphere)
-    {
-        return Err(SmoothDepthError::InvalidOutput);
-    }
-    Ok(sample)
+    (scale, perspective_y, atmosphere)
 }
 
 #[cfg(test)]

@@ -86,12 +86,11 @@ fn resolve_round_depth_placement_impl(
     {
         return Err(RoundDepthPlacementError::NonFiniteInput);
     }
+    crate::round::depth::validate_smooth_depth_sample(depth)
+        .map_err(|_| RoundDepthPlacementError::InvalidOutput)?;
 
-    let aperture_center = SmoothPoint {
-        x: f32::from(viewport.grid_columns) / 2.0,
-        y: f32::from(viewport.grid_rows) / 2.0,
-    };
-    let aperture_radii = aperture_center;
+    let (aperture_center, aperture_radii) =
+        round_aperture_geometry(viewport).ok_or(RoundDepthPlacementError::NonFiniteInput)?;
     let half_ink = SmoothPoint {
         x: crate::pet::render::ART_WIDTH as f32 / 2.0 * crate::round::depth::SMOOTH_PET_NEAR_SCALE,
         y: crate::pet::render::ART_HEIGHT as f32 / 2.0 * crate::round::depth::SMOOTH_PET_NEAR_SCALE,
@@ -109,14 +108,18 @@ fn resolve_round_depth_placement_impl(
         ROUND_NEUTRAL_CENTER_Y_FRACTION
             + depth.effective_z * (ROUND_NEUTRAL_CENTER_Y_FRACTION - ROUND_REAR_CENTER_Y_FRACTION)
     };
-    let requested_y = f32::from(viewport.grid_rows) * target_fraction + tapered_local_y_cells;
+    let requested_base_y = f32::from(viewport.grid_rows) * target_fraction + tapered_local_y_cells;
+    // Both renderers add bob and perspective after applying their prepared anchor.
+    // Resolve safety against that final rendered center, then remove both offsets
+    // from the anchor below so the render-time additions land back on this center.
+    let requested_rendered_y = requested_base_y + motion.bob_offset_y_cells;
 
     let centered_x_ratio = half_ink.x / aperture_radii.x;
     let max_center_dy = aperture_radii.y * (1.0 - centered_x_ratio.powi(2)).sqrt() - half_ink.y;
     if !max_center_dy.is_finite() || max_center_dy < 0.0 {
         return Err(RoundDepthPlacementError::PetDoesNotFit);
     }
-    let center_y = requested_y.clamp(
+    let center_y = requested_rendered_y.clamp(
         aperture_center.y - max_center_dy,
         aperture_center.y + max_center_dy,
     );
@@ -147,7 +150,10 @@ fn resolve_round_depth_placement_impl(
     };
     let anchor_top_left_cells = MotionPoint {
         x: center_x - crate::pet::render::FRAME_WIDTH as f32 / 2.0,
-        y: center_y - crate::pet::render::FRAME_HEIGHT as f32 / 2.0 - depth.perspective_y,
+        y: center_y
+            - crate::pet::render::FRAME_HEIGHT as f32 / 2.0
+            - depth.perspective_y
+            - motion.bob_offset_y_cells,
     };
     let anchor_top_left_points = [
         anchor_top_left_cells.x * viewport.width_points / f32::from(viewport.grid_columns),
@@ -182,14 +188,9 @@ pub(crate) fn bounds_inside_round_aperture(
     bounds: SmoothBounds,
     viewport: RoundCompanionMotionViewport,
 ) -> bool {
-    if viewport.grid_columns == 0 || viewport.grid_rows == 0 {
+    let Some((center, radii)) = round_aperture_geometry(viewport) else {
         return false;
-    }
-    let center = SmoothPoint {
-        x: f32::from(viewport.grid_columns) / 2.0,
-        y: f32::from(viewport.grid_rows) / 2.0,
     };
-    let radii = center;
     if [
         bounds.min.x,
         bounds.min.y,
@@ -219,6 +220,40 @@ pub(crate) fn bounds_inside_round_aperture(
         let y = (corner.y - center.y) / radii.y;
         x * x + y * y <= 1.0 + 1.0e-4
     })
+}
+
+fn round_aperture_geometry(
+    viewport: RoundCompanionMotionViewport,
+) -> Option<(SmoothPoint, SmoothPoint)> {
+    if viewport.grid_columns == 0
+        || viewport.grid_rows == 0
+        || !viewport.width_points.is_finite()
+        || !viewport.height_points.is_finite()
+        || viewport.width_points <= 0.0
+        || viewport.height_points <= 0.0
+    {
+        return None;
+    }
+    let cell_extent = SmoothPoint {
+        x: viewport.width_points / f32::from(viewport.grid_columns),
+        y: viewport.height_points / f32::from(viewport.grid_rows),
+    };
+    let radius_points = viewport.width_points.min(viewport.height_points) / 2.0;
+    let center = SmoothPoint {
+        x: f32::from(viewport.grid_columns) / 2.0,
+        y: f32::from(viewport.grid_rows) / 2.0,
+    };
+    let radii = SmoothPoint {
+        x: radius_points / cell_extent.x,
+        y: radius_points / cell_extent.y,
+    };
+    if [cell_extent.x, cell_extent.y, radii.x, radii.y]
+        .into_iter()
+        .any(|value| !value.is_finite() || value <= 0.0)
+    {
+        return None;
+    }
+    Some((center, radii))
 }
 
 #[doc(hidden)]
@@ -271,6 +306,32 @@ mod tests {
             (actual - expected).abs() < 1.0e-4,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn assert_bounds_inside_physical_aperture(
+        bounds: SmoothBounds,
+        viewport: RoundCompanionMotionViewport,
+    ) {
+        let center_points = [viewport.width_points / 2.0, viewport.height_points / 2.0];
+        let radius_points = viewport.width_points.min(viewport.height_points) / 2.0;
+        let cell_extent = [
+            viewport.width_points / f32::from(viewport.grid_columns),
+            viewport.height_points / f32::from(viewport.grid_rows),
+        ];
+        for corner in [
+            bounds.min,
+            SmoothPoint { x: bounds.max.x, y: bounds.min.y },
+            SmoothPoint { x: bounds.min.x, y: bounds.max.y },
+            bounds.max,
+        ] {
+            let point = [corner.x * cell_extent[0], corner.y * cell_extent[1]];
+            let distance_squared =
+                (point[0] - center_points[0]).powi(2) + (point[1] - center_points[1]).powi(2);
+            assert!(
+                distance_squared <= radius_points.powi(2) + 1.0e-2,
+                "corner {corner:?} maps to {point:?} outside the physical aperture"
+            );
+        }
     }
 
     #[test]
@@ -365,11 +426,20 @@ mod tests {
     }
 
     #[test]
+    fn maximum_scale_corners_stay_inside_the_physical_circle_with_nonsquare_cells() {
+        let depth = resolve_smooth_depth(1.0, 1.0).unwrap();
+        let placement =
+            resolve_round_depth_placement(motion(20.0, 0.0, 1.0), depth, viewport(5)).unwrap();
+
+        assert_bounds_inside_physical_aperture(placement.max_scale_bounds_cells, viewport(5));
+    }
+
+    #[test]
     fn small_but_valid_apertures_compress_depth_symmetrically() {
         let mut small = viewport(0);
         small.grid_columns = 20;
         small.grid_rows = 12;
-        small.width_points = 200.0;
+        small.width_points = 240.0;
         small.height_points = 240.0;
         let far = resolve_round_depth_placement(
             motion(0.0, 0.0, -1.0),
@@ -423,5 +493,40 @@ mod tests {
             resolve_round_depth_placement(motion(0.0, 0.0, 0.0), depth, too_small),
             Err(RoundDepthPlacementError::PetDoesNotFit)
         );
+    }
+
+    #[test]
+    fn finite_forged_depth_cues_fail_closed() {
+        let canonical = resolve_smooth_depth(0.5, 1.0).unwrap();
+        for forged in [
+            SmoothDepthSample { raw_z: 0.0, ..canonical },
+            SmoothDepthSample { scale: 1.0, ..canonical },
+            SmoothDepthSample { perspective_y: 0.0, ..canonical },
+            SmoothDepthSample { atmosphere: 0.99, ..canonical },
+        ] {
+            assert_eq!(
+                resolve_round_depth_placement(motion(0.0, 0.0, 0.5), forged, viewport(5)),
+                Err(RoundDepthPlacementError::InvalidOutput)
+            );
+        }
+    }
+
+    #[test]
+    fn nonzero_bob_is_preaccounted_in_anchor_and_physical_aperture_bounds() {
+        let depth = resolve_smooth_depth(1.0, 1.0).unwrap();
+        let mut bobbing_motion = motion(0.0, 0.0, 1.0);
+        bobbing_motion.bob_offset_y_cells = 0.33;
+        let placement = resolve_round_depth_placement(bobbing_motion, depth, viewport(5)).unwrap();
+
+        let rendered_center_y = placement.anchor_top_left_cells.y
+            + crate::pet::render::FRAME_HEIGHT as f32 / 2.0
+            + depth.perspective_y
+            + bobbing_motion.bob_offset_y_cells;
+        assert_close(rendered_center_y, placement.final_center_cells.y);
+        assert_close(
+            (placement.max_scale_bounds_cells.min.y + placement.max_scale_bounds_cells.max.y) / 2.0,
+            rendered_center_y,
+        );
+        assert_bounds_inside_physical_aperture(placement.max_scale_bounds_cells, viewport(5));
     }
 }
