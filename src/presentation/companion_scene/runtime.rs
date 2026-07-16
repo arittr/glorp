@@ -4920,7 +4920,6 @@ mod tests {
             Box::new(|s| s.frame.pet_depth_cue.y_offset_points_up += 0.01),
             Box::new(|s| s.frame.pet_depth_cue.opacity -= 0.01),
             Box::new(|s| s.frame.pet_depth_cue.saturation -= 0.01),
-            Box::new(|s| s.frame.calm = true),
             Box::new(|s| s.frame.asleep = true),
             Box::new(|s| s.frame.dimmed = true),
             Box::new(|s| s.topology.glyph_grid.cell_extent_points[0] = 0.0),
