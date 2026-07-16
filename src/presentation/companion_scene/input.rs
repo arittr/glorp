@@ -246,7 +246,7 @@ impl CompanionSceneSnapshot {
         let parallax = DepthParallaxContext {
             motion,
             glyph_grid,
-            lifecycle_motion_scale: crate::round::depth::depth_lifecycle_scale(asleep, calm),
+            lifecycle_motion_scale: crate::round::parallax::parallax_lifecycle_scale(asleep, calm),
             reduce_motion: options.reduce_motion,
         };
         let visible_tank_inhabitants = project_tank_inhabitants(vm);
@@ -420,7 +420,7 @@ impl CompanionSceneSnapshot {
         let parallax = DepthParallaxContext {
             motion,
             glyph_grid: self.topology.glyph_grid,
-            lifecycle_motion_scale: crate::round::depth::depth_lifecycle_scale(
+            lifecycle_motion_scale: crate::round::parallax::parallax_lifecycle_scale(
                 self.frame.asleep,
                 self.frame.calm,
             ),
@@ -3201,6 +3201,75 @@ mod tests {
         vm.life_profile.calm_mode = true;
         let calm = project_snapshot(&vm, now, CompanionLogicalLayout::round(360.0, 360.0))
             .expect("calm tank projection");
+
+        assert_eq!(
+            calm.frame.pet_depth_cue, normal.frame.pet_depth_cue,
+            "awake calm depth must use the same full envelope as active depth"
+        );
+
+        let tick_clock = CompanionProjectionClock::new(now + time::Duration::seconds(1), 1_000);
+        let normal_tick = normal
+            .project_presentation_frame(
+                super::super::SemanticRevision(1),
+                tick_clock,
+                super::CompanionPresentationOptions::STANDARD,
+            )
+            .expect("normal presentation tick");
+        let calm_tick = calm
+            .project_presentation_frame(
+                super::super::SemanticRevision(1),
+                tick_clock,
+                super::CompanionPresentationOptions::STANDARD,
+            )
+            .expect("calm presentation tick");
+        assert_eq!(
+            calm_tick.frame.pet_depth_cue, normal_tick.frame.pet_depth_cue,
+            "presentation ticks must preserve the full awake depth envelope"
+        );
+
+        let assert_calm_parallax =
+            |frame: &super::super::FrameSnapshot, clock: CompanionProjectionClock| {
+                let motion = crate::round::motion::project_round_companion_motion_with_options(
+                    calm.frame.pet_motion_input,
+                    clock.wall_time,
+                    clock.elapsed_ms,
+                    CompanionSceneProjectionInput::round(
+                        clock,
+                        CompanionLogicalLayout::round(360.0, 360.0),
+                        44,
+                        18,
+                        crate::round::scene::current_round_motion_clearance(18),
+                    )
+                    .motion_viewport(),
+                    &crate::round::motion::companion_roam_motion(),
+                    crate::round::motion::RoundMotionProjectionOptions {
+                        depth_override: calm.frame.pet_depth_override,
+                    },
+                );
+                let semantic_cell = &calm.content.tank_animation_states[0].cells[0];
+                let accepted = &calm.frame.tank_instances[0];
+                let accepted_cell = &accepted.cells[0];
+                let projected_cell = &frame.tank_instances[0].cells[0];
+                let base = super::resolve_tank_transition_position(
+                    accepted,
+                    accepted_cell,
+                    clock.elapsed_ms,
+                );
+                let expected = super::bounded_depth_parallax_points(
+                    super::tank_cell_depth(semantic_cell),
+                    motion,
+                    calm.topology.glyph_grid,
+                    crate::round::parallax::parallax_lifecycle_scale(false, true),
+                    false,
+                );
+                assert_eq!(
+                    projected_cell.position_points,
+                    [base[0] + expected[0], base[1] + expected[1]],
+                    "tank parallax must retain calm attenuation"
+                );
+            };
+        assert_calm_parallax(&calm.frame, CompanionProjectionClock::new(now, 0));
+        assert_calm_parallax(&calm_tick.frame, tick_clock);
 
         assert_eq!(normal.content.tank_animation_states.len(), 2);
         for state in &normal.content.tank_animation_states {

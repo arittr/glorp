@@ -359,7 +359,7 @@ fn smooth_depth_resolver_maps_bounds_lifecycle_and_rejects_invalid_inputs() {
         [0.93, 1.0, 1.0]
     );
     assert_eq!(depth_lifecycle_scale(false, false), 1.0);
-    assert_eq!(depth_lifecycle_scale(false, true), 0.5);
+    assert_eq!(depth_lifecycle_scale(false, true), 1.0);
     assert_eq!(depth_lifecycle_scale(true, false), 0.25);
     assert_eq!(depth_lifecycle_scale(true, true), 0.25);
 
@@ -1292,8 +1292,8 @@ fn smooth_round_plan_keeps_privacy_claims_external_safe() {
 
 const DEPTH_NOW: time::OffsetDateTime = datetime!(2026-07-08 18:00:00.500 UTC);
 
-/// Depth excursions are attenuated when the pet is calm or asleep, so the
-/// far/neutral/near scale contract only holds in a normal lifecycle.
+/// Awake pets use the full depth envelope; sleep is the only lifecycle depth
+/// attenuation. These fixtures keep endpoint expectations explicit.
 fn normal_lifecycle_fixture() -> WatchViewModel {
     let mut vm = parity_fixture();
     vm.day_context.asleep = false;
@@ -1397,6 +1397,31 @@ fn depth_transform_maps_far_neutral_and_near_onto_scale_and_perspective() {
             "{role:?} moved {step} for a near depth step, expected {SMOOTH_PERSPECTIVE_Y_MAX}"
         );
     }
+}
+
+#[test]
+fn awake_calm_depth_reaches_the_same_tank_endpoints_as_active() {
+    let active = normal_lifecycle_fixture();
+    let mut calm = active.clone();
+    calm.life_profile.calm_mode = true;
+
+    for depth in [-1.0, 1.0] {
+        let active_plan = plan_at_depth(&active, 250, depth);
+        let calm_plan = plan_at_depth(&calm, 250, depth);
+
+        assert_eq!(calm_plan.pet.depth, active_plan.pet.depth);
+        assert_eq!(calm_plan.pet.scale, active_plan.pet.scale);
+        assert_eq!(
+            calm_plan.pet.perspective_offset,
+            active_plan.pet.perspective_offset
+        );
+    }
+
+    assert_eq!(
+        plan_at_depth(&calm, 250, 1.0).parallax_lifecycle_scale,
+        0.5,
+        "calm parallax attenuation remains independent from awake depth"
+    );
 }
 
 /// The offset between a body and its cast shadow encodes distance from the wall:
@@ -1798,9 +1823,9 @@ fn smooth_depth_resolves_atmospheric_attenuation_from_the_same_sample() {
     // the neutral plane to the glass.
     assert_eq!(resolve_smooth_depth(0.0, 1.0).unwrap().atmosphere, 1.0);
 
-    // A calm pet's depth excursion is attenuated, so its fade is too.
-    let calm_far = resolve_smooth_depth(-1.0, 0.5).unwrap().atmosphere;
-    assert!(calm_far > SMOOTH_FAR_ATMOSPHERE && calm_far < 1.0);
+    // A sleeping pet's depth excursion is attenuated, so its fade is too.
+    let asleep_far = resolve_smooth_depth(-1.0, 0.25).unwrap().atmosphere;
+    assert!(asleep_far > SMOOTH_FAR_ATMOSPHERE && asleep_far < 1.0);
 }
 
 #[test]

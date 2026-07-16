@@ -21,11 +21,9 @@ const WALL_SHADOW_DETACH_NEAR: f32 = 1.2;
 const WALL_SHADOW_STRENGTH_FAR: f32 = 1.0;
 const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.6;
 
-pub(crate) const fn depth_lifecycle_scale(asleep: bool, calm: bool) -> f32 {
+pub(crate) const fn depth_lifecycle_scale(asleep: bool, _calm: bool) -> f32 {
     if asleep {
         0.25
-    } else if calm {
-        0.5
     } else {
         1.0
     }

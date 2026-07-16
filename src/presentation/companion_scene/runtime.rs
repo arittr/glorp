@@ -4991,9 +4991,17 @@ mod tests {
     }
 
     #[test]
-    fn resolved_depth_and_calm_are_canonical_snapshot_identity() {
+    fn resolved_depth_and_sleep_are_canonical_snapshot_identity() {
         let base = snapshot();
         assert_eq!(validate_snapshot(&base), Ok(()));
+
+        let mut calm = (*base).clone();
+        calm.frame.calm = true;
+        assert_eq!(
+            validate_snapshot(&calm),
+            Ok(()),
+            "calm is not part of awake depth identity"
+        );
 
         let cases: Vec<SnapshotMutation> = vec![
             (
@@ -5015,12 +5023,11 @@ mod tests {
                 Box::new(|snapshot| snapshot.frame.pet_depth_cue.saturation -= 0.01),
             ),
             (
-                "calm lifecycle",
-                Box::new(|snapshot| snapshot.frame.calm = true),
-            ),
-            (
-                "asleep implies calm",
-                Box::new(|snapshot| snapshot.frame.asleep = true),
+                "sleep lifecycle",
+                Box::new(|snapshot| {
+                    snapshot.frame.asleep = true;
+                    snapshot.frame.calm = true;
+                }),
             ),
         ];
         for (name, mutate) in cases {
