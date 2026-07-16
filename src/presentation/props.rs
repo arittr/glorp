@@ -450,6 +450,20 @@ pub(crate) fn presentation_prop_max_footprint(
     footprint
 }
 
+pub(crate) fn presentation_prop_occupied_offsets(catalog_id: &str) -> Option<Vec<[i8; 2]>> {
+    let mut offsets = Vec::new();
+    for state in presentation_prop_visual_states(catalog_id)? {
+        for cell in presentation_prop_sprite(catalog_id, state)? {
+            let offset = [cell.dx, cell.dy];
+            if !offsets.contains(&offset) {
+                offsets.push(offset);
+            }
+        }
+    }
+    offsets.sort_unstable();
+    Some(offsets)
+}
+
 pub(crate) fn presentation_prop_footprint(
     catalog_id: &str,
     state: PresentationPropVisualState,
@@ -670,5 +684,13 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn vine_occupied_offsets_cover_every_animation_state() {
+        assert_eq!(
+            presentation_prop_occupied_offsets(TOKEN_HANGING_VINE_25M).unwrap(),
+            vec![[0, 0], [0, 2], [1, 0], [1, 1], [1, 2], [2, 0], [2, 2]],
+        );
     }
 }

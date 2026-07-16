@@ -9904,11 +9904,13 @@ mod tests {
     fn retained_full_cast_rois_are_nonblank_at_one_and_two_x() {
         use crate::pet::generation::Species;
         use crate::presentation::companion_scene::{
-            AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration, SceneGenerationKey,
+            AppliedRevisions, AuthoredDepthSnapshot, DeviceEpoch, LayoutGeneration,
+            PropZoneSnapshot, ResourceGeneration, SceneGenerationKey,
         };
         use crate::round::smooth::CompanionContentIdentity;
 
         let snapshot = retained_full_cast_snapshot();
+        let prop_topology = snapshot.topology.visible_props.clone();
         assert_eq!(snapshot.topology.visible_props.len(), 10);
         let visible_prop_slots = snapshot
             .frame
@@ -10021,14 +10023,30 @@ mod tests {
                     [roi[1], roi[1] + roi[3]],
                 )
             };
-            for x in safe_x {
-                for y in safe_y {
-                    let dx = (x - gauge_center[0]) / safe_radius;
-                    let dy = (y - gauge_center[1]) / safe_radius;
-                    assert!(
-                        dx * dx + dy * dy <= 1.0,
-                        "prop slot {slot} projected ROI escaped its safe ellipse: {roi:?}"
-                    );
+            let prop = prop_topology
+                .iter()
+                .find(|prop| prop.stable_order == *slot)
+                .expect("topology for visible prop");
+            let foreground_ceiling = prop.zone == PropZoneSnapshot::Ceiling
+                && prop.authored_depth == AuthoredDepthSnapshot::Foreground;
+            if foreground_ceiling {
+                let aperture_radius_rows = layout.width_points.min(layout.height_points)
+                    / 2.0
+                    / grid.cell_extent_points[1];
+                let expected_top = (f32::from(grid.rows) / 2.0 - aperture_radius_rows - 0.5)
+                    .ceil()
+                    .max(0.0) as i16;
+                assert_eq!(placement.bounds_cells[1], expected_top);
+            } else {
+                for x in safe_x {
+                    for y in safe_y {
+                        let dx = (x - gauge_center[0]) / safe_radius;
+                        let dy = (y - gauge_center[1]) / safe_radius;
+                        assert!(
+                            dx * dx + dy * dy <= 1.0,
+                            "prop slot {slot} projected ROI escaped its safe ellipse: {roi:?}"
+                        );
+                    }
                 }
             }
         }

@@ -378,8 +378,8 @@ fn retained_full_cast_composition_matrix() {
     use glorp::pet::generation::{generate_pet, Species};
     use glorp::pet::render::{render_pet, AnimationFrame};
     use glorp::presentation::companion_scene::{
-        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
-        CompanionSceneSnapshot, PropZoneSnapshot,
+        AuthoredDepthSnapshot, CompanionLogicalLayout, CompanionProjectionClock,
+        CompanionSceneProjectionInput, CompanionSceneSnapshot, PropZoneSnapshot,
     };
     use glorp::tui::view_model::{EarnedHabitatPropView, WatchViewModel};
     use time::macros::{date, datetime};
@@ -569,15 +569,29 @@ fn retained_full_cast_composition_matrix() {
                 } else {
                     safe_radii
                 };
-                for col in [bounds[0] + 0.5, bounds[2] - 0.5] {
-                    for row in [bounds[1] + 0.5, bounds[3] - 0.5] {
-                        let dx = (col - center[0]) / prop_safe_radii[0];
-                        let dy = (row - center[1]) / prop_safe_radii[1];
-                        assert!(
-                            dx * dx + dy * dy <= 1.0 + f32::EPSILON,
-                            "{label} slot {} escaped its safe aperture",
-                            frame.slot
-                        );
+                let foreground_ceiling = prop.zone == PropZoneSnapshot::Ceiling
+                    && prop.authored_depth == AuthoredDepthSnapshot::Foreground;
+                if foreground_ceiling {
+                    let aperture_top_row =
+                        (f32::from(ROWS) / 2.0 - aperture_radius as f32 / cell[1] - 0.5)
+                            .ceil()
+                            .max(0.0);
+                    assert_eq!(
+                        bounds[1], aperture_top_row,
+                        "{label} foreground ceiling slot {} did not meet the aperture top",
+                        frame.slot,
+                    );
+                } else {
+                    for col in [bounds[0] + 0.5, bounds[2] - 0.5] {
+                        for row in [bounds[1] + 0.5, bounds[3] - 0.5] {
+                            let dx = (col - center[0]) / prop_safe_radii[0];
+                            let dy = (row - center[1]) / prop_safe_radii[1];
+                            assert!(
+                                dx * dx + dy * dy <= 1.0 + f32::EPSILON,
+                                "{label} slot {} escaped its safe aperture",
+                                frame.slot
+                            );
+                        }
                     }
                 }
                 assert!(

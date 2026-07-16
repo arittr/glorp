@@ -186,6 +186,14 @@ pub(crate) fn resolve_companion_composition(
             i16::try_from(footprint_cells[1]).unwrap_or(i16::MAX),
         ];
         let grounded = is_floor_zone(prop.zone);
+        let foreground_ceiling = prop.zone == PropZoneSnapshot::Ceiling
+            && prop.authored_depth == AuthoredDepthSnapshot::Foreground;
+        let occupied_offsets = if foreground_ceiling {
+            crate::presentation::props::presentation_prop_occupied_offsets(prop.catalog_id)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let candidate_rows = if grounded { input.rows } else { available_rows };
         let candidate_bottom_reserve = if grounded {
             [0, rows.saturating_sub(1), columns, rows]
@@ -215,10 +223,22 @@ pub(crate) fn resolve_companion_composition(
         };
         let accepted = candidates
             .into_iter()
-            .map(|candidate| {
+            .filter_map(|candidate| {
                 let mut top_left = candidate.resolve(footprint_i16);
                 top_left[0] = top_left[0].saturating_add(aperture_start_column);
-                top_left
+                if foreground_ceiling {
+                    let anchor_x = top_left[0] - i16::from(footprint.min_dx);
+                    let anchor_y = highest_safe_ceiling_anchor_row(
+                        anchor_x,
+                        footprint,
+                        &occupied_offsets,
+                        columns,
+                        rows,
+                        aperture_radius_cells,
+                    )?;
+                    top_left[1] = anchor_y + i16::from(footprint.min_dy);
+                }
+                Some(top_left)
             })
             .find_map(|top_left| {
                 let anchor_cell = [
@@ -231,20 +251,37 @@ pub(crate) fn resolve_companion_composition(
                     top_left[0] + footprint_i16[0],
                     top_left[1] + footprint_i16[1],
                 ];
-                candidate_is_safe(
-                    bounds,
-                    columns,
-                    rows,
-                    if grounded {
-                        grounded_radius_cells
-                    } else {
-                        gauge_inner_radius_cells
-                    },
-                    candidate_hud_reserve,
-                    candidate_bottom_reserve,
-                    &accepted_bounds,
-                )
-                .then_some((anchor_cell, bounds))
+                let safe = if foreground_ceiling {
+                    occupied_cells_inside_ellipse(
+                        anchor_cell,
+                        &occupied_offsets,
+                        columns,
+                        rows,
+                        aperture_radius_cells,
+                    ) && candidate_regions_are_clear(
+                        bounds,
+                        columns,
+                        rows,
+                        candidate_hud_reserve,
+                        candidate_bottom_reserve,
+                        &accepted_bounds,
+                    )
+                } else {
+                    candidate_is_safe(
+                        bounds,
+                        columns,
+                        rows,
+                        if grounded {
+                            grounded_radius_cells
+                        } else {
+                            gauge_inner_radius_cells
+                        },
+                        candidate_hud_reserve,
+                        candidate_bottom_reserve,
+                        &accepted_bounds,
+                    )
+                };
+                safe.then_some((anchor_cell, bounds))
             });
         if let Some((anchor_cell, bounds_cells)) = accepted {
             accepted_bounds.push(bounds_cells);
@@ -488,19 +525,9 @@ fn candidate_anchors(
         PropZoneSnapshot::Ceiling => {
             if authored_depth == AuthoredDepthSnapshot::Foreground {
                 vec![
-                    // Row one is authored first but normally rejected by the
-                    // gauge-safe ellipse. Row two is the highest legal contact
-                    // row on the round companion and keeps a front-layer vine
-                    // visibly attached to the tank ceiling.
-                    anchor(center_x(0), start_y(1)),
-                    anchor(center_x(-8), start_y(1)),
-                    anchor(center_x(8), start_y(1)),
-                    anchor(center_x(0), start_y(2)),
-                    anchor(center_x(-8), start_y(2)),
-                    anchor(center_x(8), start_y(2)),
-                    anchor(center_x(0), start_y(4)),
-                    anchor(center_x(-8), start_y(4)),
-                    anchor(center_x(8), start_y(4)),
+                    anchor(center_x(0), start_y(0)),
+                    anchor(center_x(-8), start_y(0)),
+                    anchor(center_x(8), start_y(0)),
                 ]
             } else {
                 vec![
@@ -518,12 +545,62 @@ fn candidate_anchors(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn candidate_is_safe(
+fn cell_inside_ellipse(col: i16, row: i16, columns: i16, rows: i16, radii: [f32; 2]) -> bool {
+    if col < 0 || row < 0 || col >= columns || row >= rows || radii[0] <= 0.0 || radii[1] <= 0.0 {
+        return false;
+    }
+    let center = [f32::from(columns) / 2.0, f32::from(rows) / 2.0];
+    let dx = (f32::from(col) + 0.5 - center[0]) / radii[0];
+    let dy = (f32::from(row) + 0.5 - center[1]) / radii[1];
+    dx * dx + dy * dy <= 1.0
+}
+
+fn occupied_cells_inside_ellipse(
+    anchor_cell: [i16; 2],
+    occupied_offsets: &[[i8; 2]],
+    columns: i16,
+    rows: i16,
+    radii: [f32; 2],
+) -> bool {
+    !occupied_offsets.is_empty()
+        && occupied_offsets.iter().all(|[dx, dy]| {
+            cell_inside_ellipse(
+                anchor_cell[0] + i16::from(*dx),
+                anchor_cell[1] + i16::from(*dy),
+                columns,
+                rows,
+                radii,
+            )
+        })
+}
+
+fn highest_safe_ceiling_anchor_row(
+    anchor_x: i16,
+    footprint: crate::presentation::props::PresentationPropFootprint,
+    occupied_offsets: &[[i8; 2]],
+    columns: i16,
+    rows: i16,
+    radii: [f32; 2],
+) -> Option<i16> {
+    let first = -i16::from(footprint.min_dy);
+    let last = rows
+        .saturating_sub(1)
+        .saturating_sub(i16::from(footprint.max_dy));
+    (first..=last).find(|anchor_y| {
+        occupied_cells_inside_ellipse(
+            [anchor_x, *anchor_y],
+            occupied_offsets,
+            columns,
+            rows,
+            radii,
+        )
+    })
+}
+
+fn candidate_regions_are_clear(
     bounds: [i16; 4],
     columns: i16,
     rows: i16,
-    gauge_radii: [f32; 2],
     hud_reserve: [i16; 4],
     bottom_reserve: [i16; 4],
     accepted_bounds: &[[i16; 4]],
@@ -534,7 +611,6 @@ fn candidate_is_safe(
         && bounds[3] <= rows
         && bounds[0] < bounds[2]
         && bounds[1] < bounds[3]
-        && bounds_inside_ellipse(bounds, columns, rows, gauge_radii)
         && !intersects(bounds, hud_reserve)
         && !intersects(bounds, bottom_reserve)
         && accepted_bounds
@@ -542,17 +618,32 @@ fn candidate_is_safe(
             .all(|accepted| !intersects(bounds, expand(*accepted)))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn candidate_is_safe(
+    bounds: [i16; 4],
+    columns: i16,
+    rows: i16,
+    gauge_radii: [f32; 2],
+    hud_reserve: [i16; 4],
+    bottom_reserve: [i16; 4],
+    accepted_bounds: &[[i16; 4]],
+) -> bool {
+    bounds_inside_ellipse(bounds, columns, rows, gauge_radii)
+        && candidate_regions_are_clear(
+            bounds,
+            columns,
+            rows,
+            hud_reserve,
+            bottom_reserve,
+            accepted_bounds,
+        )
+}
+
 fn bounds_inside_ellipse(bounds: [i16; 4], columns: i16, rows: i16, radii: [f32; 2]) -> bool {
-    if radii[0] <= 0.0 || radii[1] <= 0.0 {
-        return false;
-    }
-    let center = [f32::from(columns) / 2.0, f32::from(rows) / 2.0];
     [bounds[0], bounds[2] - 1].into_iter().all(|col| {
-        [bounds[1], bounds[3] - 1].into_iter().all(|row| {
-            let dx = (f32::from(col) + 0.5 - center[0]) / radii[0];
-            let dy = (f32::from(row) + 0.5 - center[1]) / radii[1];
-            dx * dx + dy * dy <= 1.0
-        })
+        [bounds[1], bounds[3] - 1]
+            .into_iter()
+            .all(|row| cell_inside_ellipse(col, row, columns, rows, radii))
     })
 }
 
@@ -1081,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_ceiling_props_contact_the_top_while_background_props_stay_recessed() {
+    fn foreground_ceiling_props_contact_the_aperture_by_occupied_cells() {
         let foreground_vine = prop_topology(
             crate::game::habitat::TOKEN_HANGING_VINE_25M,
             0,
@@ -1094,15 +1185,16 @@ mod tests {
             PropZoneSnapshot::Ceiling,
             AuthoredDepthSnapshot::Background,
         );
+        let occupied = crate::presentation::props::presentation_prop_occupied_offsets(
+            crate::game::habitat::TOKEN_HANGING_VINE_25M,
+        )
+        .unwrap();
 
         let lantern =
             resolve_for(std::slice::from_ref(&background_lantern), 360.0, 360.0).prop_placements[0];
-
         assert!(lantern.visible);
-        assert_eq!(
-            lantern.bounds_cells[1], 4,
-            "background ceiling prop left the rear wall"
-        );
+        assert_eq!(lantern.bounds_cells[1], 4);
+
         for &(width_points, height_points) in SURFACES {
             let vine = resolve_for(
                 std::slice::from_ref(&foreground_vine),
@@ -1110,12 +1202,27 @@ mod tests {
                 height_points,
             )
             .prop_placements[0];
+            let aperture_radius_points = width_points.min(height_points) / 2.0;
+            let radii = [
+                aperture_radius_points / (width_points / f32::from(COLUMNS)),
+                aperture_radius_points / (height_points / f32::from(ROWS)),
+            ];
+
             assert!(vine.visible, "{width_points}x{height_points}");
-            let expected_contact_row = if height_points > width_points { 4 } else { 2 };
-            assert_eq!(
-                vine.bounds_cells[1], expected_contact_row,
-                "foreground vine detached from the aperture ceiling at {width_points}x{height_points}"
-            );
+            assert!(occupied_cells_inside_ellipse(
+                vine.anchor_cell,
+                &occupied,
+                i16::try_from(COLUMNS).unwrap(),
+                i16::try_from(ROWS).unwrap(),
+                radii,
+            ));
+            assert!(!occupied_cells_inside_ellipse(
+                [vine.anchor_cell[0], vine.anchor_cell[1] - 1],
+                &occupied,
+                i16::try_from(COLUMNS).unwrap(),
+                i16::try_from(ROWS).unwrap(),
+                radii,
+            ));
         }
     }
 
@@ -1314,15 +1421,36 @@ mod tests {
                 } else {
                     expected_radii
                 };
-                for col in [f32::from(min_col) + 0.5, f32::from(max_col) - 0.5] {
-                    for row in [f32::from(min_row) + 0.5, f32::from(max_row) - 0.5] {
-                        let dx = (col - center[0]) / safe_radii[0];
-                        let dy = (row - center[1]) / safe_radii[1];
-                        assert!(
-                            dx * dx + dy * dy <= 1.0 + f32::EPSILON,
-                            "{width_points}x{height_points} slot {} escaped its safe aperture",
-                            placement.slot
-                        );
+                let foreground_ceiling = topology.zone == PropZoneSnapshot::Ceiling
+                    && topology.authored_depth == AuthoredDepthSnapshot::Foreground;
+                if foreground_ceiling {
+                    let occupied = crate::presentation::props::presentation_prop_occupied_offsets(
+                        topology.catalog_id,
+                    )
+                    .unwrap();
+                    let aperture_radius_points = width_points.min(height_points) / 2.0;
+                    let aperture_radii = [
+                        aperture_radius_points / (width_points / f32::from(COLUMNS)),
+                        aperture_radius_points / (height_points / f32::from(ROWS)),
+                    ];
+                    assert!(occupied_cells_inside_ellipse(
+                        placement.anchor_cell,
+                        &occupied,
+                        i16::try_from(COLUMNS).unwrap(),
+                        i16::try_from(ROWS).unwrap(),
+                        aperture_radii,
+                    ));
+                } else {
+                    for col in [f32::from(min_col) + 0.5, f32::from(max_col) - 0.5] {
+                        for row in [f32::from(min_row) + 0.5, f32::from(max_row) - 0.5] {
+                            let dx = (col - center[0]) / safe_radii[0];
+                            let dy = (row - center[1]) / safe_radii[1];
+                            assert!(
+                                dx * dx + dy * dy <= 1.0 + f32::EPSILON,
+                                "{width_points}x{height_points} slot {} escaped its safe aperture",
+                                placement.slot
+                            );
+                        }
                     }
                 }
             }
