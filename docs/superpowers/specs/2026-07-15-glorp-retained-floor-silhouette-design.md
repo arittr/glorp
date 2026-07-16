@@ -1,7 +1,7 @@
 # Retained Floor Silhouette Design
 
 **Date:** 2026-07-15
-**Status:** Approved concept; awaiting written review
+**Status:** Approved for implementation
 **Scope:** Retained macOS companion renderer only
 
 ## Problem
