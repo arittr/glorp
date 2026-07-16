@@ -227,8 +227,8 @@ pub(super) const ATLAS_PACKING_VERSION: u32 = 1;
 /// 3 switches the fragment output to gamma-space (sRGB) premultiplied color for a
 /// linear-format render target and native-color atlas, so translucency composites
 /// in gamma to match Smooth. Version 4 adds the biome-tinted tank bed to the room
-/// analytic. A shader change bumps this so entries from an older shader can be
-/// invalidated.
+/// analytic. Version 5 adds the retained rock-wall strata/mineral texture. A
+/// shader change bumps this so entries from an older shader can be invalidated.
 pub(super) const SHADER_RESOURCE_VERSION: u32 = 5;
 
 /// Antialiasing the atlas rasterizes under. The retained atlas draws through the
