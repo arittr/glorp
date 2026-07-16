@@ -441,6 +441,7 @@ pub fn try_build_round_smooth_scene_plan_with_options(
             classic_snap_anchor,
             parallax_focus_offset,
             depth: depth.raw_z,
+            effective_depth: depth.effective_z,
             scale: depth.scale,
             perspective_offset,
             transformed_bounds: transformed_pet_bounds,

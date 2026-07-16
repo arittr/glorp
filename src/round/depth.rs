@@ -1,3 +1,86 @@
+pub const COMPANION_STATISTICS_Z: f32 = 0.72;
+pub const COMPANION_GAUGE_PACE_Z: f32 = 1.55;
+pub const COMPANION_GAUGE_DAILY_Z: f32 = 1.65;
+pub const COMPANION_GAUGE_XP_Z: f32 = 1.75;
+pub const COMPANION_PET_MAX_Z: f32 = 1.0;
+pub const COMPANION_CAMERA_NEAR_Z: f32 = 2.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompanionGaugeLane {
+    Pace,
+    Daily,
+    Xp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PetStatisticsOrder {
+    BehindStatistics,
+    InFrontOfStatistics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct CompanionGaugeDepthPlanes {
+    pub pace: f32,
+    pub daily: f32,
+    pub xp: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct CompanionDepthComposition {
+    pub pet_effective_z: f32,
+    pub statistics_z: f32,
+    pub gauges: CompanionGaugeDepthPlanes,
+    pub pet_statistics_order: PetStatisticsOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionDepthCompositionError {
+    InvalidEffectiveDepth,
+    InvalidPlaneOrder,
+}
+
+impl CompanionGaugeLane {
+    pub const fn scene_z(self) -> f32 {
+        match self {
+            Self::Pace => COMPANION_GAUGE_PACE_Z,
+            Self::Daily => COMPANION_GAUGE_DAILY_Z,
+            Self::Xp => COMPANION_GAUGE_XP_Z,
+        }
+    }
+}
+
+impl CompanionDepthComposition {
+    pub fn resolve(pet_effective_z: f32) -> Result<Self, CompanionDepthCompositionError> {
+        if !pet_effective_z.is_finite() || !(-1.0..=1.0).contains(&pet_effective_z) {
+            return Err(CompanionDepthCompositionError::InvalidEffectiveDepth);
+        }
+        if !(COMPANION_STATISTICS_Z < COMPANION_PET_MAX_Z
+            && COMPANION_PET_MAX_Z < COMPANION_GAUGE_PACE_Z
+            && COMPANION_GAUGE_PACE_Z < COMPANION_GAUGE_DAILY_Z
+            && COMPANION_GAUGE_DAILY_Z < COMPANION_GAUGE_XP_Z
+            && COMPANION_GAUGE_XP_Z < COMPANION_CAMERA_NEAR_Z)
+        {
+            return Err(CompanionDepthCompositionError::InvalidPlaneOrder);
+        }
+        Ok(Self {
+            pet_effective_z,
+            statistics_z: COMPANION_STATISTICS_Z,
+            gauges: CompanionGaugeDepthPlanes {
+                pace: COMPANION_GAUGE_PACE_Z,
+                daily: COMPANION_GAUGE_DAILY_Z,
+                xp: COMPANION_GAUGE_XP_Z,
+            },
+            pet_statistics_order: if pet_effective_z > COMPANION_STATISTICS_Z {
+                PetStatisticsOrder::InFrontOfStatistics
+            } else {
+                PetStatisticsOrder::BehindStatistics
+            },
+        })
+    }
+}
+
 /// The pet keeps a visible front-to-back excursion without reading as though it
 /// crosses a room-sized volume. Shadow separation carries the remaining Z cue.
 pub const SMOOTH_PET_FAR_SCALE: f32 = 0.97;
@@ -116,6 +199,44 @@ fn canonical_smooth_depth_cues(effective_z: f32) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_depth_planes_are_exact_and_strictly_ordered() {
+        assert_eq!(COMPANION_STATISTICS_Z, 0.72);
+        assert_eq!(COMPANION_GAUGE_PACE_Z, 1.55);
+        assert_eq!(COMPANION_GAUGE_DAILY_Z, 1.65);
+        assert_eq!(COMPANION_GAUGE_XP_Z, 1.75);
+        assert!(COMPANION_STATISTICS_Z < 1.0);
+        assert!(1.0 < COMPANION_GAUGE_PACE_Z);
+        assert!(COMPANION_GAUGE_PACE_Z < COMPANION_GAUGE_DAILY_Z);
+        assert!(COMPANION_GAUGE_DAILY_Z < COMPANION_GAUGE_XP_Z);
+        assert!(COMPANION_GAUGE_XP_Z < 2.0);
+    }
+
+    #[test]
+    fn statistics_crossing_is_strictly_after_the_plane() {
+        let boundary = CompanionDepthComposition::resolve(COMPANION_STATISTICS_Z).unwrap();
+        assert_eq!(
+            boundary.pet_statistics_order,
+            PetStatisticsOrder::BehindStatistics
+        );
+
+        let just_crossed = CompanionDepthComposition::resolve(f32::from_bits(
+            COMPANION_STATISTICS_Z.to_bits() + 1,
+        ))
+        .unwrap();
+        assert_eq!(
+            just_crossed.pet_statistics_order,
+            PetStatisticsOrder::InFrontOfStatistics
+        );
+    }
+
+    #[test]
+    fn companion_depth_composition_rejects_invalid_effective_depth() {
+        for depth in [f32::NAN, f32::INFINITY, -1.01, 1.01] {
+            assert!(CompanionDepthComposition::resolve(depth).is_err());
+        }
+    }
 
     #[test]
     fn smooth_depth_rejects_invalid_output_samples() {

@@ -606,7 +606,9 @@ pub struct SmoothCompanionPet {
     pub parallax_focus_offset: SmoothPoint,
     /// Raw depth channel in `[-1, 1]`; negative is far, positive is near.
     pub depth: f32,
-    /// Uniform scale resolved from `depth` and the lifecycle attenuation.
+    /// Lifecycle-attenuated depth channel in `[-1, 1]` used for visual cues.
+    pub effective_depth: f32,
+    /// Uniform scale resolved from `effective_depth`.
     pub scale: f32,
     /// Depth translation applied to every pet-attached layer.
     pub perspective_offset: SmoothPoint,
@@ -629,6 +631,7 @@ impl Default for SmoothCompanionPet {
             classic_snap_anchor: SmoothPoint::default(),
             parallax_focus_offset: SmoothPoint::default(),
             depth: 0.0,
+            effective_depth: 0.0,
             // A zero scale is not a valid transform, so the neutral plane is the
             // only sound default here.
             scale: 1.0,

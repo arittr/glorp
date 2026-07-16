@@ -1,9 +1,10 @@
 use glorp::game::habitat::HabitatPropKind;
 use glorp::presentation::smooth::{
     transformed_smooth_bounds, validate_smooth_layer, CompanionViewport, SmoothBlendMode,
-    SmoothBounds, SmoothClip, SmoothCompanionLayer, SmoothCompanionPrivacyClaims, SmoothDepthPlane,
-    SmoothFill, SmoothGeometryError, SmoothLayerId, SmoothLayerItem, SmoothLayerMotionBinding,
-    SmoothLayerRole, SmoothPoint, SmoothRgba8, SmoothShape, SmoothShapeGeometry, SmoothTransform,
+    SmoothBounds, SmoothClip, SmoothCompanionLayer, SmoothCompanionPet,
+    SmoothCompanionPrivacyClaims, SmoothDepthPlane, SmoothFill, SmoothGeometryError, SmoothLayerId,
+    SmoothLayerItem, SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothRgba8,
+    SmoothShape, SmoothShapeGeometry, SmoothTransform,
 };
 use glorp::round::depth::{
     depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError, SMOOTH_FAR_ATMOSPHERE,
@@ -1340,6 +1341,19 @@ const PET_ATTACHED_ROLES: [SmoothLayerRole; 3] = [
     SmoothLayerRole::WallShadow,
     SmoothLayerRole::PerformanceCue,
 ];
+
+#[test]
+fn smooth_plan_publishes_raw_and_effective_depth_separately() {
+    let mut asleep = normal_lifecycle_fixture();
+    asleep.day_context.asleep = true;
+
+    for raw_depth in [-1.0, 1.0] {
+        let plan = plan_at_depth(&asleep, 250, raw_depth);
+        assert_eq!(plan.pet.depth, raw_depth);
+        assert_eq!(plan.pet.effective_depth, raw_depth * 0.25);
+    }
+    assert_eq!(SmoothCompanionPet::default().effective_depth, 0.0);
+}
 
 #[test]
 fn depth_transform_maps_far_neutral_and_near_onto_scale_and_perspective() {

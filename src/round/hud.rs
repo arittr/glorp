@@ -2,6 +2,7 @@
 //! (growth ring, stat gap, mood aura color). No AppKit; golden-testable.
 
 use crate::game::metabolism::Mood;
+use crate::round::depth::CompanionGaugeLane;
 use crate::round::draw::RoundColor;
 
 pub use crate::presentation::gauge_values::{
@@ -603,6 +604,7 @@ pub fn daily_rollover_layers(excess: f64) -> Vec<DailyRolloverLayer> {
 /// geometry is derived in exactly one place.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PreparedGaugeArc {
+    pub lane: CompanionGaugeLane,
     pub ring: GrowthRing,
     pub stroke_width: f64,
     pub cap: LineCap,
@@ -611,28 +613,51 @@ pub struct PreparedGaugeArc {
     pub color: RoundColor,
 }
 
-/// The ordered back-to-front list of perimeter-gauge arcs for a frame: each lane's
-/// full track, then its fill (only when its fraction is positive), the daily
-/// overage marker (only when present), and the pace lane last. The order matches
-/// the AppKit painter's historical draw order so both backends composite the same
-/// arcs in the same sequence.
+/// The ordered back-to-front list of perimeter-gauge arcs for a frame: pace,
+/// daily, then XP. Each lane's full track precedes its fill (only when its
+/// fraction is positive), and daily overage markers remain with the daily lane.
 pub fn prepared_perimeter_gauge_arcs(
     layout: &PerimeterGaugeLayout,
     colors: &PerimeterGaugeColors,
     fractions: GaugeFractions,
 ) -> Vec<PreparedGaugeArc> {
     let mut arcs = Vec::new();
-    push_lane_arcs(&mut arcs, &layout.xp, &colors.xp, fractions.xp);
-    push_lane_arcs(&mut arcs, &layout.daily, &colors.daily, fractions.daily);
+    push_lane_arcs(
+        &mut arcs,
+        CompanionGaugeLane::Pace,
+        &layout.pace,
+        &colors.pace,
+        fractions.pace,
+    );
+    push_lane_arcs(
+        &mut arcs,
+        CompanionGaugeLane::Daily,
+        &layout.daily,
+        &colors.daily,
+        fractions.daily,
+    );
     for layer in daily_rollover_layers(fractions.daily_overage) {
-        push_daily_rollover_arc(&mut arcs, &layout.daily, layer.rollover, layer.fraction);
+        push_daily_rollover_arc(
+            &mut arcs,
+            CompanionGaugeLane::Daily,
+            &layout.daily,
+            layer.rollover,
+            layer.fraction,
+        );
     }
-    push_lane_arcs(&mut arcs, &layout.pace, &colors.pace, fractions.pace);
+    push_lane_arcs(
+        &mut arcs,
+        CompanionGaugeLane::Xp,
+        &layout.xp,
+        &colors.xp,
+        fractions.xp,
+    );
     arcs
 }
 
 fn push_daily_rollover_arc(
     arcs: &mut Vec<PreparedGaugeArc>,
+    lane_identity: CompanionGaugeLane,
     lane: &GaugeLane,
     rollover: u32,
     fraction: f64,
@@ -641,6 +666,7 @@ fn push_daily_rollover_arc(
         return;
     };
     arcs.push(PreparedGaugeArc {
+        lane: lane_identity,
         ring: lane.ring,
         stroke_width: lane.stroke_width,
         cap: lane.cap,
@@ -653,12 +679,14 @@ fn push_daily_rollover_arc(
 /// Appends a lane's full track and, when `fraction` is positive, its fill arc.
 fn push_lane_arcs(
     arcs: &mut Vec<PreparedGaugeArc>,
+    lane_identity: CompanionGaugeLane,
     lane: &GaugeLane,
     colors: &GaugeLaneColors,
     fraction: f64,
 ) {
     let track_end = lane.ring.track_start_deg + lane.ring.track_sweep_deg;
     arcs.push(PreparedGaugeArc {
+        lane: lane_identity,
         ring: lane.ring,
         stroke_width: lane.stroke_width,
         cap: lane.cap,
@@ -669,6 +697,7 @@ fn push_lane_arcs(
     let clamped = fraction.clamp(0.0, 1.0);
     if clamped > 0.0 {
         arcs.push(PreparedGaugeArc {
+            lane: lane_identity,
             ring: lane.ring,
             stroke_width: lane.stroke_width,
             cap: lane.cap,
@@ -883,6 +912,46 @@ mod tests {
     }
 
     #[test]
+    fn prepared_gauge_arcs_follow_deep_to_front_bezel_order() {
+        use crate::round::depth::CompanionGaugeLane;
+
+        let layout = perimeter_gauge_layout(180.0, 180.0, 180.0, COMPANION_GAUGE_GAP_DEG);
+        let colors = perimeter_gauge_colors();
+        let arcs = prepared_perimeter_gauge_arcs(
+            &layout,
+            &colors,
+            GaugeFractions {
+                xp: 0.5,
+                daily: 0.3,
+                daily_overage: 1.62,
+                pace: 0.7,
+            },
+        );
+
+        assert_eq!(
+            arcs.iter().map(|arc| arc.lane).collect::<Vec<_>>(),
+            vec![
+                CompanionGaugeLane::Pace,
+                CompanionGaugeLane::Pace,
+                CompanionGaugeLane::Daily,
+                CompanionGaugeLane::Daily,
+                CompanionGaugeLane::Daily,
+                CompanionGaugeLane::Daily,
+                CompanionGaugeLane::Xp,
+                CompanionGaugeLane::Xp,
+            ]
+        );
+        assert_eq!(arcs[0].color, colors.pace.track);
+        assert_eq!(arcs[1].color, colors.pace.fill);
+        assert_eq!(arcs[2].color, colors.daily.track);
+        assert_eq!(arcs[3].color, colors.daily.fill);
+        assert_eq!(arcs[4].color, daily_rollover_color(1));
+        assert_eq!(arcs[5].color, daily_rollover_color(2));
+        assert_eq!(arcs[6].color, colors.xp.track);
+        assert_eq!(arcs[7].color, colors.xp.fill);
+    }
+
+    #[test]
     fn prepared_gauge_arcs_cover_zero_partial_full_and_overage_identically_for_both_backends() {
         let layout = perimeter_gauge_layout(180.0, 180.0, 180.0, COMPANION_GAUGE_GAP_DEG);
         let colors = perimeter_gauge_colors();
@@ -903,9 +972,9 @@ mod tests {
             - (arc.ring.track_start_deg + arc.ring.track_sweep_deg))
             .abs()
             < 1e-9));
-        assert_eq!(zero[0].color, colors.xp.track);
+        assert_eq!(zero[0].color, colors.pace.track);
         assert_eq!(zero[1].color, colors.daily.track);
-        assert_eq!(zero[2].color, colors.pace.track);
+        assert_eq!(zero[2].color, colors.xp.track);
 
         // Partial fills (no overage): each lane draws track then fill, in order.
         let partial = prepared_perimeter_gauge_arcs(
@@ -919,10 +988,12 @@ mod tests {
             },
         );
         assert_eq!(partial.len(), 6);
-        assert_eq!(partial[1].color, colors.xp.fill);
-        assert!((partial[1].end_deg - growth_ring_fill_end_deg(&layout.xp.ring, 0.5)).abs() < 1e-9);
+        assert_eq!(partial[1].color, colors.pace.fill);
+        assert!(
+            (partial[1].end_deg - growth_ring_fill_end_deg(&layout.pace.ring, 0.7)).abs() < 1e-9
+        );
         assert_eq!(partial[3].color, colors.daily.fill);
-        assert_eq!(partial[5].color, colors.pace.fill);
+        assert_eq!(partial[5].color, colors.xp.fill);
 
         // Full xp fill reaches the track end.
         let full = prepared_perimeter_gauge_arcs(
@@ -936,13 +1007,13 @@ mod tests {
             },
         );
         assert!(
-            (full[1].end_deg - (layout.xp.ring.track_start_deg + layout.xp.ring.track_sweep_deg))
+            (full[3].end_deg - (layout.xp.ring.track_start_deg + layout.xp.ring.track_sweep_deg))
                 .abs()
                 < 1e-9
         );
 
         // Overage inserts one daily-coloured marker arc after the daily fill and
-        // before the pace lane, matching the Smooth draw order.
+        // before the XP lane, matching the deep-to-front bezel order.
         let overage = prepared_perimeter_gauge_arcs(
             &layout,
             &colors,
@@ -953,7 +1024,7 @@ mod tests {
                 pace: 0.0,
             },
         );
-        // xp track, daily track, daily fill, daily overage, pace track = 5 arcs.
+        // pace track, daily track, daily fill, daily overage, XP track = 5 arcs.
         assert_eq!(overage.len(), 5);
         let marker = overage[3];
         assert_eq!(marker.color, daily_rollover_color(1));
@@ -980,8 +1051,8 @@ mod tests {
             },
         );
 
-        // xp track, daily track + base fill, completed rollover, current
-        // rollover, pace track.
+        // pace track, daily track + base fill, completed rollover, current
+        // rollover, XP track.
         assert_eq!(arcs.len(), 6);
         let completed = arcs[3];
         let current = arcs[4];
