@@ -55,7 +55,7 @@ No file split or new module is needed.
 
 - [ ] **Step 1: Add exact failing effect-contract tests**
 
-Add these tests at the start of `src/presentation/companion_effects.rs`'s existing `tests` module:
+Add this test at the start of `src/presentation/companion_effects.rs`'s existing `tests` module. It asserts the geometry returned to both renderer paths, not the private constants themselves:
 
 ```rust
 fn assert_close(actual: f32, expected: f32) {
@@ -63,19 +63,6 @@ fn assert_close(actual: f32, expected: f32) {
         (actual - expected).abs() < 1.0e-5,
         "expected {expected}, got {actual}"
     );
-}
-
-#[test]
-fn shallow_tank_parallax_contract_is_exact_and_ordered() {
-    assert_eq!(PARALLAX_FAR_MULTIPLIER, 0.006);
-    assert_eq!(PARALLAX_MID_MULTIPLIER, 0.010);
-    assert_eq!(PARALLAX_BEHIND_MULTIPLIER, 0.014);
-    assert_eq!(PARALLAX_FOREGROUND_MULTIPLIER, 0.022);
-    assert_eq!(PARALLAX_MAX_X_CELLS, 0.25);
-    assert_eq!(PARALLAX_MAX_Y_CELLS, 0.15);
-    assert!(PARALLAX_FAR_MULTIPLIER < PARALLAX_MID_MULTIPLIER);
-    assert!(PARALLAX_MID_MULTIPLIER < PARALLAX_BEHIND_MULTIPLIER);
-    assert!(PARALLAX_BEHIND_MULTIPLIER < PARALLAX_FOREGROUND_MULTIPLIER);
 }
 
 #[test]
@@ -110,7 +97,7 @@ Run:
 cargo test --lib presentation::companion_effects::tests::shallow_tank_ -- --nocapture
 ```
 
-Expected: compilation fails because the six canonical parallax constants do not exist, or the endpoint assertions fail against the current deep geometry.
+Expected: endpoint assertions fail against the current deep wall/floor geometry.
 
 - [ ] **Step 3: Add the canonical parallax constants and approved effect geometry**
 
@@ -212,22 +199,18 @@ git commit -m "fix(companion): shallow tank shadow geometry"
 
 - [ ] **Step 1: Pin the approved pet-depth constants in the integration test**
 
-At the start of `smooth_depth_resolver_maps_bounds_lifecycle_and_rejects_invalid_inputs` in `tests/smooth_companion.rs`, add:
+At the start of `smooth_depth_resolver_maps_bounds_lifecycle_and_rejects_invalid_inputs` in `tests/smooth_companion.rs`, resolve the three observable poses and assert their approved outputs with hand-derived literals:
 
 ```rust
-assert_eq!(SMOOTH_PET_FAR_SCALE, 0.97);
-assert_eq!(SMOOTH_PET_NEAR_SCALE, 1.035);
-assert_eq!(SMOOTH_PERSPECTIVE_Y_MAX, 0.10);
-assert_eq!(SMOOTH_FAR_ATMOSPHERE, 0.93);
-```
-
-Replace the hard-coded near-scale assertion with:
-
-```rust
+let far = resolve_smooth_depth(-1.0, 1.0).unwrap();
+let neutral = resolve_smooth_depth(0.0, 1.0).unwrap();
+let near = resolve_smooth_depth(1.0, 1.0).unwrap();
+assert_eq!([far.scale, neutral.scale, near.scale], [0.97, 1.0, 1.035]);
 assert_eq!(
-    resolve_smooth_depth(1.0, 1.0).unwrap().scale,
-    SMOOTH_PET_NEAR_SCALE
+    [far.perspective_y, neutral.perspective_y, near.perspective_y],
+    [-0.10, 0.0, 0.10]
 );
+assert_eq!([far.atmosphere, neutral.atmosphere, near.atmosphere], [0.93, 1.0, 1.0]);
 ```
 
 Keep all finite-input, lifecycle, bound, and monotonic assertions.
@@ -301,26 +284,20 @@ git commit -m "fix(companion): compress pet depth excursion"
 
 - [ ] **Step 1: Update Smooth resolver tests to require canonical tuning**
 
-In `src/round/parallax.rs`'s tests, add:
+In `src/round/parallax.rs`'s tests, add a consumer-level projection test with a four-cell focus. The literals are derived independently from the approved multipliers and the existing vertical-axis scale:
 
 ```rust
 #[test]
-fn plane_mapping_uses_the_canonical_shallow_tank_contract() {
-    use crate::presentation::companion_effects::{
-        PARALLAX_BEHIND_MULTIPLIER, PARALLAX_FAR_MULTIPLIER,
-        PARALLAX_FOREGROUND_MULTIPLIER, PARALLAX_MID_MULTIPLIER,
-    };
-
-    assert_eq!(plane_multiplier(SmoothDepthPlane::Far), PARALLAX_FAR_MULTIPLIER);
-    assert_eq!(plane_multiplier(SmoothDepthPlane::Mid), PARALLAX_MID_MULTIPLIER);
-    assert_eq!(
-        plane_multiplier(SmoothDepthPlane::Behind),
-        PARALLAX_BEHIND_MULTIPLIER
-    );
-    assert_eq!(
-        plane_multiplier(SmoothDepthPlane::Foreground),
-        PARALLAX_FOREGROUND_MULTIPLIER
-    );
+fn raw_plane_projection_uses_the_shallow_tank_contract() {
+    let focus = SmoothPoint { x: 4.0, y: 4.0 };
+    for (plane, expected) in [
+        (SmoothDepthPlane::Far, SmoothPoint { x: 0.024, y: 0.018 }),
+        (SmoothDepthPlane::Mid, SmoothPoint { x: 0.040, y: 0.030 }),
+        (SmoothDepthPlane::Behind, SmoothPoint { x: 0.056, y: 0.042 }),
+        (SmoothDepthPlane::Foreground, SmoothPoint { x: 0.088, y: 0.066 }),
+    ] {
+        assert_eq!(raw_plane_delta(focus, 1.0, plane).unwrap(), expected);
+    }
 }
 ```
 
