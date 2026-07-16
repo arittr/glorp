@@ -48,17 +48,22 @@ retained GPU resources. Refine their contracts in four focused ways.
 
 ### Inset grounded horizontal lanes
 
-Grounded candidates use the circular aperture with one logical cell of visual
-inset. They do not use the gauge's inner ellipse because the gauge intentionally
-opens across the bottom substrate. Candidate fallbacks move inward from the HUD
-side lanes rather than expanding toward the circular edge.
+Grounded candidates use the point-space circular aperture projected into the
+logical cell grid, with one logical cell of visual inset. This matters on tall
+or landscape surfaces, where the circle does not occupy both full grid axes.
+They do not use the gauge's inner ellipse because the gauge intentionally opens
+across the bottom substrate. Candidate fallbacks move inward from the HUD side
+lanes rather than expanding toward the circular edge.
 
 - Left-side fallback positions progress toward the center.
 - Right-side fallback positions progress toward the center.
 - Middle-zone props may use either side of the floor HUD, but every candidate
   keeps the same inset.
-- Existing rear, middle, and near contact rows remain authoritative, so moving a
-  prop inward never makes it float.
+- Existing rear, middle, and near lane offsets remain authoritative. On the
+  canonical square 18-row grid their exclusive contacts remain `15`, `16`, and
+  `17`; non-square surfaces derive equivalent contacts from the actual circular
+  floor so a prop remains grounded instead of following the rectangular window
+  bottom.
 - Existing HUD exclusion, prop gutters, collision checks, and deterministic
   placement remain authoritative.
 - If no inset candidate is safe, the lower-priority prop is hidden instead of
@@ -66,7 +71,8 @@ side lanes rather than expanding toward the circular edge.
 
 The visible glyph footprint, not merely its anchor, must remain inside the
 inset. Moss and reeds are acceptance fixtures across square, tall, and landscape
-surfaces.
+surfaces. Resize keeps each prop in the same named depth lane while recomputing
+the lane's physical contact from the current circular aperture.
 
 ### Reeds become the rear vegetation anchor
 
