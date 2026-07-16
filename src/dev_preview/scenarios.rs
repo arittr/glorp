@@ -178,7 +178,10 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
         }
-        PreviewSelection::Round => bundles.extend(crate::dev_preview::round::round_bundles(&ctx)),
+        PreviewSelection::Round => {
+            bundles.extend(crate::dev_preview::round::round_bundles(&ctx));
+            bundles.extend(crate::dev_preview::smooth::smooth_depth_bundles(&ctx));
+        }
         PreviewSelection::Smooth => {
             bundles.extend(crate::dev_preview::smooth::smooth_bundles(&ctx));
             strips.extend(crate::dev_preview::smooth::smooth_strips(&ctx));
@@ -2208,6 +2211,9 @@ mod tests {
                 "round-glitch-patched-s6",
                 "round-smooth-classic-baseline",
                 "round-smooth-classic-parity",
+                "round-smooth-depth-far",
+                "round-smooth-depth-neutral",
+                "round-smooth-depth-front",
                 "tank-life-age-empty",
                 "tank-life-age-first",
                 "tank-life-age-early",

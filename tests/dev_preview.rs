@@ -78,6 +78,11 @@ const PIXEL_CAST_IDS: [&str; 6] = [
 const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
 const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
+const SMOOTH_DEPTH_ENDPOINTS: [(&str, &str, f64); 3] = [
+    ("round-smooth-depth-far", "far", -1.0),
+    ("round-smooth-depth-neutral", "neutral", 0.0),
+    ("round-smooth-depth-front", "front", 1.0),
+];
 const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 20] = [
     ("depth-rings", "fixed", None),
     ("biome-wash", "parallax", Some("far")),
@@ -1559,6 +1564,15 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/round-smooth-classic-parity.cells.json",
         "frames/round-smooth-classic-parity.smooth-plan.json",
         "frames/round-smooth-classic-parity.smooth-parity.json",
+        "frames/round-smooth-depth-far.txt",
+        "frames/round-smooth-depth-far.cells.json",
+        "frames/round-smooth-depth-far.smooth-plan.json",
+        "frames/round-smooth-depth-neutral.txt",
+        "frames/round-smooth-depth-neutral.cells.json",
+        "frames/round-smooth-depth-neutral.smooth-plan.json",
+        "frames/round-smooth-depth-front.txt",
+        "frames/round-smooth-depth-front.cells.json",
+        "frames/round-smooth-depth-front.smooth-plan.json",
         "frames/tank-life-age-empty.txt",
         "frames/tank-life-age-first.txt",
         "frames/tank-life-age-early.txt",
@@ -1680,6 +1694,9 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "round-glitch-patched-s6".to_string(),
             "round-smooth-classic-baseline".to_string(),
             "round-smooth-classic-parity".to_string(),
+            "round-smooth-depth-far".to_string(),
+            "round-smooth-depth-neutral".to_string(),
+            "round-smooth-depth-front".to_string(),
             "tank-life-age-empty".to_string(),
             "tank-life-age-first".to_string(),
             "tank-life-age-early".to_string(),
@@ -2632,6 +2649,105 @@ fn dev_preview_pixel_artifacts_do_not_expose_raw_seed_or_private_fields() {
 }
 
 #[test]
+fn round_preview_exports_full_tank_depth_endpoints() {
+    let run = PreviewRun::new();
+    run.run_success("round");
+    let manifest = run.manifest();
+    let ids = scenario_ids(&manifest);
+    assert_eq!(
+        ids.len(),
+        ids.iter().collect::<BTreeSet<_>>().len(),
+        "round selection must not export duplicate scenario IDs"
+    );
+
+    let mut translations = Vec::new();
+    let mut scales = Vec::new();
+    for (id, plane, depth) in SMOOTH_DEPTH_ENDPOINTS {
+        let entry = scenario(&manifest, id);
+        assert_eq!(entry["kind"], "smooth");
+        assert_eq!(entry["dimensions"]["width"], 44);
+        assert_eq!(entry["dimensions"]["height"], 18);
+        assert_eq!(entry["inputs"]["fixture"], "full-tank-depth");
+        assert_eq!(entry["inputs"]["depth"], depth);
+        assert_eq!(entry["inputs"]["plane"], plane);
+
+        let text_path = entry["files"]["text"].as_str().unwrap();
+        let cells_path = entry["files"]["cells"].as_str().unwrap();
+        let plan_path = entry["files"]["smooth_plan"].as_str().unwrap();
+        assert!(run.out.join(text_path).is_file(), "missing {text_path}");
+        assert!(run.out.join(cells_path).is_file(), "missing {cells_path}");
+        assert!(run.out.join(plan_path).is_file(), "missing {plan_path}");
+        assert_artifact_type(&manifest, id, "text");
+        assert_artifact_type(&manifest, &format!("{id}-cells"), "cells");
+        assert_artifact_type(&manifest, &format!("{id}-smooth-plan"), "smooth-plan");
+
+        let plan = run.read_json(plan_path);
+        assert_eq!(plan["frame_id"], id);
+        assert_eq!(plan["viewport"]["grid_cols"], 44);
+        assert_eq!(plan["viewport"]["grid_rows"], 18);
+        assert_eq!(plan["parallax_focus_offset"]["x"], 0.0);
+        assert_eq!(plan["parallax_focus_offset"]["y"], 0.0);
+        let pet = plan["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|layer| layer["role"] == "pet-body")
+            .unwrap();
+        translations.push(pet["transform"]["translation"]["y"].as_f64().unwrap());
+        scales.push(pet["transform"]["scale"]["y"].as_f64().unwrap());
+    }
+    assert!(translations[0] < translations[1]);
+    assert!(translations[1] < translations[2]);
+    assert!(translations[2] - translations[0] > 7.0);
+    for (actual, expected) in scales.into_iter().zip([0.97, 1.0, 1.035]) {
+        assert!(
+            (actual - expected).abs() < 1.0e-5,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    for selection in ["smooth", "all"] {
+        let selected = PreviewRun::new();
+        selected.run_success(selection);
+        let selected_manifest = selected.manifest();
+        let selected_ids = scenario_ids(&selected_manifest);
+        assert_eq!(
+            selected_ids.len(),
+            selected_ids.iter().collect::<BTreeSet<_>>().len(),
+            "{selection} selection must not export duplicate scenario IDs"
+        );
+        for (id, _, _) in SMOOTH_DEPTH_ENDPOINTS {
+            assert_eq!(
+                selected_ids
+                    .iter()
+                    .filter(|candidate| *candidate == id)
+                    .count(),
+                1,
+                "{selection} should export {id} exactly once"
+            );
+        }
+    }
+
+    let repeated = PreviewRun::new();
+    repeated.run_success("round");
+    let repeated_manifest = repeated.manifest();
+    for (id, _, _) in SMOOTH_DEPTH_ENDPOINTS {
+        let first = scenario(&manifest, id);
+        let second = scenario(&repeated_manifest, id);
+        assert_eq!(first, second, "{id} manifest entry should be deterministic");
+        for field in ["text", "cells", "smooth_plan"] {
+            let first_path = first["files"][field].as_str().unwrap();
+            let second_path = second["files"][field].as_str().unwrap();
+            assert_eq!(
+                std::fs::read(run.out.join(first_path)).unwrap(),
+                std::fs::read(repeated.out.join(second_path)).unwrap(),
+                "{id} {field} artifact should be deterministic"
+            );
+        }
+    }
+}
+
+#[test]
 fn dev_preview_smooth_writes_manifest_and_review_artifacts() {
     let run = PreviewRun::new();
 
@@ -2644,6 +2760,15 @@ fn dev_preview_smooth_writes_manifest_and_review_artifacts() {
         format!("frames/{SMOOTH_PARITY_ID}.cells.json"),
         format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json"),
         format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json"),
+        "frames/round-smooth-depth-far.txt".to_string(),
+        "frames/round-smooth-depth-far.cells.json".to_string(),
+        "frames/round-smooth-depth-far.smooth-plan.json".to_string(),
+        "frames/round-smooth-depth-neutral.txt".to_string(),
+        "frames/round-smooth-depth-neutral.cells.json".to_string(),
+        "frames/round-smooth-depth-neutral.smooth-plan.json".to_string(),
+        "frames/round-smooth-depth-front.txt".to_string(),
+        "frames/round-smooth-depth-front.cells.json".to_string(),
+        "frames/round-smooth-depth-front.smooth-plan.json".to_string(),
         format!("strips/{SMOOTH_MOTION_ID}/frame-000.txt"),
         format!("strips/{SMOOTH_MOTION_ID}/frame-000.cells.json"),
         format!("strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json"),

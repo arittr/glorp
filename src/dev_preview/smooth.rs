@@ -23,6 +23,8 @@ use std::path::PathBuf;
 
 const GRID_COLS: u16 = 52;
 const GRID_ROWS: u16 = 52;
+const DEPTH_GRID_COLS: u16 = 44;
+const DEPTH_GRID_ROWS: u16 = 18;
 const MOTION_FRAME_DURATION_MS: u64 = 160;
 const MOTION_FRAME_COUNT: usize = 12;
 const WANDER_PERIOD_MS: u64 = 22_000;
@@ -31,6 +33,9 @@ const REVIEWED_MOTION_START_UNIX_MS: i128 = 1_760_000_001_000;
 pub const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 pub const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
 pub const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
+pub const SMOOTH_DEPTH_FAR_ID: &str = "round-smooth-depth-far";
+pub const SMOOTH_DEPTH_NEUTRAL_ID: &str = "round-smooth-depth-neutral";
+pub const SMOOTH_DEPTH_FRONT_ID: &str = "round-smooth-depth-front";
 
 struct SmoothMotionSample {
     index: usize,
@@ -72,34 +77,102 @@ pub fn smooth_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBundle> 
         &plan,
     ));
 
-    vec![
-        PreviewScenarioBundle::from_parts(
-            baseline,
-            PreviewScenarioKind::Smooth,
-            "Review the current Classic cell baseline before comparing Renderer v2 parity.",
-            smooth_inputs(ctx, "classic-baseline"),
-            Some(smooth_round_metadata(GRID_COLS, GRID_ROWS)),
-            vec![
-                "Confirm the baseline reads like the current round companion cell fixture."
-                    .to_string(),
-                "Use this frame as the checksum and visual baseline for smooth parity."
-                    .to_string(),
-            ],
+    let baseline_bundle = PreviewScenarioBundle::from_parts(
+        baseline,
+        PreviewScenarioKind::Smooth,
+        "Review the current Classic cell baseline before comparing Renderer v2 parity.",
+        smooth_inputs(ctx, "classic-baseline"),
+        Some(smooth_round_metadata(GRID_COLS, GRID_ROWS)),
+        vec![
+            "Confirm the baseline reads like the current round companion cell fixture.".to_string(),
+            "Use this frame as the checksum and visual baseline for smooth parity.".to_string(),
+        ],
+    );
+    let parity_bundle = PreviewScenarioBundle::from_parts(
+        parity,
+        PreviewScenarioKind::Smooth,
+        "Review Renderer v2 parity against the same deterministic Classic fixture.",
+        smooth_inputs(ctx, "smooth-parity"),
+        Some(smooth_round_metadata(GRID_COLS, GRID_ROWS)),
+        vec![
+            "Confirm the parity frame still reads as the current Glorp companion.".to_string(),
+            "Inspect smooth-plan and smooth-parity sidecars for layer coverage and checksum parity."
+                .to_string(),
+        ],
+    );
+
+    let mut bundles = vec![baseline_bundle, parity_bundle];
+    bundles.extend(smooth_depth_bundles(ctx));
+    bundles
+}
+
+pub fn smooth_depth_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBundle> {
+    let vm = WatchViewModel::fixture_with_habitat_props();
+    let review_motion = CompanionMotion {
+        wander_half: 8,
+        drift_x_frac: 0.0,
+        drift_y_frac: 0.0,
+        drift_period_secs: 22,
+        upward_bias: 0.0,
+        wander: true,
+    };
+
+    [
+        (SMOOTH_DEPTH_FAR_ID, "Smooth Depth Far", -1.0f32, "far"),
+        (
+            SMOOTH_DEPTH_NEUTRAL_ID,
+            "Smooth Depth Neutral",
+            0.0f32,
+            "neutral",
         ),
-        PreviewScenarioBundle::from_parts(
-            parity,
-            PreviewScenarioKind::Smooth,
-            "Review Renderer v2 parity against the same deterministic Classic fixture.",
-            smooth_inputs(ctx, "smooth-parity"),
-            Some(smooth_round_metadata(GRID_COLS, GRID_ROWS)),
-            vec![
-                "Confirm the parity frame still reads as the current Glorp companion."
-                    .to_string(),
-                "Inspect smooth-plan and smooth-parity sidecars for layer coverage and checksum parity."
-                    .to_string(),
-            ],
-        ),
+        (SMOOTH_DEPTH_FRONT_ID, "Smooth Depth Front", 1.0f32, "front"),
     ]
+    .into_iter()
+    .map(|(id, title, depth, plane)| {
+        let plan = crate::round::smooth::try_build_round_smooth_scene_plan_with_options(
+            &vm,
+            ctx.fixed_now,
+            DEPTH_GRID_COLS,
+            DEPTH_GRID_ROWS,
+            &review_motion,
+            0,
+            crate::round::smooth::SmoothSceneBuildOptions {
+                depth_override: Some(depth),
+                ..Default::default()
+            },
+        )
+        .expect("depth endpoint preview should build");
+        let mut frame = scene_draw_list_to_preview_frame(
+            id,
+            title,
+            DEPTH_GRID_COLS,
+            DEPTH_GRID_ROWS,
+            &plan.flatten_classic_cells(),
+        );
+        frame.contract.smooth_plan =
+            Some(PreviewSmoothPlanArtifact::from_scene_plan(id, &vm, &plan));
+
+        PreviewScenarioBundle::from_parts(
+            frame,
+            PreviewScenarioKind::Smooth,
+            "Review the pet's depth-driven vertical placement in the physical tank.",
+            BTreeMap::from([
+                (
+                    "fixture".to_string(),
+                    Value::String("full-tank-depth".to_string()),
+                ),
+                ("depth".to_string(), json!(depth)),
+                ("plane".to_string(), Value::String(plane.to_string())),
+            ]),
+            Some(smooth_round_metadata(DEPTH_GRID_COLS, DEPTH_GRID_ROWS)),
+            vec![
+                format!("Confirm the pet reads at the {plane} plane without aperture clipping."),
+                "Confirm shallow scale remains restrained while vertical placement carries depth."
+                    .to_string(),
+            ],
+        )
+    })
+    .collect()
 }
 
 pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
