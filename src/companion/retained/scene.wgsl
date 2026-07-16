@@ -815,6 +815,47 @@ fn circle_coverage(distance: f32, radius: f32) -> f32 {
     return 1.0 - smoothstep(radius - edge, radius + edge, distance);
 }
 
+fn substrate_hash01(cell: vec2<u32>, salt: u32) -> f32 {
+    var hash = (cell.x * 0x9e3779b9u) ^ (cell.y * 0x85ebca6bu) ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7feb352du;
+    hash = hash ^ (hash >> 15u);
+    return f32(hash & 0xffffu) / 65535.0;
+}
+
+fn substrate_value_noise(point: vec2<f32>, cell_size: f32, salt: u32) -> f32 {
+    let grid = max(point / cell_size, vec2<f32>(0.0));
+    let base = vec2<u32>(floor(grid));
+    let fraction = fract(grid);
+    let weight = fraction * fraction * (vec2<f32>(3.0) - 2.0 * fraction);
+    let n00 = substrate_hash01(base, salt);
+    let n10 = substrate_hash01(base + vec2<u32>(1u, 0u), salt);
+    let n01 = substrate_hash01(base + vec2<u32>(0u, 1u), salt);
+    let n11 = substrate_hash01(base + vec2<u32>(1u, 1u), salt);
+    return mix(mix(n00, n10, weight.x), mix(n01, n11, weight.x), weight.y);
+}
+
+fn substrate_mark(
+    point: vec2<f32>,
+    cell_size: f32,
+    radius: f32,
+    density: f32,
+    salt: u32,
+) -> f32 {
+    let grid = max(point / cell_size, vec2<f32>(0.0));
+    let cell = vec2<u32>(floor(grid));
+    if (substrate_hash01(cell, salt) >= density) {
+        return 0.0;
+    }
+    let center_span = max(cell_size - 2.0 * radius, 0.0);
+    let center = vec2<f32>(
+        radius + substrate_hash01(cell, salt ^ 0xa511e9b3u) * center_span,
+        radius + substrate_hash01(cell, salt ^ 0x63d835a7u) * center_span,
+    );
+    let local = fract(grid) * cell_size;
+    return 1.0 - smoothstep(radius - 0.75, radius + 0.75, distance(local, center));
+}
+
 fn fs_room_aperture(
     input: SceneVertexOutput,
     content: AnalyticContentGpuValue,
@@ -842,31 +883,37 @@ fn fs_room_aperture(
     let bed_feather = max(viewport.y * 0.12, 1.0);
     let bed_mix = smoothstep(horizon_y, horizon_y + bed_feather, point_y_down.y);
 
-    let point_step = max(fwidth(input.point_position), vec2<f32>(0.0001));
-    let backing_scale_xy = vec2<f32>(1.0) / point_step;
-    let backing_scale = 0.5 * (backing_scale_xy.x + backing_scale_xy.y);
-    let physical_hash_point = vec2<u32>(max(
-        floor(input.point_position * backing_scale),
-        vec2<f32>(0.0),
-    ));
-    var hash = (physical_hash_point.x * 0x9e3779b9u)
-        ^ (physical_hash_point.y * 0x85ebca6bu);
-    hash = hash ^ (hash >> 16u);
-    hash = hash * 0x7feb352du;
-    hash = hash ^ (hash >> 15u);
-    let dither_levels = (f32(hash & 0xffffu) / 65535.0 - 0.5) * 3.0;
-    let fleck_random = f32((hash >> 16u) & 0xffffu) / 65535.0;
-    let fleck_density = max(bed_mix - 0.35, 0.0) * 0.16;
-    let fleck_mix = select(0.0, 0.35 + 0.55 * bed_mix, fleck_random < fleck_density);
+    let texture_gate = smoothstep(0.18, 0.82, bed_mix);
+    let broad_tone_levels = (
+        substrate_value_noise(point_y_down, 36.0, 0xc13fa9a9u) - 0.5
+    ) * 14.0 * texture_gate;
+    let grain_mix = substrate_mark(
+        point_y_down,
+        10.0,
+        1.6,
+        0.50,
+        0x91e10da5u,
+    ) * 0.22 * texture_gate;
+    let fleck_mix = substrate_mark(
+        point_y_down,
+        30.0,
+        2.8,
+        0.28,
+        0xd1b54a35u,
+    ) * 0.48 * texture_gate;
 
     var room = mix(core, rim, radial);
     room = mix(room, bed, bed_mix * 0.72);
-    room = mix(room, fleck, fleck_mix);
     var room_srgb = linear_to_srgb(room);
     room_srgb = clamp(
-        room_srgb + vec3<f32>(dither_levels / 255.0),
+        room_srgb + vec3<f32>(broad_tone_levels / 255.0),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
+    );
+    room_srgb = mix(
+        room_srgb,
+        linear_to_srgb(fleck),
+        clamp(grain_mix + fleck_mix, 0.0, 0.60),
     );
     let straight = vec4<f32>(srgb_to_linear(room_srgb), 1.0);
     return analytic_premultiply(straight, 1.0, input.opacity, input.saturation);

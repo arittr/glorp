@@ -131,10 +131,61 @@ pub(crate) fn bed_fleck_srgb8(primary_biome: &str) -> [u8; 3] {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct BedTextureSample {
     pub(crate) bed_mix: f32,
+    pub(crate) broad_tone_levels: f32,
+    pub(crate) grain_mix: f32,
     pub(crate) fleck_mix: f32,
-    pub(crate) dither_levels: f32,
     pub(crate) bed_srgb8: [u8; 3],
     pub(crate) fleck_srgb8: [u8; 3],
+}
+
+#[cfg(test)]
+fn substrate_hash01(cell: [u32; 2], salt: u32) -> f32 {
+    let mut hash = cell[0].wrapping_mul(0x9E37_79B9) ^ cell[1].wrapping_mul(0x85EB_CA6B) ^ salt;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x7FEB_352D);
+    hash ^= hash >> 15;
+    (hash & 0xFFFF) as f32 / 65535.0
+}
+
+#[cfg(test)]
+fn texture_smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+fn substrate_value_noise(point: [f32; 2], cell_size: f32, salt: u32) -> f32 {
+    let grid = [point[0] / cell_size, point[1] / cell_size];
+    let base = [grid[0].floor() as u32, grid[1].floor() as u32];
+    let fraction = [grid[0].fract(), grid[1].fract()];
+    let weight = [
+        fraction[0] * fraction[0] * (3.0 - 2.0 * fraction[0]),
+        fraction[1] * fraction[1] * (3.0 - 2.0 * fraction[1]),
+    ];
+    let n00 = substrate_hash01(base, salt);
+    let n10 = substrate_hash01([base[0] + 1, base[1]], salt);
+    let n01 = substrate_hash01([base[0], base[1] + 1], salt);
+    let n11 = substrate_hash01([base[0] + 1, base[1] + 1], salt);
+    let top = n00 + (n10 - n00) * weight[0];
+    let bottom = n01 + (n11 - n01) * weight[0];
+    top + (bottom - top) * weight[1]
+}
+
+#[cfg(test)]
+fn substrate_mark(point: [f32; 2], cell_size: f32, radius: f32, density: f32, salt: u32) -> f32 {
+    let grid = [point[0] / cell_size, point[1] / cell_size];
+    let cell = [grid[0].floor() as u32, grid[1].floor() as u32];
+    if substrate_hash01(cell, salt) >= density {
+        return 0.0;
+    }
+    let center_span = (cell_size - 2.0 * radius).max(0.0);
+    let center = [
+        radius + substrate_hash01(cell, salt ^ 0xA511_E9B3) * center_span,
+        radius + substrate_hash01(cell, salt ^ 0x63D8_35A7) * center_span,
+    ];
+    let local = [grid[0].fract() * cell_size, grid[1].fract() * cell_size];
+    let distance = ((local[0] - center[0]).powi(2) + (local[1] - center[1]).powi(2)).sqrt();
+    1.0 - texture_smooth_step(radius - 0.75, radius + 0.75, distance)
 }
 
 #[cfg(test)]
@@ -150,27 +201,21 @@ pub(crate) fn bed_texture_sample(
     let bed_t = ((logical_point_y_down[1] - horizon_y) / bed_feather).clamp(0.0, 1.0);
     let bed_mix = bed_t * bed_t * (3.0 - 2.0 * bed_t);
 
-    let physical_x = (logical_point_y_down[0] * backing_scale).floor().max(0.0) as u32;
-    let physical_y = ((logical_extent[1] - logical_point_y_down[1]) * backing_scale)
-        .floor()
-        .max(0.0) as u32;
-    let mut hash = physical_x.wrapping_mul(0x9E37_79B9) ^ physical_y.wrapping_mul(0x85EB_CA6B);
-    hash ^= hash >> 16;
-    hash = hash.wrapping_mul(0x7FEB_352D);
-    hash ^= hash >> 15;
-    let dither_levels = ((hash & 0xFFFF) as f32 / 65535.0 - 0.5) * 3.0;
-    let fleck_random = ((hash >> 16) & 0xFFFF) as f32 / 65535.0;
-    let fleck_density = (bed_mix - 0.35).max(0.0) * 0.16;
-    let fleck_mix = if fleck_random < fleck_density {
-        0.35 + 0.55 * bed_mix
-    } else {
-        0.0
-    };
+    let texture_gate = texture_smooth_step(0.18, 0.82, bed_mix);
+    let broad_tone_levels = (substrate_value_noise(logical_point_y_down, 36.0, 0xC13F_A9A9) - 0.5)
+        * 14.0
+        * texture_gate;
+    let grain_mix =
+        substrate_mark(logical_point_y_down, 10.0, 1.6, 0.50, 0x91E1_0DA5) * 0.22 * texture_gate;
+    let fleck_mix =
+        substrate_mark(logical_point_y_down, 30.0, 2.8, 0.28, 0xD1B5_4A35) * 0.48 * texture_gate;
+    let _ = backing_scale;
 
     BedTextureSample {
         bed_mix,
+        broad_tone_levels,
+        grain_mix,
         fleck_mix,
-        dither_levels,
         bed_srgb8: bed_primary_srgb8(primary_biome),
         fleck_srgb8: bed_fleck_srgb8(primary_biome),
     }
@@ -353,18 +398,11 @@ mod tests {
     }
 
     #[test]
-    fn bed_texture_is_stable_for_same_logical_sample() {
-        for backing_scale in [1.0, 2.0] {
-            assert_eq!(
-                bed_texture_sample([144.5, 300.5], [360.0; 2], backing_scale, "starter"),
-                bed_texture_sample([144.5, 300.5], [360.0; 2], backing_scale, "starter"),
-                "backing_scale={backing_scale}",
-            );
-        }
-        let first = bed_texture_sample([144.5, 300.5], [360.0; 2], 1.0, "starter");
-        assert!(first.bed_mix > 0.6);
-        assert!(first.fleck_mix > 0.7);
-        assert!((-1.5..=1.5).contains(&first.dither_levels));
+    fn bed_texture_is_invariant_to_backing_scale() {
+        let at_1x = bed_texture_sample([144.5, 300.5], [360.0; 2], 1.0, "starter");
+        let at_2x = bed_texture_sample([144.5, 300.5], [360.0; 2], 2.0, "starter");
+        assert_eq!(at_1x, at_2x);
+        assert!(at_1x.bed_mix > 0.6);
     }
 
     #[test]
@@ -372,11 +410,30 @@ mod tests {
         let starter = bed_texture_sample([144.5, 300.5], [360.0; 2], 1.0, "starter");
         let botanical = bed_texture_sample([144.5, 300.5], [360.0; 2], 1.0, "botanical");
         assert_eq!(starter.bed_mix, botanical.bed_mix);
+        assert_eq!(starter.broad_tone_levels, botanical.broad_tone_levels);
+        assert_eq!(starter.grain_mix, botanical.grain_mix);
         assert_eq!(starter.fleck_mix, botanical.fleck_mix);
         assert_eq!(starter.bed_srgb8, [72, 83, 108]);
         assert_eq!(starter.fleck_srgb8, [60, 65, 80]);
         assert_eq!(botanical.bed_srgb8, [63, 111, 102]);
         assert_eq!(botanical.fleck_srgb8, [55, 81, 76]);
+    }
+
+    #[test]
+    fn bed_texture_has_broad_tone_and_clustered_marks() {
+        let samples = (276..=348)
+            .step_by(2)
+            .flat_map(|y| {
+                (48..=312).step_by(2).map(move |x| {
+                    bed_texture_sample([x as f32 + 0.5, y as f32 + 0.5], [360.0; 2], 1.0, "starter")
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(samples
+            .iter()
+            .any(|sample| sample.broad_tone_levels.abs() >= 2.0));
+        assert!(samples.iter().any(|sample| sample.grain_mix >= 0.10));
+        assert!(samples.iter().any(|sample| sample.fleck_mix >= 0.20));
     }
 
     #[test]
@@ -386,6 +443,8 @@ mod tests {
                 let sample =
                     bed_texture_sample([x as f32 + 0.5, y as f32 + 0.5], [360.0; 2], 2.0, "cozy");
                 assert_eq!(sample.bed_mix, 0.0, "sample=({x}, {y})");
+                assert_eq!(sample.broad_tone_levels, 0.0, "sample=({x}, {y})");
+                assert_eq!(sample.grain_mix, 0.0, "sample=({x}, {y})");
                 assert_eq!(sample.fleck_mix, 0.0, "sample=({x}, {y})");
             }
         }

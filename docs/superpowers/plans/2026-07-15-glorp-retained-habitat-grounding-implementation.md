@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Grounded props retain their rear, middle, or near lane and keep at least one logical cell of inset from the point-space circular aperture. Canonical square contacts remain `15/16/17`; non-square contacts follow the actual circular floor.
+- Grounded props retain their rear, middle, or near lane, keep at least one logical cell of horizontal inset from the point-space circular side rim, and use the full vertical aperture so they contact the floor. Canonical square contacts remain `15/16/17`; non-square contacts follow the actual circular floor.
 - Grounded candidates move inward under competition and hide on exhaustion; they never expand toward the rim, change depth lanes, overlap the HUD, or lose the one-cell prop gutter.
 - The existing reeds reward becomes shared authored `Background` depth; it is not duplicated and its identity, threshold, art, animation, color, zone, and priority do not change.
 - Foreground ceiling attachment uses occupied prop cells against the full circular aperture. Empty rectangular footprint corners do not reject a valid vine, while background ceiling props remain gauge-safe and recessed.
@@ -30,21 +30,10 @@
 
 **Interfaces:**
 - Consumes: `HabitatPropSpec::pet_layer`, `FloorDepthLane`, `grounded_side_lane_anchors`, `candidate_is_safe`, and the existing full-cast composition matrix.
-- Produces: `FLOOR_APERTURE_INSET_CELLS: f32`, `aperture_radii_cells(CompanionCompositionInput) -> [f32; 2]`, `inset_aperture_radii([f32; 2], f32) -> [f32; 2]`, `aperture_floor_extent_rows(u16, f32) -> i16`, inward floor-HUD candidates, and `TOKEN_REEDS_5M` with `HabitatPetLayer::Background`.
+- Produces: `FLOOR_APERTURE_INSET_CELLS: f32`, `aperture_radii_cells(CompanionCompositionInput) -> [f32; 2]`, `grounded_aperture_radii([f32; 2], f32) -> [f32; 2]`, `aperture_floor_extent_rows(u16, f32) -> i16`, inward floor-HUD candidates, and `TOKEN_REEDS_5M` with `HabitatPetLayer::Background`.
 - Preserves: canonical square exclusive floor contacts `15`, `16`, and `17`, stable named depth lanes across surface shapes, all prop identities, and every non-floor placement rule.
 
-- [ ] **Step 1: Add failing catalog and inward-candidate tests**
-
-In `src/game/habitat.rs`'s test module, add:
-
-```rust
-#[test]
-fn reeds_are_background_floor_vegetation() {
-    let reeds = catalog_prop_by_str(TOKEN_REEDS_5M).expect("reeds catalog entry");
-    assert_eq!(reeds.zone, HabitatPropZone::FloorRight);
-    assert_eq!(reeds.pet_layer, HabitatPetLayer::Background);
-}
-```
+- [ ] **Step 1: Add a failing inward-candidate test**
 
 In `src/presentation/companion_scene/composition.rs`'s test module, add:
 
@@ -80,11 +69,10 @@ fn grounded_side_lane_fallbacks_move_inward_from_the_hud() {
 Run:
 
 ```bash
-cargo test --lib reeds_are_background_floor_vegetation
 cargo test --lib grounded_side_lane_fallbacks_move_inward_from_the_hud
 ```
 
-Expected: the reeds test reports `Foreground` instead of `Background`; the candidate test reports left positions `[12, 10, 8]` and right positions `[31, 33, 35]`.
+Expected: the candidate test reports left positions `[12, 10, 8]` and right positions `[31, 33, 35]`. The composition matrix in Step 3 proves the reeds depth contract through the real placement consumer.
 
 - [ ] **Step 3: Add the failing inset/depth composition matrix**
 
@@ -117,7 +105,7 @@ fn moss_and_reeds_keep_an_inset_and_separate_floor_depths() {
             aperture_radius_points / (width_points / f32::from(COLUMNS)),
             aperture_radius_points / (height_points / f32::from(ROWS)),
         ];
-        let radii = [full_radii[0] - 1.0, full_radii[1] - 1.0];
+        let radii = [full_radii[0] - 1.0, full_radii[1]];
         let center = [f32::from(COLUMNS) / 2.0, f32::from(ROWS) / 2.0];
         let floor_extent = (center[1] + full_radii[1] + 0.5)
             .floor()
@@ -194,8 +182,8 @@ fn aperture_radii_cells(input: CompanionCompositionInput<'_>) -> [f32; 2] {
     ]
 }
 
-fn inset_aperture_radii(radii: [f32; 2], inset_cells: f32) -> [f32; 2] {
-    radii.map(|radius| (radius - inset_cells).max(0.0))
+fn grounded_aperture_radii(radii: [f32; 2], horizontal_inset_cells: f32) -> [f32; 2] {
+    [(radii[0] - horizontal_inset_cells).max(0.0), radii[1]]
 }
 
 fn aperture_floor_extent_rows(rows: u16, radius_rows: f32) -> i16 {
@@ -226,7 +214,7 @@ In `resolve_companion_composition`, derive both axes from point geometry, then a
 ```rust
 let aperture_radius_cells = aperture_radii_cells(input);
 let grounded_radius_cells =
-    inset_aperture_radii(aperture_radius_cells, FLOOR_APERTURE_INSET_CELLS);
+    grounded_aperture_radii(aperture_radius_cells, FLOOR_APERTURE_INSET_CELLS);
 let floor_extent_rows = aperture_floor_extent_rows(input.rows, aperture_radius_cells[1]);
 ```
 
@@ -272,7 +260,7 @@ let aperture_radius_points = width_points.min(height_points) / 2.0;
 let safe_radii = if placement.grounded {
     [
         aperture_radius_points / (width_points / f32::from(COLUMNS)) - 1.0,
-        aperture_radius_points / (height_points / f32::from(ROWS)) - 1.0,
+        aperture_radius_points / (height_points / f32::from(ROWS)),
     ]
 } else {
     expected_radii
@@ -340,7 +328,7 @@ In `tests/retained_scene.rs::retained_full_cast_composition_matrix`, change only
 let prop_safe_radii = if grounded {
     [
         aperture_radius as f32 / cell[0] - 1.0,
-        aperture_radius as f32 / cell[1] - 1.0,
+        aperture_radius as f32 / cell[1],
     ]
 } else {
     safe_radii
@@ -354,14 +342,13 @@ Replace the literal grounded contacts with `floor_extent - 3.0`, `floor_extent -
 Run:
 
 ```bash
-cargo test --lib reeds_are_background_floor_vegetation
 cargo test --lib grounded_side_lane_fallbacks_move_inward_from_the_hud
 cargo test --lib moss_and_reeds_keep_an_inset_and_separate_floor_depths
 cargo test --test retained_scene retained_full_cast_composition_matrix
 cargo test --lib presentation::companion_scene::composition::tests
 ```
 
-Expected: all focused tests PASS; on square surfaces moss/reeds end on `17/15`, on tall surfaces their named lane offsets follow the circular floor, and every accepted ground footprint satisfies the point-correct inset ellipse.
+Expected: all focused tests PASS; on square surfaces moss/reeds end on `17/15`, on tall surfaces their named lane offsets follow the circular floor, and every accepted ground footprint satisfies the point-correct horizontal side inset while contacting the full vertical floor aperture.
 
 Commit:
 
@@ -373,6 +360,11 @@ git commit -m "fix(companion): inset grounded vegetation"
 ---
 
 ### Task 2: Attach foreground ceiling props by occupied cells
+
+**TDD sequencing note:** Perform Step 3's contour-contact test and observe its
+behavioral RED before Steps 1-2. Then add the occupied-offset helper and its
+focused unit coverage as part of the smallest GREEN implementation. A
+missing-symbol compiler error does not count as the RED result.
 
 **Files:**
 - Modify: `src/presentation/props.rs:22-35,394-474,565-640`
@@ -851,42 +843,7 @@ cargo test --lib --features retained-renderer bed_texture_is_invariant_to_backin
 
 Expected: FAIL. Current measured values at that logical point are `dither_levels=0.2611, fleck_mix=0.7217` at 1x and `dither_levels=-0.5721, fleck_mix=0.0` at 2x.
 
-- [ ] **Step 2: Add the structured-texture shader contract RED test**
-
-Rename `room_analytic_uses_packed_biome_bed_and_stable_physical_hash_only` in `render.rs` to `room_analytic_uses_packed_biome_bed_and_logical_texture_only` and use this contract:
-
-```rust
-for required in [
-    "content.payload[0].z",
-    "content.payload[0].w",
-    "frame_buffer.globals.viewport_points",
-    "point_y_down",
-    "substrate_value_noise",
-    "substrate_mark",
-    "broad_tone_levels",
-    "grain_mix",
-    "fleck_mix",
-    "analytic_premultiply(straight, 1.0, input.opacity, input.saturation)",
-] {
-    assert!(room.contains(required), "missing room contract: {required}");
-}
-for forbidden in [
-    "fwidth(input.point_position)",
-    "backing_scale",
-    "physical_hash_point",
-    "viewport_pixels",
-    "frame_buffer.values",
-    "frame_buffer.globals.gauges",
-    "frame_buffer.globals.dim_amount",
-    "content_globals_buffer.globals",
-] {
-    assert!(!room.contains(forbidden), "unstable room input: {forbidden}");
-}
-```
-
-Run the renamed test and expect FAIL because the required logical helpers are absent and the forbidden physical-scale terms are present.
-
-- [ ] **Step 3: Implement the test-only CPU mirror in logical coordinates**
+- [ ] **Step 2: Implement the test-only CPU mirror in logical coordinates**
 
 Replace `BedTextureSample` with:
 
@@ -994,7 +951,7 @@ let _ = backing_scale;
 
 Return those three texture fields. The backing scale remains in the test helper signature solely to prove that it has no effect.
 
-- [ ] **Step 4: Strengthen CPU grain and upper-room tests**
+- [ ] **Step 3: Strengthen CPU grain and upper-room tests**
 
 Add:
 
@@ -1037,7 +994,7 @@ assert_eq!(botanical.bed_srgb8, [63, 111, 102]);
 assert_eq!(botanical.fleck_srgb8, [55, 81, 76]);
 ```
 
-- [ ] **Step 5: Mirror the analytic texture in WGSL**
+- [ ] **Step 4: Mirror the analytic texture in WGSL**
 
 Add these WGSL mirrors immediately before `fs_room_aperture`:
 
@@ -1124,7 +1081,7 @@ let straight = vec4<f32>(srgb_to_linear(room_srgb), 1.0);
 
 Use absolute `point_y_down`; do not divide texture coordinates by viewport dimensions and do not use `fwidth` inside any substrate helper.
 
-- [ ] **Step 6: Replace the high-frequency-only native readback metric**
+- [ ] **Step 5: Replace the high-frequency-only native readback metric**
 
 Generalize the helper signature and request construction:
 
@@ -1207,19 +1164,34 @@ fn downsample_rgba(rgba: &[u8], width: usize, block: usize) -> (Vec<u8>, usize) 
 }
 ```
 
-Replace `retained_bed_lower_roi_has_stable_texture_variance` with `retained_bed_lower_roi_has_structured_logical_texture`:
+Replace `retained_bed_lower_roi_has_stable_texture_variance` with
+`retained_bed_lower_roi_has_structured_logical_texture`. Add helpers that
+compute 5x5 local-trend luminance residuals and Pearson correlation over equal
+logical grids. The correlation is the backing-scale contract; the existing
+structured-versus-smooth variance comparison remains a separate quality check:
 
 ```rust
 #[cfg(target_os = "macos")]
 #[test]
 fn retained_bed_lower_roi_has_structured_logical_texture() {
     let (device, queue) = native_device();
-    let [first, repeated] = room_only_offscreen(&device, &queue, 1.0);
-    assert_eq!(first.rgba, repeated.rgba, "bed texture must be byte-stable");
+    let [at_1x, repeated_1x] = room_only_offscreen(&device, &queue, 1.0);
+    assert_eq!(at_1x.rgba, repeated_1x.rgba, "1x bed texture must be byte-stable");
+    let [at_2x, repeated_2x] = room_only_offscreen(&device, &queue, 2.0);
+    assert_eq!(at_2x.rgba, repeated_2x.rgba, "2x bed texture must be byte-stable");
 
-    let lower = rgba_roi(&first, [100.0, 285.0, 160.0, 48.0], 1.0);
-    let upper = rgba_roi(&first, [100.0, 120.0, 160.0, 96.0], 1.0);
-    let (lower_coarse, lower_width) = downsample_rgba(&lower, 160, 4);
+    let lower_1x = rgba_roi(&at_1x, [100.0, 285.0, 160.0, 48.0], 1.0);
+    let lower_2x = rgba_roi(&at_2x, [100.0, 285.0, 160.0, 48.0], 2.0);
+    let (lower_coarse, lower_width) = downsample_rgba(&lower_1x, 160, 4);
+    let (lower_2x_coarse, lower_2x_width) = downsample_rgba(&lower_2x, 320, 8);
+    assert_eq!(lower_width, lower_2x_width);
+    let scale_correlation = pearson_correlation(
+        &local_trend_residuals(&lower_coarse, lower_width),
+        &local_trend_residuals(&lower_2x_coarse, lower_2x_width),
+    );
+    assert!(scale_correlation >= 0.8, "cross-scale texture correlation={scale_correlation}");
+
+    let upper = rgba_roi(&at_1x, [100.0, 120.0, 160.0, 96.0], 1.0);
     let (upper_coarse, upper_width) = downsample_rgba(&upper, 160, 4);
     let structured = local_trend_residual_variance(&lower_coarse, lower_width);
     let smooth = local_trend_residual_variance(&upper_coarse, upper_width);
@@ -1230,19 +1202,24 @@ fn retained_bed_lower_roi_has_structured_logical_texture() {
 }
 ```
 
-Update `retained_bed_upper_roi_has_no_substrate_flecks` to call `room_only_offscreen(&device, &queue, 1.0)` and keep its upper-room threshold. Run the native test before changing WGSL and record the measured RED value; the current isolated pixel noise should average away below the new structured threshold.
+Update `retained_bed_upper_roi_has_no_substrate_flecks` to call
+`room_only_offscreen(&device, &queue, 1.0)` and keep its upper-room threshold.
+Run the native test before changing WGSL and record the measured RED value. The
+old physical-pixel shader must fail the normalized 1x/2x correlation floor; on
+the implementation machine it measured `0.5515661565204638` against the `0.8`
+requirement. Do not accept the structured-versus-smooth threshold alone as RED,
+because the old shader can already satisfy it on Metal.
 
-- [ ] **Step 7: Run GREEN checks and commit Task 3**
+- [ ] **Step 6: Run GREEN checks and commit Task 3**
 
 Run:
 
 ```bash
 cargo test --lib --features retained-renderer presentation::companion_effects::tests::bed_texture_
-cargo test --lib --features retained-renderer room_analytic_uses_packed_biome_bed_and_logical_texture_only
 cargo test --lib --features retained-renderer retained_bed_
 ```
 
-Expected: all CPU, source-contract, and native Metal tests PASS; repeated 1x renders are byte-identical, logical CPU samples are identical at 1x/2x, coherent lower-bed texture survives 4x4 averaging, and the upper room remains smooth.
+Expected: all CPU and native Metal behavior tests PASS; repeated 1x renders are byte-identical, logical CPU samples are identical at 1x/2x, coherent lower-bed texture survives 4x4 averaging, and the upper room remains smooth.
 
 Commit:
 
@@ -1272,7 +1249,7 @@ Run:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --lib --all-features
-cargo test --test retained_scene
+cargo test --features retained-renderer --test retained_scene
 cargo test --test round_scene
 cargo test --features dev-preview --test dev_preview
 ```

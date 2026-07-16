@@ -8745,43 +8745,6 @@ mod tests {
     }
 
     #[test]
-    fn room_analytic_uses_packed_biome_bed_and_stable_physical_hash_only() {
-        let room = SCENE_SHADER_SOURCE
-            .split("fn fs_room_aperture(")
-            .nth(1)
-            .expect("room analytic role exists")
-            .split("fn fs_prop_shadows(")
-            .next()
-            .expect("room role has a bounded body");
-
-        for required in [
-            "content.payload[0].z",
-            "content.payload[0].w",
-            "frame_buffer.globals.viewport_points",
-            "fwidth(input.point_position)",
-            "let backing_scale =",
-            "input.point_position * backing_scale",
-            "0x9e3779b9u",
-            "0x85ebca6bu",
-            "0x7feb352du",
-            "analytic_premultiply(straight, 1.0, input.opacity, input.saturation)",
-        ] {
-            assert!(room.contains(required), "missing room contract: {required}");
-        }
-        for forbidden in [
-            "frame_buffer.values",
-            "frame_buffer.globals.gauges",
-            "frame_buffer.globals.dim_amount",
-            "content_globals_buffer.globals",
-        ] {
-            assert!(
-                !room.contains(forbidden),
-                "unstable room input: {forbidden}"
-            );
-        }
-    }
-
-    #[test]
     fn analytic_fragment_discards_zero_alpha_output_before_returning() {
         let analytic = SCENE_SHADER_SOURCE
             .split("fn fs_analytic(")
@@ -9822,9 +9785,10 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn room_only_offscreen_at_1x(
+    fn room_only_offscreen(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        backing_scale: f64,
     ) -> [SceneRenderOutcome; 2] {
         let cpu = compile_fixture(&canonical_materialization_fixture());
         let atlas = full_hud_atlas_for('^', cpu.generation_key.resources, None, None);
@@ -9848,7 +9812,7 @@ mod tests {
             candidate.generation_key,
             candidate.source_revisions,
             candidate.logical_viewport_points,
-            1.0,
+            backing_scale,
         );
         let mut renderer = SceneRenderer::new(device, queue, &shared);
         std::array::from_fn(|_| {
@@ -9866,7 +9830,48 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn local_trend_residual_variance(rgba: &[u8], width: usize) -> f64 {
+    fn downsample_rgba(rgba: &[u8], width: usize, block: usize) -> (Vec<u8>, usize) {
+        let height = rgba.len() / 4 / width;
+        assert_eq!(width % block, 0);
+        assert_eq!(height % block, 0);
+        let output_width = width / block;
+        let output_height = height / block;
+        let mut output = Vec::with_capacity(output_width * output_height * 4);
+        for output_y in 0..output_height {
+            for output_x in 0..output_width {
+                for channel in 0..4 {
+                    let mut sum = 0_u32;
+                    for y in 0..block {
+                        for x in 0..block {
+                            let source_x = output_x * block + x;
+                            let source_y = output_y * block + y;
+                            sum += u32::from(rgba[(source_y * width + source_x) * 4 + channel]);
+                        }
+                    }
+                    output.push((sum / u32::try_from(block * block).unwrap()) as u8);
+                }
+            }
+        }
+        (output, output_width)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mean_rgb_absolute_difference(left: &[u8], right: &[u8]) -> f64 {
+        assert_eq!(left.len(), right.len());
+        let (difference, samples) = left.chunks_exact(4).zip(right.chunks_exact(4)).fold(
+            (0_u64, 0_u64),
+            |(difference, samples), (left, right)| {
+                let pixel_difference = (0..3)
+                    .map(|channel| u64::from(left[channel].abs_diff(right[channel])))
+                    .sum::<u64>();
+                (difference + pixel_difference, samples + 3)
+            },
+        );
+        difference as f64 / samples as f64
+    }
+
+    #[cfg(target_os = "macos")]
+    fn local_trend_residuals(rgba: &[u8], width: usize) -> Vec<f64> {
         let height = rgba.len() / 4 / width;
         let luminance = |x: usize, y: usize| {
             let offset = (y * width + x) * 4;
@@ -9875,8 +9880,7 @@ mod tests {
                 + 0.7152 * f64::from(pixel[1])
                 + 0.0722 * f64::from(pixel[2])
         };
-        let mut squared = 0.0;
-        let mut count = 0_u64;
+        let mut residuals = Vec::with_capacity((width - 4) * (height - 4));
         for y in 2..height - 2 {
             for x in 2..width - 2 {
                 let mut smooth = 0.0;
@@ -9885,28 +9889,81 @@ mod tests {
                         smooth += luminance(sample_x, sample_y);
                     }
                 }
-                let residual = luminance(x, y) - smooth / 25.0;
-                squared += residual * residual;
-                count += 1;
+                residuals.push(luminance(x, y) - smooth / 25.0);
             }
         }
-        squared / count as f64
+        residuals
+    }
+
+    #[cfg(target_os = "macos")]
+    fn local_trend_residual_variance(rgba: &[u8], width: usize) -> f64 {
+        let residuals = local_trend_residuals(rgba, width);
+        residuals
+            .iter()
+            .map(|residual| residual * residual)
+            .sum::<f64>()
+            / residuals.len() as f64
+    }
+
+    #[cfg(target_os = "macos")]
+    fn pearson_correlation(left: &[f64], right: &[f64]) -> f64 {
+        assert_eq!(left.len(), right.len());
+        let left_mean = left.iter().sum::<f64>() / left.len() as f64;
+        let right_mean = right.iter().sum::<f64>() / right.len() as f64;
+        let (covariance, left_squared, right_squared) = left.iter().zip(right).fold(
+            (0.0, 0.0, 0.0),
+            |(covariance, left_squared, right_squared), (left, right)| {
+                let left = left - left_mean;
+                let right = right - right_mean;
+                (
+                    covariance + left * right,
+                    left_squared + left * left,
+                    right_squared + right * right,
+                )
+            },
+        );
+        covariance / (left_squared * right_squared).sqrt()
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn retained_bed_lower_roi_has_stable_texture_variance() {
+    fn retained_bed_lower_roi_has_structured_logical_texture() {
         let (device, queue) = native_device();
-        let [first, second] = room_only_offscreen_at_1x(&device, &queue);
-        assert_eq!(first.rgba, second.rgba, "bed texture must be byte-stable");
+        let [at_1x, repeated_1x] = room_only_offscreen(&device, &queue, 1.0);
+        assert_eq!(
+            at_1x.rgba, repeated_1x.rgba,
+            "1x bed texture must be byte-stable"
+        );
+        let [at_2x, repeated_2x] = room_only_offscreen(&device, &queue, 2.0);
+        assert_eq!(
+            at_2x.rgba, repeated_2x.rgba,
+            "2x bed texture must be byte-stable"
+        );
 
-        let lower = rgba_roi(&first, [100.0, 285.0, 160.0, 48.0], 1.0);
-        let variance = local_trend_residual_variance(&lower, 160);
-        let upper = rgba_roi(&first, [100.0, 120.0, 160.0, 96.0], 1.0);
-        let smooth_variance = local_trend_residual_variance(&upper, 160);
+        let lower_1x = rgba_roi(&at_1x, [100.0, 285.0, 160.0, 48.0], 1.0);
+        let lower_2x = rgba_roi(&at_2x, [100.0, 285.0, 160.0, 48.0], 2.0);
+        let (lower_coarse, lower_width) = downsample_rgba(&lower_1x, 160, 4);
+        let (lower_2x_coarse, lower_2x_width) = downsample_rgba(&lower_2x, 320, 8);
+        assert_eq!(lower_width, lower_2x_width);
+        let scale_difference = mean_rgb_absolute_difference(&lower_coarse, &lower_2x_coarse);
+        let scale_correlation = pearson_correlation(
+            &local_trend_residuals(&lower_coarse, lower_width),
+            &local_trend_residuals(&lower_2x_coarse, lower_2x_width),
+        );
+        // Require the same dominant logical texture structure while allowing
+        // for multisample coverage and 8-bit quantization at the two scales.
         assert!(
-            variance > 1.5 && variance > smooth_variance * 2.0,
-            "lower bed has only the smooth room trend: variance={variance}, smooth={smooth_variance}"
+            scale_correlation >= 0.8,
+            "logical lower-bed texture lost cross-scale coherence after backing-scale normalization: correlation={scale_correlation}, mean_difference={scale_difference}",
+        );
+
+        let upper_1x = rgba_roi(&at_1x, [100.0, 120.0, 160.0, 96.0], 1.0);
+        let (upper_coarse, upper_width) = downsample_rgba(&upper_1x, 160, 4);
+        let structured = local_trend_residual_variance(&lower_coarse, lower_width);
+        let smooth = local_trend_residual_variance(&upper_coarse, upper_width);
+        assert!(
+            structured > 0.25 && structured > smooth * 2.0,
+            "lower bed lacks coherent texture: structured={structured}, smooth={smooth}",
         );
     }
 
@@ -9914,7 +9971,7 @@ mod tests {
     #[test]
     fn retained_bed_upper_roi_has_no_substrate_flecks() {
         let (device, queue) = native_device();
-        let [first, second] = room_only_offscreen_at_1x(&device, &queue);
+        let [first, second] = room_only_offscreen(&device, &queue, 1.0);
         assert_eq!(first.rgba, second.rgba, "room dither must be byte-stable");
 
         let upper = rgba_roi(&first, [100.0, 120.0, 160.0, 96.0], 1.0);
@@ -9930,11 +9987,13 @@ mod tests {
     fn retained_full_cast_rois_are_nonblank_at_one_and_two_x() {
         use crate::pet::generation::Species;
         use crate::presentation::companion_scene::{
-            AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration, SceneGenerationKey,
+            AppliedRevisions, AuthoredDepthSnapshot, DeviceEpoch, LayoutGeneration,
+            PropZoneSnapshot, ResourceGeneration, SceneGenerationKey,
         };
         use crate::round::smooth::CompanionContentIdentity;
 
         let snapshot = retained_full_cast_snapshot();
+        let prop_topology = snapshot.topology.visible_props.clone();
         assert_eq!(snapshot.topology.visible_props.len(), 10);
         let visible_prop_slots = snapshot
             .frame
@@ -10047,14 +10106,30 @@ mod tests {
                     [roi[1], roi[1] + roi[3]],
                 )
             };
-            for x in safe_x {
-                for y in safe_y {
-                    let dx = (x - gauge_center[0]) / safe_radius;
-                    let dy = (y - gauge_center[1]) / safe_radius;
-                    assert!(
-                        dx * dx + dy * dy <= 1.0,
-                        "prop slot {slot} projected ROI escaped its safe ellipse: {roi:?}"
-                    );
+            let prop = prop_topology
+                .iter()
+                .find(|prop| prop.stable_order == *slot)
+                .expect("topology for visible prop");
+            let foreground_ceiling = prop.zone == PropZoneSnapshot::Ceiling
+                && prop.authored_depth == AuthoredDepthSnapshot::Foreground;
+            if foreground_ceiling {
+                let aperture_radius_rows = layout.width_points.min(layout.height_points)
+                    / 2.0
+                    / grid.cell_extent_points[1];
+                let expected_top = (f32::from(grid.rows) / 2.0 - aperture_radius_rows - 0.5)
+                    .ceil()
+                    .max(0.0) as i16;
+                assert_eq!(placement.bounds_cells[1], expected_top);
+            } else {
+                for x in safe_x {
+                    for y in safe_y {
+                        let dx = (x - gauge_center[0]) / safe_radius;
+                        let dy = (y - gauge_center[1]) / safe_radius;
+                        assert!(
+                            dx * dx + dy * dy <= 1.0,
+                            "prop slot {slot} projected ROI escaped its safe ellipse: {roi:?}"
+                        );
+                    }
                 }
             }
         }
@@ -10669,11 +10744,30 @@ mod tests {
             }
         }
         let without_glyph = renderer
-            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            )
             .expect("glyph-isolation control renders");
-        candidate.draw_plan = baseline_plan;
+        for draw in &mut candidate.draw_plan.opaque {
+            draw.instance_range = 0..0;
+        }
+        for draw in &mut candidate.draw_plan.world_blended_unsorted {
+            if draw.primitive_index != prop_primitive {
+                draw.instance_range = 0..0;
+            }
+        }
+        let glyph_only = renderer
+            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &hud)
+            .expect("opaque-glyph coverage control renders");
+        candidate.draw_plan = baseline_plan.clone();
         let glyph_pixels = rgba_roi(&baseline, prop_roi, 1.0);
         let without_glyph_pixels = rgba_roi(&without_glyph, prop_roi, 1.0);
+        let glyph_only_pixels = rgba_roi(&glyph_only, prop_roi, 1.0);
 
         let frame = cpu.accepted_frame_for_test().prop_slots[shadow_slot];
         let cell = [360.0 / 44.0, 360.0 / 18.0];
@@ -10713,6 +10807,8 @@ mod tests {
         frame_delta.to = to;
         frame_delta.prop_slots.push(shadow_frame);
         let logical_viewport_points = cpu.logical_viewport_points();
+        let shadowed_request =
+            render_request_fixture(generation_key, to, logical_viewport_points, 1.0);
         let shadowed = renderer
             .render_offscreen_with_delta(
                 &device,
@@ -10722,7 +10818,7 @@ mod tests {
                 &mut candidate,
                 &content_delta,
                 &frame_delta,
-                render_request_fixture(generation_key, to, logical_viewport_points, 1.0),
+                shadowed_request.clone(),
                 &hud,
             )
             .expect("positive-strength shadow frame renders");
@@ -10742,21 +10838,55 @@ mod tests {
         );
 
         let shadowed_glyph_pixels = rgba_roi(&shadowed, prop_roi, 1.0);
+        for draw in &mut candidate.draw_plan.world_blended_unsorted {
+            if draw.primitive_index == prop_primitive {
+                draw.instance_range = 0..0;
+            }
+        }
+        let shadowed_without_glyph = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut candidate,
+                shadowed_request,
+                &hud,
+            )
+            .expect("shadowed glyph-isolation control renders");
+        candidate.draw_plan = baseline_plan;
+        let shadowed_without_glyph_pixels = rgba_roi(&shadowed_without_glyph, prop_roi, 1.0);
+        let glyph_core_coverage = glyph_only_pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .max()
+            .expect("glyph coverage control has pixels");
+        assert!(glyph_core_coverage >= 192);
         let strongest_glyph_pixel = glyph_pixels
             .chunks_exact(4)
             .zip(without_glyph_pixels.chunks_exact(4))
+            .zip(glyph_only_pixels.chunks_exact(4))
+            .zip(shadowed_without_glyph_pixels.chunks_exact(4))
             .enumerate()
-            .map(|(index, (glyph, room))| {
+            .filter_map(|(index, (((glyph, room), glyph_only), shadowed_room))| {
+                let background_darkened = shadowed_room[..3]
+                    .iter()
+                    .zip(&room[..3])
+                    .all(|(shadowed, unshadowed)| shadowed <= unshadowed)
+                    && shadowed_room[..3] != room[..3];
                 let contrast = glyph[..3]
                     .iter()
                     .zip(&room[..3])
                     .map(|(glyph, room)| u16::from(glyph.abs_diff(*room)))
                     .sum::<u16>();
-                (index, contrast)
+                (background_darkened && contrast >= 48).then_some((index, glyph_only[3]))
             })
-            .max_by_key(|(_, contrast)| *contrast)
-            .expect("glyph ROI has pixels");
-        assert!(strongest_glyph_pixel.1 >= 48);
+            .max_by_key(|(_, coverage)| *coverage)
+            .expect("the shadow darkens background beneath a visible glyph pixel");
+        assert!(
+            strongest_glyph_pixel.1 >= glyph_core_coverage.saturating_sub(32),
+            "the shadow misses the glyph core: overlap={}, core={glyph_core_coverage}",
+            strongest_glyph_pixel.1,
+        );
         let index = strongest_glyph_pixel.0;
         assert_eq!(
             glyph_pixels[index * 4..index * 4 + 4],

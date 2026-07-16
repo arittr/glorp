@@ -296,7 +296,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         zone: HabitatPropZone::FloorRight,
         display_priority: 151, // reeds — third green plant anchor
         lifetime_threshold: Some(5_000_000.0),
-        pet_layer: HabitatPetLayer::Foreground,
+        pet_layer: HabitatPetLayer::Background,
         color: (0x8c, 0xc4, 0x6c), // reed green
     },
     HabitatPropSpec {
