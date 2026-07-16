@@ -33,18 +33,7 @@
 - Produces: `FLOOR_APERTURE_INSET_CELLS: f32`, `aperture_radii_cells(CompanionCompositionInput) -> [f32; 2]`, `inset_aperture_radii([f32; 2], f32) -> [f32; 2]`, `aperture_floor_extent_rows(u16, f32) -> i16`, inward floor-HUD candidates, and `TOKEN_REEDS_5M` with `HabitatPetLayer::Background`.
 - Preserves: canonical square exclusive floor contacts `15`, `16`, and `17`, stable named depth lanes across surface shapes, all prop identities, and every non-floor placement rule.
 
-- [ ] **Step 1: Add failing catalog and inward-candidate tests**
-
-In `src/game/habitat.rs`'s test module, add:
-
-```rust
-#[test]
-fn reeds_are_background_floor_vegetation() {
-    let reeds = catalog_prop_by_str(TOKEN_REEDS_5M).expect("reeds catalog entry");
-    assert_eq!(reeds.zone, HabitatPropZone::FloorRight);
-    assert_eq!(reeds.pet_layer, HabitatPetLayer::Background);
-}
-```
+- [ ] **Step 1: Add a failing inward-candidate test**
 
 In `src/presentation/companion_scene/composition.rs`'s test module, add:
 
@@ -80,11 +69,10 @@ fn grounded_side_lane_fallbacks_move_inward_from_the_hud() {
 Run:
 
 ```bash
-cargo test --lib reeds_are_background_floor_vegetation
 cargo test --lib grounded_side_lane_fallbacks_move_inward_from_the_hud
 ```
 
-Expected: the reeds test reports `Foreground` instead of `Background`; the candidate test reports left positions `[12, 10, 8]` and right positions `[31, 33, 35]`.
+Expected: the candidate test reports left positions `[12, 10, 8]` and right positions `[31, 33, 35]`. The composition matrix in Step 3 proves the reeds depth contract through the real placement consumer.
 
 - [ ] **Step 3: Add the failing inset/depth composition matrix**
 
@@ -354,7 +342,6 @@ Replace the literal grounded contacts with `floor_extent - 3.0`, `floor_extent -
 Run:
 
 ```bash
-cargo test --lib reeds_are_background_floor_vegetation
 cargo test --lib grounded_side_lane_fallbacks_move_inward_from_the_hud
 cargo test --lib moss_and_reeds_keep_an_inset_and_separate_floor_depths
 cargo test --test retained_scene retained_full_cast_composition_matrix
@@ -851,42 +838,7 @@ cargo test --lib --features retained-renderer bed_texture_is_invariant_to_backin
 
 Expected: FAIL. Current measured values at that logical point are `dither_levels=0.2611, fleck_mix=0.7217` at 1x and `dither_levels=-0.5721, fleck_mix=0.0` at 2x.
 
-- [ ] **Step 2: Add the structured-texture shader contract RED test**
-
-Rename `room_analytic_uses_packed_biome_bed_and_stable_physical_hash_only` in `render.rs` to `room_analytic_uses_packed_biome_bed_and_logical_texture_only` and use this contract:
-
-```rust
-for required in [
-    "content.payload[0].z",
-    "content.payload[0].w",
-    "frame_buffer.globals.viewport_points",
-    "point_y_down",
-    "substrate_value_noise",
-    "substrate_mark",
-    "broad_tone_levels",
-    "grain_mix",
-    "fleck_mix",
-    "analytic_premultiply(straight, 1.0, input.opacity, input.saturation)",
-] {
-    assert!(room.contains(required), "missing room contract: {required}");
-}
-for forbidden in [
-    "fwidth(input.point_position)",
-    "backing_scale",
-    "physical_hash_point",
-    "viewport_pixels",
-    "frame_buffer.values",
-    "frame_buffer.globals.gauges",
-    "frame_buffer.globals.dim_amount",
-    "content_globals_buffer.globals",
-] {
-    assert!(!room.contains(forbidden), "unstable room input: {forbidden}");
-}
-```
-
-Run the renamed test and expect FAIL because the required logical helpers are absent and the forbidden physical-scale terms are present.
-
-- [ ] **Step 3: Implement the test-only CPU mirror in logical coordinates**
+- [ ] **Step 2: Implement the test-only CPU mirror in logical coordinates**
 
 Replace `BedTextureSample` with:
 
@@ -994,7 +946,7 @@ let _ = backing_scale;
 
 Return those three texture fields. The backing scale remains in the test helper signature solely to prove that it has no effect.
 
-- [ ] **Step 4: Strengthen CPU grain and upper-room tests**
+- [ ] **Step 3: Strengthen CPU grain and upper-room tests**
 
 Add:
 
@@ -1037,7 +989,7 @@ assert_eq!(botanical.bed_srgb8, [63, 111, 102]);
 assert_eq!(botanical.fleck_srgb8, [55, 81, 76]);
 ```
 
-- [ ] **Step 5: Mirror the analytic texture in WGSL**
+- [ ] **Step 4: Mirror the analytic texture in WGSL**
 
 Add these WGSL mirrors immediately before `fs_room_aperture`:
 
@@ -1124,7 +1076,7 @@ let straight = vec4<f32>(srgb_to_linear(room_srgb), 1.0);
 
 Use absolute `point_y_down`; do not divide texture coordinates by viewport dimensions and do not use `fwidth` inside any substrate helper.
 
-- [ ] **Step 6: Replace the high-frequency-only native readback metric**
+- [ ] **Step 5: Replace the high-frequency-only native readback metric**
 
 Generalize the helper signature and request construction:
 
@@ -1232,17 +1184,16 @@ fn retained_bed_lower_roi_has_structured_logical_texture() {
 
 Update `retained_bed_upper_roi_has_no_substrate_flecks` to call `room_only_offscreen(&device, &queue, 1.0)` and keep its upper-room threshold. Run the native test before changing WGSL and record the measured RED value; the current isolated pixel noise should average away below the new structured threshold.
 
-- [ ] **Step 7: Run GREEN checks and commit Task 3**
+- [ ] **Step 6: Run GREEN checks and commit Task 3**
 
 Run:
 
 ```bash
 cargo test --lib --features retained-renderer presentation::companion_effects::tests::bed_texture_
-cargo test --lib --features retained-renderer room_analytic_uses_packed_biome_bed_and_logical_texture_only
 cargo test --lib --features retained-renderer retained_bed_
 ```
 
-Expected: all CPU, source-contract, and native Metal tests PASS; repeated 1x renders are byte-identical, logical CPU samples are identical at 1x/2x, coherent lower-bed texture survives 4x4 averaging, and the upper room remains smooth.
+Expected: all CPU and native Metal behavior tests PASS; repeated 1x renders are byte-identical, logical CPU samples are identical at 1x/2x, coherent lower-bed texture survives 4x4 averaging, and the upper room remains smooth.
 
 Commit:
 
