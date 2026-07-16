@@ -1249,7 +1249,7 @@ Run:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --lib --all-features
-cargo test --test retained_scene
+cargo test --features retained-renderer --test retained_scene
 cargo test --test round_scene
 cargo test --features dev-preview --test dev_preview
 ```
