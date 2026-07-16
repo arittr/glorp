@@ -836,6 +836,17 @@ mod tests {
     }
 
     #[test]
+    fn awake_depth_traverses_full_waveform_independent_of_lateral_energy() {
+        let motion = companion_roam_motion();
+        let idle = companion_motion_offsets(GOLDEN_NOW, &motion, 0.25);
+        let active = companion_motion_offsets(GOLDEN_NOW, &motion, 1.0);
+
+        assert_eq!(idle.0, active.0 * 0.25);
+        assert_eq!(idle.1, active.1 * 0.25);
+        assert_eq!(idle.2, active.2);
+    }
+
+    #[test]
     fn wander_facing_uses_companion_art_orientation_and_holds_when_still() {
         // At full energy the pet uses both render orientations across a cycle.
         // The companion's authored art faces left before mirroring, so rightward

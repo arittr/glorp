@@ -3776,6 +3776,13 @@ mod tests {
             .tank_animation_states
             .iter()
             .all(|state| state.calm));
-        assert!(resting_shared.normalized_depth.abs() < active_shared.normalized_depth.abs());
+        assert_eq!(
+            resting_shared.normalized_depth,
+            active_shared.normalized_depth
+        );
+        assert!(
+            (resting_snapshot.frame.pet_depth_cue.scale - 1.0).abs()
+                < (active_snapshot.frame.pet_depth_cue.scale - 1.0).abs()
+        );
     }
 }

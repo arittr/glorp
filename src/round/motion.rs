@@ -271,7 +271,9 @@ pub(crate) fn companion_motion_offsets(
     if motion.wander {
         let (x, y) = companion_wander_offsets(now, motion.drift_period_secs);
         let z = companion_wander_depth(now, motion.drift_period_secs);
-        (x * energy, y * energy, z * energy)
+        // Activity controls lateral liveliness; lifecycle projection attenuates
+        // depth separately so an awake pet can traverse the full shallow tank.
+        (x * energy, y * energy, z)
     } else {
         companion_drift_offsets(now, motion.drift_period_secs)
     }
