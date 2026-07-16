@@ -19,7 +19,7 @@ pub(crate) const PARALLAX_MAX_Y_CELLS: f32 = 0.15;
 const WALL_SHADOW_DETACH_FAR: f32 = 0.45;
 const WALL_SHADOW_DETACH_NEAR: f32 = 1.2;
 const WALL_SHADOW_STRENGTH_FAR: f32 = 1.0;
-const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.6;
+const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.0;
 
 pub(crate) const fn depth_lifecycle_scale(asleep: bool, _calm: bool) -> f32 {
     if asleep {
@@ -44,7 +44,7 @@ pub(crate) fn wall_shadow_depth_cue(effective_z: f32) -> WallShadowDepthCue {
 const PROJECTION_ALPHA_FAR: f32 = 165.0;
 const PROJECTION_ALPHA_NEAR: f32 = 235.0;
 const PROJECTION_BAND_FAR: f32 = 0.18;
-const PROJECTION_BAND_NEAR: f32 = 0.32;
+const PROJECTION_BAND_NEAR: f32 = 0.80;
 const PROJECTION_RADIUS_X_FAR: f32 = 0.085;
 const PROJECTION_RADIUS_X_NEAR: f32 = 0.11;
 const PROJECTION_RADIUS_Y_FAR: f32 = 0.022;
@@ -435,20 +435,23 @@ mod tests {
     }
 
     #[test]
-    fn shallow_tank_wall_and_floor_geometry_matches_approved_endpoints() {
+    fn wall_shadow_depth_cue_disappears_at_front_glass() {
         let far_wall = wall_shadow_depth_cue(-1.0);
         let near_wall = wall_shadow_depth_cue(1.0);
         assert_close(far_wall.detach_cells, 0.45);
         assert_close(near_wall.detach_cells, 1.2);
         assert_close(far_wall.strength, 1.0);
-        assert_close(near_wall.strength, 0.6);
+        assert_close(near_wall.strength, 0.0);
+    }
 
+    #[test]
+    fn floor_projection_traverses_from_rear_to_near_lip() {
         let far_floor = floor_projection_metrics(100.0, 100.0, 20.0, 80.0, 50.0, -1.0)
             .expect("valid far floor projection");
         let near_floor = floor_projection_metrics(100.0, 100.0, 20.0, 80.0, 50.0, 1.0)
             .expect("valid near floor projection");
         assert_close(far_floor.center_y, 30.8);
-        assert_close(near_floor.center_y, 39.2);
+        assert_close(near_floor.center_y, 68.0);
         assert_close(far_floor.radius_x, 8.5);
         assert_close(near_floor.radius_x, 11.0);
         assert_close(far_floor.radius_y, 2.2);

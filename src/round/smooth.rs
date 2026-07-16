@@ -251,7 +251,7 @@ pub fn try_build_round_smooth_scene_plan_with_options(
                     }
                     // The offset between the body and its cast shadow is what
                     // makes Z legible: hugging and dark with the pet against the
-                    // rear wall, detached and diffuse as it comes to the glass.
+                    // rear wall, then detaching and fading as it comes to the glass.
                     // The silhouette cells carry a baked one-cell offset that
                     // scales with the body, so only the difference is added here.
                     let cue = crate::presentation::companion_effects::wall_shadow_depth_cue(

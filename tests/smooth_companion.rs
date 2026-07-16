@@ -1515,8 +1515,8 @@ fn awake_calm_depth_reaches_the_same_tank_endpoints_as_active() {
 }
 
 /// The offset between a body and its cast shadow encodes distance from the wall:
-/// hugging and dark when the pet swims at the back, detached and soft as it comes
-/// to the glass. Without this, the veil just tracks the body and carries no Z.
+/// hugging and dark when the pet swims at the back, detached and fading away as it
+/// comes to the glass. Without this, the veil just tracks the body and carries no Z.
 #[test]
 fn wall_shadow_detachment_and_strength_encode_wall_distance() {
     let vm = normal_lifecycle_fixture();
@@ -1565,7 +1565,7 @@ fn wall_shadow_detachment_and_strength_encode_wall_distance() {
             .opacity
     };
     assert_eq!(strength(&far), 1.0);
-    assert!((strength(&near) - 0.6).abs() < 1e-5);
+    assert_eq!(strength(&near), 0.0);
     assert!(strength(&far) > strength(&neutral) && strength(&neutral) > strength(&near));
 }
 
@@ -1609,6 +1609,20 @@ fn depth_transform_keeps_idle_bob_on_the_pet_body_alone() {
             "{role:?} must not inherit the pet's idle bob"
         );
     }
+    assert_eq!(
+        only_ellipse(
+            early
+                .layer_by_role(SmoothLayerRole::FloorProjection)
+                .unwrap()
+        )
+        .0,
+        only_ellipse(
+            late.layer_by_role(SmoothLayerRole::FloorProjection)
+                .unwrap()
+        )
+        .0,
+        "the bed projection geometry must not inherit the pet's idle bob"
+    );
 }
 
 #[test]
@@ -1693,15 +1707,16 @@ fn floor_projection_is_one_bed_anchored_ellipse_that_tracks_depth() {
         center_y(far_bounds) < center_y(near_bounds),
         "the far projection must sit closer to the bed horizon"
     );
-    assert!(center_y(far_bounds) >= bed.horizon_y);
-    // The lower bed sits under the bottom vignette and the HUD reserve, where a
-    // shadow cannot read. The whole travel band stays in the upper half of the bed.
     let bed_height = bed.near_edge_y - bed.horizon_y;
+    let depth_travel = center_y(near_bounds) - center_y(far_bounds);
     assert!(
-        center_y(near_bounds) <= bed.horizon_y + bed_height * 0.5 + 1e-3,
-        "the near projection sank into the vignette at y={}",
-        center_y(near_bounds)
+        depth_travel > bed_height * 0.5,
+        "the projection must traverse a material majority of the bed: {depth_travel} / {bed_height}"
     );
+    for projection_bounds in [far_bounds, near_bounds] {
+        assert!(projection_bounds.min.y >= bed.horizon_y - 1e-3);
+        assert!(projection_bounds.max.y <= bed.near_edge_y + 1e-3);
+    }
 
     // A shadow must darken whatever the bed shows beneath it; dark paint on a
     // dark floor reads as nothing.
@@ -2002,7 +2017,7 @@ fn wall_shadow_is_a_multiply_veil_in_the_smooth_plan() {
     }
 
     // Against the wall the shadow is sharpest and darkest; at the glass it has
-    // detached and diffused.
+    // detached and disappeared.
     let near_shadow = near.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
     let far_shadow = far.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
     assert!(far_shadow.opacity > near_shadow.opacity);

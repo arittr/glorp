@@ -3612,8 +3612,28 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(floor.opacity, f32::from(projection.alpha) / 235.0);
+                let floor_frame = generation.frame.analytic_slots[2].value.unwrap();
+                let floor_center_y_up =
+                    floor_frame.rect_points[1] + floor_frame.rect_points[3] * 0.5;
                 assert!(
-                    generation.frame.analytic_slots[2].value.unwrap().geometry
+                    (floor_center_y_up
+                        - (snapshot.topology.layout.height_points - projection.center_y))
+                        .abs()
+                        < 1.0e-4,
+                    "the retained analytic floor rect must consume the shared projection center"
+                );
+                if !asleep && raw_depth == 1.0 {
+                    assert!(
+                        (floor_center_y_up - 17.28).abs() < 1.0e-4,
+                        "the near projection must reach the 0.80 bed-depth band, got y={floor_center_y_up}"
+                    );
+                    assert_eq!(
+                        wall.opacity, 0.0,
+                        "the rear-wall silhouette must disappear at the front glass"
+                    );
+                }
+                assert!(
+                    floor_frame.geometry
                         == AnalyticGeometry::PetFloorProjection {
                             mask: AnalyticMaskSource::PetBody,
                             facing: snapshot.frame.facing,
