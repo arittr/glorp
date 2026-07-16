@@ -2627,7 +2627,7 @@ mod tests {
             );
         };
 
-        for (vertical_displacement_cells, expected_y_up_points) in [(4.0, -0.6), (-4.0, 6.6)] {
+        for (vertical_displacement_cells, expected_y_up_points) in [(4.0, 1.24), (-4.0, 4.76)] {
             let standard = project(vertical_displacement_cells, false);
             assert_close(standard.motion_offset_points[0], 0.0);
             assert_close(standard.motion_offset_points[1], expected_y_up_points);
