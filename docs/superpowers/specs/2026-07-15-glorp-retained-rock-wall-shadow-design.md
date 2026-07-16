@@ -94,10 +94,12 @@ and grain become secondary behind the pet, aura, props, and HUD.
 
 ### Dark rear silhouette
 
-Change the renderer-neutral wall-shadow paint from the current light violet to
-a very dark neutral-violet. Keep the existing glyph-mask draw,
-premultiplied-alpha blend path, authored opacity, depth-dependent detach offset,
-and depth-dependent strength.
+Keep one renderer-neutral wall-shadow semantic with compositor-specific color
+encodings. The retained source-over path changes from the current light violet
+to a very dark neutral-violet. The smooth path keeps its existing restrained
+multiply factor; reusing the near-black retained tint as a multiply factor would
+black out the scene. Keep both existing blend paths, the glyph-mask draw,
+authored opacity, depth-dependent detach offset, and depth-dependent strength.
 
 The dark source-over tint must lower wall luminance wherever the shadow has
 coverage. It must remain translucent enough to retain the wall texture and pet
@@ -105,10 +107,10 @@ silhouette detail rather than becoming a flat black sticker. The darkest wall
 and strongest shadow combination must still preserve visible separation on the
 Napster display.
 
-Because the shadow paint is a renderer-neutral companion effect contract, the
-retained and manually selected smooth renderer should retain the same semantic
-direction: wall shadows darken rather than glow. The retained native readback
-is the pixel-level acceptance path.
+The shared companion-effects module owns both encodings so retained and the
+manually selected smooth renderer retain the same semantic direction: wall
+shadows darken rather than glow. The retained native readback is the pixel-level
+acceptance path.
 
 The mood aura and status halo are independent light effects and do not change.
 
@@ -121,8 +123,9 @@ The mood aura and status halo are independent light effects and do not change.
 3. `fs_room_aperture` consumes the packed colors, computes wall texture in
    absolute logical coordinates, fades it out at the bed horizon, then applies
    the existing bed mix and ground texture.
-4. The existing `WallShadow` analytic glyph draw consumes the darker shared
-   shadow tint and composites it through the existing pipeline.
+4. The existing retained `WallShadow` analytic glyph draw consumes the darker
+   source-over tint. The smooth renderer continues to consume its existing
+   multiply factor. Neither compositor changes pipeline or blend mode.
 5. All existing room, shadow, depth, ordering, validation, checksum, and resize
    ownership boundaries remain unchanged.
 
@@ -170,6 +173,8 @@ desired quiet strata and grain do not need it.
   pixels and retain the authored dark-violet bias.
 - The shadow remains visibly translucent rather than replacing the wall with a
   solid shape.
+- The smooth wall shadow keeps its current bounded multiply factor and remains
+  neither invisible nor black.
 
 ### Preservation
 
@@ -189,4 +194,3 @@ Use the optimized retained companion on the normal and Napster displays:
 4. Day/night changes retain their ordering without making night unreadable.
 5. Resize, fullscreen, display movement, and animation do not shift or shimmer
    the wall texture.
-
