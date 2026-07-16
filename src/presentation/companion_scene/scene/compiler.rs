@@ -1703,14 +1703,10 @@ fn analytic_paint(
             color_srgb8: crate::presentation::companion_effects::WALL_SHADOW_SRGB8,
             opacity_u8: crate::presentation::companion_effects::RETAINED_WALL_SHADOW_TINT_ALPHA_U8,
         },
-        AnalyticSemantic::FloorProjection => AnalyticPaint::FloorShadowMultiplyRadial {
-            inner_srgba8: {
+        AnalyticSemantic::FloorProjection => AnalyticPaint::FloorShadowMultiplySilhouette {
+            color_srgba8: {
                 let color = crate::presentation::companion_effects::bed_shadow_srgb8(biome);
                 [color[0], color[1], color[2], 235]
-            },
-            outer_srgba8: {
-                let color = crate::presentation::companion_effects::bed_shadow_srgb8(biome);
-                [color[0], color[1], color[2], 0]
             },
         },
         AnalyticSemantic::StatusHalo => AnalyticPaint::StatusBeacon {
@@ -1921,6 +1917,7 @@ fn project_analytic_frame_slots_for_geometry(
     pet: PetAnalyticGeometry,
     cell_extent_points: [f32; 2],
     effective_z: f32,
+    facing: i8,
     status_tone: StatusBeaconTone,
     slots: &mut Vec<AnalyticFrameSlot>,
 ) {
@@ -1995,12 +1992,11 @@ fn project_analytic_frame_slots_for_geometry(
         },
         AnalyticFrame {
             semantic: AnalyticSemantic::FloorProjection,
-            shape: AnalyticShape::RadialEllipse,
+            shape: AnalyticShape::PetFloorProjection,
             rect_points: floor_rect,
-            geometry: AnalyticGeometry::RadialEllipse {
-                center_points: floor_center,
-                radii_points: [floor.radius_x, floor.radius_y],
-                softness_points: floor.radius_y,
+            geometry: AnalyticGeometry::PetFloorProjection {
+                mask: AnalyticMaskSource::PetBody,
+                facing,
             },
         },
         AnalyticFrame {
@@ -2101,6 +2097,7 @@ pub(super) fn fixture_analytic_frame_slots(camera: OrthographicCamera) -> Vec<An
         },
         [8.0, 20.0],
         0.0,
+        1,
         StatusBeaconTone::Calm,
         &mut slots,
     );
@@ -2127,6 +2124,7 @@ fn project_analytic_frame_slots(
         PetAnalyticGeometry { frame_center, body_center, body_radii },
         cell,
         effective_depth,
+        if snapshot.frame.facing < 0 { -1 } else { 1 },
         if snapshot.frame.calm {
             StatusBeaconTone::Calm
         } else {

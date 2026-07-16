@@ -86,6 +86,7 @@ pub(super) enum InstanceSource {
         layer: crate::presentation::companion_scene::scene::InstanceLayer,
     },
     Ambient,
+    FloorShadowGlyphMask,
     WallShadowGlyphMask,
     Hud,
 }
@@ -116,6 +117,7 @@ pub(super) enum ScenePipelineClass {
     WorldSourceOverAnalytic,
     WorldSourceOverGlyph,
     WorldMultiplyAnalytic,
+    WorldMultiplyGlyphMask,
     WorldSourceOverGlyphMask,
     WorldAdditiveGlyph,
     /// Materialized to keep the pipeline family complete. Scene v2 authors no
@@ -167,7 +169,17 @@ fn scene_pipeline_class(
         && primitive.blend == 4
         && primitive.depth == 2
         && primitive.space == 1
-        && matches!(primitive.binding_index, 2 | 8)
+        && primitive.binding_index == 2
+        && draw.source == PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask)
+    {
+        return Some(WorldMultiplyGlyphMask);
+    }
+    if analytic_axes
+        && primitive.material_kind == 4
+        && primitive.blend == 4
+        && primitive.depth == 2
+        && primitive.space == 1
+        && primitive.binding_index == 8
         && draw.source == PrimitiveSource::Analytic
     {
         return Some(WorldMultiplyAnalytic);
@@ -337,6 +349,12 @@ const fn scene_pipeline_contract(class: ScenePipelineClass) -> ScenePipelineCont
         WorldMultiplyAnalytic => ScenePipelineContract {
             vertex_entry: "vs_world_analytic",
             fragment_entry: "fs_analytic",
+            blend: Some(SceneBlendContract::Multiply),
+            depth_write_enabled: Some(false),
+        },
+        WorldMultiplyGlyphMask => ScenePipelineContract {
+            vertex_entry: "vs_world_glyph",
+            fragment_entry: "fs_floor_shadow_glyph",
             blend: Some(SceneBlendContract::Multiply),
             depth_write_enabled: Some(false),
         },
@@ -897,6 +915,7 @@ fn validate_planned_draw(
             ScenePipelineClass::WorldSourceOverAnalytic
                 | ScenePipelineClass::WorldSourceOverGlyph
                 | ScenePipelineClass::WorldMultiplyAnalytic
+                | ScenePipelineClass::WorldMultiplyGlyphMask
                 | ScenePipelineClass::WorldSourceOverGlyphMask
                 | ScenePipelineClass::WorldAdditiveGlyph
         ),
@@ -1194,6 +1213,10 @@ fn prepare_draw_record(source: PrimitiveUploadSource) -> Option<SceneDrawRecord>
             PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
             u32::try_from(crate::presentation::companion_scene::scene::MAX_PET_ART_SLOTS).ok()?,
         ),
+        ANALYTIC_PRIMITIVE_TAG if is_floor_shadow_glyph_mask(source) => (
+            PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask),
+            u32::try_from(crate::presentation::companion_scene::scene::MAX_PET_ART_SLOTS).ok()?,
+        ),
         ANALYTIC_PRIMITIVE_TAG => (PrimitiveSource::Analytic, 1),
         SHALLOW_CARD_PRIMITIVE_TAG => (PrimitiveSource::None, 0),
         INSTANCE_QUAD_PRIMITIVE_TAG => {
@@ -1214,6 +1237,12 @@ const fn is_wall_shadow_glyph_mask(source: PrimitiveUploadSource) -> bool {
     source.primitive_kind == ANALYTIC_PRIMITIVE_TAG
         && source.instance_group == 0
         && source.instance_slot == 1
+}
+
+const fn is_floor_shadow_glyph_mask(source: PrimitiveUploadSource) -> bool {
+    source.primitive_kind == ANALYTIC_PRIMITIVE_TAG
+        && source.instance_group == 0
+        && source.instance_slot == 2
 }
 
 fn primitive_arena_bases(source: PrimitiveUploadSource) -> Option<(u32, u32, u32)> {
@@ -1258,7 +1287,7 @@ fn arena_bases_from_tags(
             Some((
                 NONE_U32,
                 binding_index,
-                if binding_index == 1 {
+                if binding_index == 1 || binding_index == 2 {
                     content(ContentMirrorFamily::Pet)?
                 } else {
                     NONE_U32
@@ -2114,7 +2143,7 @@ impl SceneGpuSharedFacts {
     pub(super) const EXPECTED: Self = Self {
         bind_group_layouts: 4,
         samplers: 1,
-        pipelines: 12,
+        pipelines: 13,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -2266,6 +2295,7 @@ pub(super) struct SceneBasePipelines {
     pub(super) world_source_over_analytic: wgpu::RenderPipeline,
     pub(super) world_source_over_glyph: wgpu::RenderPipeline,
     pub(super) world_multiply_analytic: wgpu::RenderPipeline,
+    pub(super) world_multiply_glyph_mask: wgpu::RenderPipeline,
     pub(super) world_source_over_glyph_mask: wgpu::RenderPipeline,
     pub(super) world_additive_glyph: wgpu::RenderPipeline,
     pub(super) world_additive_analytic_reserved: wgpu::RenderPipeline,
@@ -2286,6 +2316,7 @@ impl SceneBasePipelines {
             ScenePipelineClass::WorldSourceOverAnalytic => &self.world_source_over_analytic,
             ScenePipelineClass::WorldSourceOverGlyph => &self.world_source_over_glyph,
             ScenePipelineClass::WorldMultiplyAnalytic => &self.world_multiply_analytic,
+            ScenePipelineClass::WorldMultiplyGlyphMask => &self.world_multiply_glyph_mask,
             ScenePipelineClass::WorldSourceOverGlyphMask => &self.world_source_over_glyph_mask,
             ScenePipelineClass::WorldAdditiveGlyph => &self.world_additive_glyph,
             ScenePipelineClass::WorldAdditiveAnalyticReserved => {
@@ -2556,6 +2587,10 @@ fn create_scene_base_pipelines(
         "glorp-scene-world-multiply-analytic",
         ScenePipelineClass::WorldMultiplyAnalytic,
     );
+    let world_multiply_glyph_mask = pipeline_for_class(
+        "glorp-scene-world-multiply-glyph-mask",
+        ScenePipelineClass::WorldMultiplyGlyphMask,
+    );
     let world_source_over_glyph_mask = pipeline_for_class(
         "glorp-scene-world-source-over-glyph-mask",
         ScenePipelineClass::WorldSourceOverGlyphMask,
@@ -2680,6 +2715,7 @@ fn create_scene_base_pipelines(
         world_source_over_analytic,
         world_source_over_glyph,
         world_multiply_analytic,
+        world_multiply_glyph_mask,
         world_source_over_glyph_mask,
         world_additive_glyph,
         world_additive_analytic_reserved,
@@ -3067,6 +3103,18 @@ fn expected_draw_source(primitive: PrimitiveGpuValue) -> Option<(PrimitiveSource
         {
             Some((
                 PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
+                u32::try_from(crate::presentation::companion_scene::scene::MAX_PET_ART_SLOTS)
+                    .ok()?,
+            ))
+        }
+        ANALYTIC_PRIMITIVE_TAG
+            if primitive.resource_kind == 3
+                && primitive.instance_group == 0
+                && primitive.instance_base == NONE_U32
+                && primitive.binding_index == 2 =>
+        {
+            Some((
+                PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask),
                 u32::try_from(crate::presentation::companion_scene::scene::MAX_PET_ART_SLOTS)
                     .ok()?,
             ))
@@ -5861,6 +5909,46 @@ mod tests {
             Some((cell_extent[0] / entry.metrics[0]).min(cell_extent[1] / entry.metrics[1]))
         }
 
+        fn projected_metric_ink_offset(
+            quad_corner: [f32; 2],
+            entry: GlyphAtlasGpuEntry,
+            destination_cell_extent: [f32; 2],
+        ) -> Option<[f32; 2]> {
+            if entry.metrics[0] <= 0.0
+                || entry.metrics[1] <= 0.0
+                || destination_cell_extent[0] <= 0.0
+                || destination_cell_extent[1] <= 0.0
+            {
+                return None;
+            }
+            let scale = [
+                destination_cell_extent[0] / entry.metrics[0],
+                destination_cell_extent[1] / entry.metrics[1],
+            ];
+            Some([
+                (entry.ink_origin_size[0] + quad_corner[0] * entry.ink_origin_size[2]) * scale[0],
+                (entry.ink_origin_size[1] + quad_corner[1] * entry.ink_origin_size[3]) * scale[1],
+            ])
+        }
+
+        fn floor_cell_base(slot: u32, floor_rect: [f32; 4], facing: i8) -> Option<[f32; 2]> {
+            if slot >= 130 || !matches!(facing, -1 | 1) {
+                return None;
+            }
+            let source_col = slot % 13;
+            let source_row = slot / 13;
+            let projected_col = if facing > 0 {
+                source_col
+            } else {
+                12 - source_col
+            };
+            let floor_cell = [floor_rect[2] / 13.0, floor_rect[3] / 10.0];
+            Some([
+                floor_rect[0] + projected_col as f32 * floor_cell[0],
+                floor_rect[1] + (9 - source_row) as f32 * floor_cell[1],
+            ])
+        }
+
         fn prop_cell_base(
             origin: [f32; 2],
             motion: [f32; 2],
@@ -6436,6 +6524,7 @@ mod tests {
             PrimitiveSource::StaticAtlas | PrimitiveSource::Analytic => 1,
             PrimitiveSource::Instances(InstanceSource::PetBody)
             | PrimitiveSource::Instances(InstanceSource::PetParticles)
+            | PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask)
             | PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask) => 130,
             PrimitiveSource::Instances(InstanceSource::RoomGlyphs) => 32,
             PrimitiveSource::Instances(InstanceSource::PropGlyphs { .. }) => 9,
@@ -6499,6 +6588,11 @@ mod tests {
             ),
             (
                 pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2),
+                pipeline_draw(PrimitiveSource::Instances(FloorShadowGlyphMask)),
+                WorldMultiplyGlyphMask,
+            ),
+            (
+                pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 8),
                 pipeline_draw(PrimitiveSource::Analytic),
                 WorldMultiplyAnalytic,
             ),
@@ -6572,7 +6666,9 @@ mod tests {
         ];
         let mut draws = vec![
             pipeline_draw(PrimitiveSource::Analytic),
-            pipeline_draw(PrimitiveSource::Analytic),
+            pipeline_draw(PrimitiveSource::Instances(
+                InstanceSource::FloorShadowGlyphMask,
+            )),
             pipeline_draw(PrimitiveSource::Analytic),
             pipeline_draw(PrimitiveSource::Analytic),
             pipeline_draw(PrimitiveSource::Analytic),
@@ -6614,9 +6710,9 @@ mod tests {
             plan.world_blended_unsorted,
             vec![ScenePlannedDraw {
                 primitive_index: 1,
-                pipeline: ScenePipelineClass::WorldMultiplyAnalytic,
+                pipeline: ScenePipelineClass::WorldMultiplyGlyphMask,
                 index_range: 0..6,
-                instance_range: 0..1,
+                instance_range: 0..130,
                 authored_order: 1,
             }]
         );
@@ -6712,7 +6808,7 @@ mod tests {
         );
 
         let (mut primitives, mut draws, phases) = canonical_draw_plan_fixture();
-        primitives.push(pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2));
+        primitives.push(pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 8));
         draws.push(pipeline_draw(PrimitiveSource::Analytic));
         assert_eq!(
             validate_scene_draw_plan(&primitives, &draws, &phases),
@@ -6730,10 +6826,12 @@ mod tests {
     #[test]
     fn pipeline_selector_fails_closed_on_axis_and_source_mutations() {
         let primitive = pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2);
-        let draw = pipeline_draw(PrimitiveSource::Analytic);
+        let draw = pipeline_draw(PrimitiveSource::Instances(
+            InstanceSource::FloorShadowGlyphMask,
+        ));
         assert_eq!(
             scene_pipeline_class(primitive, &draw),
-            Some(ScenePipelineClass::WorldMultiplyAnalytic)
+            Some(ScenePipelineClass::WorldMultiplyGlyphMask)
         );
         for mutate in [
             |value: &mut PrimitiveGpuValue| value.primitive_kind = 4,
@@ -6758,10 +6856,29 @@ mod tests {
             ),
             None,
         );
+        assert_eq!(
+            scene_pipeline_class(primitive, &pipeline_draw(PrimitiveSource::Analytic)),
+            None,
+        );
+        assert_eq!(
+            scene_pipeline_class(
+                primitive,
+                &pipeline_draw(PrimitiveSource::Instances(InstanceSource::PetBody)),
+            ),
+            None,
+        );
+        let mut wrong_range = draw.clone();
+        wrong_range.instance_range = 0..129;
+        assert_eq!(scene_pipeline_class(primitive, &wrong_range), None);
         let wall = pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 1);
         assert_eq!(
             scene_pipeline_class(wall, &pipeline_draw(PrimitiveSource::Analytic)),
             None
+        );
+        let prop_shadow = pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 8);
+        assert_eq!(
+            scene_pipeline_class(prop_shadow, &pipeline_draw(PrimitiveSource::Analytic),),
+            Some(ScenePipelineClass::WorldMultiplyAnalytic),
         );
 
         let reserved = pipeline_primitive(2, 5, 3, 5, 2, 1, 0, 4);
@@ -6822,7 +6939,7 @@ mod tests {
         identity_draw.index_range = 300..306;
         assert_eq!(
             scene_pipeline_class(identity_only, &identity_draw),
-            Some(ScenePipelineClass::WorldMultiplyAnalytic),
+            Some(ScenePipelineClass::WorldMultiplyGlyphMask),
             "pipeline selection is semantic and does not depend on aliases or dense ids",
         );
     }
@@ -6884,6 +7001,13 @@ mod tests {
                 WorldMultiplyAnalytic,
                 "vs_world_analytic",
                 "fs_analytic",
+                Some(SceneBlendContract::Multiply),
+                Some(false),
+            ),
+            (
+                WorldMultiplyGlyphMask,
+                "vs_world_glyph",
+                "fs_floor_shadow_glyph",
                 Some(SceneBlendContract::Multiply),
                 Some(false),
             ),
@@ -6972,7 +7096,7 @@ mod tests {
     }
 
     #[test]
-    fn analytic_shader_contract_is_closed_and_wall_mask_ignores_native_color() {
+    fn analytic_shader_contract_is_closed_and_glyph_masks_ignore_native_color() {
         for required in [
             "fn vs_world_analytic(",
             "fn vs_screen_analytic(",
@@ -6980,7 +7104,6 @@ mod tests {
             "analytic.rect_points.xy\n        + input.local_position.xy * analytic.rect_points.zw",
             "fn valid_analytic_role(",
             "fn fs_room_aperture(",
-            "fn fs_floor_projection(",
             "fn fs_status_tone(",
             "fn fs_mood_rings(",
             "fn fs_gauges(",
@@ -6989,6 +7112,8 @@ mod tests {
             "fn fs_aperture_composite(",
             "fn fs_aperture_surface(",
             "fn fs_wall_shadow_glyph(",
+            "fn fs_floor_shadow_glyph(",
+            "fn projected_metric_ink_offset(",
         ] {
             assert!(SCENE_SHADER_SOURCE.contains(required), "missing {required}");
         }
@@ -7006,6 +7131,19 @@ mod tests {
         assert!(!wall.contains(".rgb"));
         assert!(!wall.contains("palette_linear"));
         assert!(!wall.contains("analytic.payload[0].w"));
+
+        let floor = SCENE_SHADER_SOURCE
+            .split("fn fs_floor_shadow_glyph(")
+            .nth(1)
+            .unwrap()
+            .split("@fragment")
+            .next()
+            .unwrap();
+        assert!(floor.contains("coverage_texture"));
+        assert!(floor.contains("color_texture"));
+        assert!(floor.contains("content.payload[0].x"));
+        assert!(floor.contains("paint.rgb * alpha"));
+        assert!(!floor.contains("palette_linear"));
 
         let dim = SCENE_SHADER_SOURCE
             .split("fn fs_dim(")
@@ -7860,6 +7998,33 @@ mod tests {
             PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
             "the wall silhouette is a typed fixed glyph-mask draw, not an analytic quad",
         );
+
+        let mut floor = SceneFixture::valid();
+        floor.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
+        floor.template.primitives[0].binding =
+            PrimitiveBinding::Analytic(AnalyticSemantic::FloorProjection.id());
+        floor.template.primitives[0].blend = WorldBlend::Multiply;
+        floor.template.primitives[0].depth = DepthBehavior::WorldReadOnly;
+        floor.template.materials[0].kind = MaterialKind::MultiplyShadow;
+        floor.template.resources[0].kind = ResourceKind::AnalyticGeometry;
+        let floor_candidate =
+            super::super::compiler::compile_static_fixture_for_render_test(&floor);
+        let upload = prepare_scene_upload(
+            &floor_candidate,
+            &two_weight_atlas_for('^', floor_candidate.generation_key.resources),
+        )
+        .unwrap();
+        assert_eq!(upload.primitives[0].binding_index, 2);
+        assert_eq!(upload.primitives[0].content_base, NONE_U32);
+        assert_eq!(upload.primitives[0].frame_base, 2);
+        assert_eq!(upload.primitives[0].aux_content_base, 0);
+        assert_eq!(upload.primitives[0].aux_node_index, NONE_U32);
+        assert_eq!(upload.draws[0].instance_range, 0..130);
+        assert_eq!(
+            upload.draws[0].source,
+            PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask),
+            "the floor silhouette reuses the pet-body content arena without an auxiliary node",
+        );
     }
 
     #[test]
@@ -8228,6 +8393,19 @@ mod tests {
             assert!((actual[0] - expected[0]).abs() < 1e-5);
             assert!((actual[1] - expected[1]).abs() < 1e-5);
         }
+        let projected =
+            SceneGlyphPlacementContract::projected_metric_ink_offset([1.0, 1.0], entry, [4.0, 2.0])
+                .unwrap();
+        assert!((projected[0] - 2.4).abs() < 1e-5);
+        assert!((projected[1] - 1.2).abs() < 1e-5);
+        assert_eq!(
+            SceneGlyphPlacementContract::floor_cell_base(43, [100.0, 200.0, 130.0, 20.0], 1),
+            Some([140.0, 212.0]),
+        );
+        assert_eq!(
+            SceneGlyphPlacementContract::floor_cell_base(43, [100.0, 200.0, 130.0, 20.0], -1),
+            Some([180.0, 212.0]),
+        );
         let mut wide = entry;
         wide.ink_origin_size = [0.0, 0.0, 80.0, 20.0];
         wide.metrics = [80.0, 40.0, 18.0];
@@ -8333,6 +8511,7 @@ mod tests {
             "fn vs_screen(",
             "fn fs_analytic(",
             "fn fs_glyph(",
+            "fn fs_floor_shadow_glyph(",
             "let atlas_local = vec2<f32>(input.uv.x, 1.0 - input.uv.y);",
             "return mix(entry.visible_uv.xy, entry.visible_uv.zw, atlas_local);",
             "textureSampleLevel(coverage_texture",
@@ -8342,9 +8521,14 @@ mod tests {
             "if (content.kind == 3u)",
             "return tank_paint_linear(content);",
             "fn glyph_instance_placement(",
+            "fn projected_metric_ink_offset(",
+            "destination_cell_extent / entry.metrics.xy",
             "primitive.aux_content_base,\n            input.instance_index",
             "input.instance_index % 13u",
             "input.instance_index / 13u",
+            "analytic.rect_points.zw / vec2<f32>(13.0, 10.0)",
+            "let projected_col = select(12u - source_col, source_col, facing > 0);",
+            "f32(9u - source_row) * floor_cell.y",
             "9u - pet_row",
             "primitive.frame_base + input.instance_index",
             "let frame = frame_buffer.values[primitive.frame_base];",
@@ -8390,6 +8574,7 @@ mod tests {
             "clip.z =",
             "return 300u;",
             "frame_buffer.values[primitive.frame_base + input.instance_index] // prop",
+            "fn fs_floor_projection(",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -8411,7 +8596,7 @@ mod tests {
             .split("fn fs_room_aperture(")
             .nth(1)
             .expect("room analytic role exists")
-            .split("fn fs_floor_projection(")
+            .split("fn fs_prop_shadows(")
             .next()
             .expect("room role has a bounded body");
         assert!(!aperture.contains("1.0 - smoothstep"));
@@ -8539,7 +8724,7 @@ mod tests {
             .split("fn fs_room_aperture(")
             .nth(1)
             .expect("room analytic role exists")
-            .split("fn fs_floor_projection(")
+            .split("fn fs_prop_shadows(")
             .next()
             .expect("room role has a bounded body");
 
@@ -8595,7 +8780,7 @@ mod tests {
     fn gpu_resource_accounting_is_exact_and_not_a_live_global_metric() {
         assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 4);
         assert_eq!(SceneGpuSharedFacts::EXPECTED.samplers, 1);
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 12);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 13);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 10);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.textures, 2);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.texture_views, 2);
@@ -8608,7 +8793,7 @@ mod tests {
             SceneGpuSharedFacts::EXPECTED.persistent_owned_handles()
                 + GpuSceneCandidateFacts::EXPECTED.persistent_owned_handles()
                 + SceneTargetFacts::EXPECTED.persistent_owned_handles(),
-            43,
+            44,
         );
     }
 
@@ -9030,6 +9215,81 @@ mod tests {
             roi.extend_from_slice(&outcome.rgba[start..end]);
         }
         roi
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mean_linear_luma_drop(
+        shadowed: &SceneRenderOutcome,
+        room_only: &SceneRenderOutcome,
+        logical_rect: [f32; 4],
+        backing_scale: f64,
+    ) -> f32 {
+        let shadowed = rgba_roi(shadowed, logical_rect, backing_scale);
+        let room_only = rgba_roi(room_only, logical_rect, backing_scale);
+        let (sum, samples) = shadowed
+            .chunks_exact(4)
+            .zip(room_only.chunks_exact(4))
+            .fold((0.0, 0_u32), |(sum, samples), (shadow, room)| {
+                let luma = |pixel: &[u8]| {
+                    [0.2126, 0.7152, 0.0722]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(channel, weight)| {
+                            weight * scene_srgb_to_linear(f32::from(pixel[channel]) / 255.0)
+                        })
+                        .sum::<f32>()
+                };
+                (sum + luma(room) - luma(shadow), samples + 1)
+            });
+        assert!(
+            samples > 0,
+            "floor projection ROI must contain physical pixels"
+        );
+        sum / samples as f32
+    }
+
+    #[cfg(target_os = "macos")]
+    fn floor_projection_cell_roi(
+        floor_rect: [f32; 4],
+        projected_col: u8,
+        source_row: u8,
+        viewport_height: f32,
+    ) -> [f32; 4] {
+        assert!(projected_col < 13 && source_row < 10);
+        let cell = [floor_rect[2] / 13.0, floor_rect[3] / 10.0];
+        let base_y_up = floor_rect[1] + f32::from(9 - source_row) * cell[1];
+        let inset = [cell[0] * 0.08, cell[1] * 0.08];
+        [
+            floor_rect[0] + f32::from(projected_col) * cell[0] + inset[0],
+            viewport_height - base_y_up - cell[1] + inset[1],
+            cell[0] - inset[0] * 2.0,
+            cell[1] - inset[1] * 2.0,
+        ]
+    }
+
+    #[cfg(target_os = "macos")]
+    fn changed_pixel_y_range(
+        shadowed: &SceneRenderOutcome,
+        room_only: &SceneRenderOutcome,
+    ) -> Option<(u32, u32)> {
+        assert_eq!(
+            shadowed.physical_extent_pixels,
+            room_only.physical_extent_pixels
+        );
+        let width = shadowed.physical_extent_pixels[0];
+        shadowed
+            .rgba
+            .chunks_exact(4)
+            .zip(room_only.rgba.chunks_exact(4))
+            .enumerate()
+            .filter(|&(_, (shadow, room))| shadow[..3] != room[..3])
+            .map(|(index, _)| u32::try_from(index).expect("readback pixel index fits u32") / width)
+            .fold(None, |range, y| {
+                Some(match range {
+                    Some((min_y, max_y)) => (min_y.min(y), max_y.max(y)),
+                    None => (y, y),
+                })
+            })
     }
 
     #[cfg(target_os = "macos")]
@@ -10144,6 +10404,10 @@ mod tests {
             (
                 ScenePipelineClass::WorldMultiplyAnalytic,
                 &shared.pipelines.world_multiply_analytic,
+            ),
+            (
+                ScenePipelineClass::WorldMultiplyGlyphMask,
+                &shared.pipelines.world_multiply_glyph_mask,
             ),
             (
                 ScenePipelineClass::WorldSourceOverGlyphMask,
@@ -11783,6 +12047,203 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn floor_projection_tracks_asymmetric_pet_mask_and_facing() {
+        use crate::pet::generation::Species;
+        use crate::presentation::companion_scene::{
+            scene::{AnalyticShape, NodeId},
+            AppliedRevisions, DeviceEpoch, FrameRevision, LayoutGeneration, ResourceGeneration,
+            SceneGenerationKey, PET_LATTICE_HEIGHT,
+        };
+        use crate::round::smooth::CompanionContentIdentity;
+
+        const LEFT_COL: u8 = 4;
+        const RIGHT_COL: u8 = 8;
+        const UPPER_ROW: u8 = 3;
+        const LOWER_ROW: u8 = 7;
+        const BACKING_SCALE: f64 = 2.0;
+
+        let mut snapshot = super::super::compiler::projected_full_scene_snapshot_for_render_test(0);
+        snapshot.content.pet_lines =
+            vec!["             ".to_owned(); usize::from(PET_LATTICE_HEIGHT)];
+        for row in [UPPER_ROW, LOWER_ROW] {
+            snapshot.content.pet_lines[usize::from(row)]
+                .replace_range(usize::from(LEFT_COL)..usize::from(LEFT_COL) + 1, "▓");
+        }
+        snapshot.content.pet_roles.clear();
+        snapshot.frame.facing = 1;
+        let viewport_height = snapshot.topology.layout.height_points;
+
+        let generation_key = SceneGenerationKey {
+            device: DeviceEpoch(151),
+            layout: LayoutGeneration(152),
+            resources: ResourceGeneration(153),
+        };
+        let atlas = {
+            let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Fuzz),
+                BACKING_SCALE,
+            );
+            let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+                .expect("controlled floor-shadow repertoire compiles");
+            super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+                resources.atlas(),
+                generation_key.resources,
+            )
+            .expect("controlled floor-shadow atlas prepares")
+        };
+        let (device, queue) = native_device();
+        let shared = SceneGpuShared::create(&device, generation_key.device).unwrap();
+        let hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            generation_key.resources,
+        );
+
+        let mut pairs = Vec::new();
+        for (index, facing) in [1_i8, -1].into_iter().enumerate() {
+            let mut facing_snapshot = snapshot.clone();
+            facing_snapshot.frame.facing = facing;
+            let revisions = AppliedRevisions::new(40, 41 + u64::try_from(index).unwrap() * 2);
+            let mut cpu =
+                compile_retained_full_cast_snapshot(facing_snapshot, generation_key, revisions);
+            let floor = cpu.accepted_frame_for_test().analytic_slots
+                [usize::from(AnalyticSemantic::FloorProjection.id().0)]
+            .value
+            .expect("accepted frame contains floor projection slot 2");
+            assert_eq!(floor.shape, AnalyticShape::PetFloorProjection);
+
+            let upload = prepare_scene_upload(&cpu, &atlas).expect("floor-shadow upload prepares");
+            let primitive_for_binding = |binding_index| {
+                upload
+                    .primitives
+                    .iter()
+                    .position(|primitive| primitive.binding_index == binding_index)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .expect("production analytic binding exists")
+            };
+            let room_primitive = primitive_for_binding(0);
+            let floor_primitive = primitive_for_binding(2);
+            let mut candidate =
+                materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+            for draw in candidate
+                .draw_plan
+                .opaque
+                .iter_mut()
+                .chain(candidate.draw_plan.world_blended_unsorted.iter_mut())
+                .chain(candidate.draw_plan.chrome.prefix.iter_mut())
+                .chain(candidate.draw_plan.chrome.suffix.iter_mut())
+            {
+                if ![room_primitive, floor_primitive].contains(&draw.primitive_index) {
+                    draw.instance_range = 0..0;
+                }
+            }
+
+            let logical_viewport = cpu.logical_viewport_points();
+            let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+            let shadowed = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    render_request_fixture(
+                        generation_key,
+                        revisions,
+                        logical_viewport,
+                        BACKING_SCALE,
+                    ),
+                    &hud,
+                )
+                .expect("production floor projection renders");
+
+            let floor_node = NodeId::from_alias(
+                &CanonicalAlias::new("pet.projection.floor")
+                    .expect("canonical floor projection alias"),
+            );
+            let mut hidden_floor = *cpu
+                .accepted_frame_for_test()
+                .nodes
+                .iter()
+                .find(|node| node.node == floor_node)
+                .expect("accepted frame contains floor projection node");
+            hidden_floor.visible = false;
+            let to = AppliedRevisions {
+                semantic: revisions.semantic,
+                frame: FrameRevision(revisions.frame.0 + 1),
+            };
+            let mut content_delta = ContentDelta::empty();
+            content_delta.generation_key = generation_key;
+            content_delta.from = revisions;
+            content_delta.to = to;
+            let mut frame_delta = FrameDelta::empty();
+            frame_delta.generation_key = generation_key;
+            frame_delta.from = revisions;
+            frame_delta.to = to;
+            frame_delta.nodes.push(hidden_floor);
+            let room_only = renderer
+                .render_offscreen_with_delta(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut cpu,
+                    &mut candidate,
+                    &content_delta,
+                    &frame_delta,
+                    render_request_fixture(generation_key, to, logical_viewport, BACKING_SCALE),
+                    &hud,
+                )
+                .expect("room-only hidden-floor baseline renders");
+            pairs.push((floor.rect_points, shadowed, room_only));
+        }
+
+        let center = |rect: [f32; 4]| [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5];
+        assert_eq!(center(pairs[0].0), center(pairs[1].0));
+        for (index, (floor_rect, shadowed, room_only)) in pairs.iter().enumerate() {
+            let occupied_col = if index == 0 { LEFT_COL } else { RIGHT_COL };
+            let empty_mirror_col = if index == 0 { RIGHT_COL } else { LEFT_COL };
+            let occupied_roi =
+                floor_projection_cell_roi(*floor_rect, occupied_col, LOWER_ROW, viewport_height);
+            let empty_mirror_roi = floor_projection_cell_roi(
+                *floor_rect,
+                empty_mirror_col,
+                LOWER_ROW,
+                viewport_height,
+            );
+            let occupied_vertical_roi =
+                floor_projection_cell_roi(*floor_rect, occupied_col, UPPER_ROW, viewport_height);
+            let occupied_delta =
+                mean_linear_luma_drop(shadowed, room_only, occupied_roi, BACKING_SCALE);
+            let empty_delta =
+                mean_linear_luma_drop(shadowed, room_only, empty_mirror_roi, BACKING_SCALE);
+            let vertical_delta =
+                mean_linear_luma_drop(shadowed, room_only, occupied_vertical_roi, BACKING_SCALE);
+            assert!(
+                occupied_delta > 0.01,
+                "occupied pet-mask ink must darken the bed: facing_index={index}, delta={occupied_delta}"
+            );
+            assert!(
+                empty_delta < occupied_delta * 0.20,
+                "empty cells inside the old ellipse must remain effectively unchanged: facing_index={index}, occupied={occupied_delta}, empty={empty_delta}"
+            );
+            assert!(
+                vertical_delta > 0.01,
+                "a second occupied source row must remain visible after vertical flattening: facing_index={index}, delta={vertical_delta}"
+            );
+
+            let (observed_min_y, observed_max_y) = changed_pixel_y_range(shadowed, room_only)
+                .expect("floor projection changes pixels");
+            let scale = BACKING_SCALE as f32;
+            let expected_min_y =
+                ((viewport_height - floor_rect[1] - floor_rect[3]) * scale).floor() as i32;
+            let expected_max_y = ((viewport_height - floor_rect[1]) * scale).ceil() as i32 - 1;
+            assert!(
+                i32::try_from(observed_min_y).unwrap() >= expected_min_y - 1
+                    && i32::try_from(observed_max_y).unwrap() <= expected_max_y + 1,
+                "floor glyph coverage must remain inside slot 2 rect within one physical pixel: observed={observed_min_y}..={observed_max_y}, expected={expected_min_y}..={expected_max_y}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn native_production_scene_renders_complete_fuzz_s3_inventory_with_redacted_hud() {
         use crate::pet::generation::Species;
         use crate::round::smooth::CompanionContentIdentity;
@@ -11880,8 +12341,8 @@ mod tests {
                 (
                     2,
                     SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldMultiplyAnalytic,
-                    PrimitiveSource::Analytic,
+                    ScenePipelineClass::WorldMultiplyGlyphMask,
+                    PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask),
                     2,
                     2
                 ),
@@ -12039,7 +12500,8 @@ mod tests {
         assert_eq!(class_count(ScenePipelineClass::WorldOpaqueAnalytic), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverAnalytic), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyph), 8);
-        assert_eq!(class_count(ScenePipelineClass::WorldMultiplyAnalytic), 2);
+        assert_eq!(class_count(ScenePipelineClass::WorldMultiplyAnalytic), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldMultiplyGlyphMask), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyphMask), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldAdditiveGlyph), 2);
         assert_eq!(class_count(ScenePipelineClass::ChromeAnalytic), 4);
@@ -12063,9 +12525,10 @@ mod tests {
             bindings_for(ScenePipelineClass::WorldSourceOverAnalytic),
             [4],
         );
+        assert_eq!(bindings_for(ScenePipelineClass::WorldMultiplyAnalytic), [8],);
         assert_eq!(
-            bindings_for(ScenePipelineClass::WorldMultiplyAnalytic),
-            [2, 8],
+            bindings_for(ScenePipelineClass::WorldMultiplyGlyphMask),
+            [2],
         );
         assert_eq!(
             bindings_for(ScenePipelineClass::WorldSourceOverGlyphMask),
@@ -12085,7 +12548,7 @@ mod tests {
                 .filter(|draw| draw.source == source)
                 .count()
         };
-        assert_eq!(source_count(PrimitiveSource::Analytic), 8);
+        assert_eq!(source_count(PrimitiveSource::Analytic), 7);
         assert_eq!(
             source_count(PrimitiveSource::Instances(InstanceSource::RoomGlyphs)),
             1,
@@ -12101,6 +12564,23 @@ mod tests {
         assert_eq!(
             source_count(PrimitiveSource::Instances(InstanceSource::Ambient)),
             1,
+        );
+        assert_eq!(
+            source_count(PrimitiveSource::Instances(
+                InstanceSource::FloorShadowGlyphMask,
+            )),
+            1,
+        );
+        assert_eq!(
+            upload
+                .draws
+                .iter()
+                .find(|draw| {
+                    draw.source == PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask)
+                })
+                .unwrap()
+                .instance_range,
+            0..130,
         );
         assert_eq!(
             source_count(PrimitiveSource::Instances(
@@ -12766,7 +13246,7 @@ mod tests {
         candidate
             .draw_plan
             .world_blended_unsorted
-            .retain(|draw| draw.pipeline != ScenePipelineClass::WorldMultiplyAnalytic);
+            .retain(|draw| draw.pipeline != ScenePipelineClass::WorldMultiplyGlyphMask);
         assert_eq!(
             baseline_plan.world_blended_unsorted.len(),
             candidate.draw_plan.world_blended_unsorted.len() + 1,
@@ -12870,6 +13350,9 @@ mod tests {
         reserved_upload.primitives[1].blend = 5;
         reserved_upload.primitives[1].binding_index = 4;
         reserved_upload.primitives[1].frame_base = 4;
+        reserved_upload.primitives[1].aux_content_base = NONE_U32;
+        reserved_upload.draws[1].source = PrimitiveSource::Analytic;
+        reserved_upload.draws[1].instance_range = 0..1;
         assert!(matches!(
             materialize_gpu_candidate(&device, &queue, &shared, &reserved_upload, &atlas),
             Err(SceneGpuError::InvalidDrawPlan(

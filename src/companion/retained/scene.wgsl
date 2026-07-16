@@ -256,6 +256,16 @@ fn metric_ink_offset(
         + quad_corner * entry.ink_origin_size.zw * scale;
 }
 
+fn projected_metric_ink_offset(
+    quad_corner: vec2<f32>,
+    entry: GlyphAtlasGpuEntry,
+    destination_cell_extent: vec2<f32>,
+) -> vec2<f32> {
+    let scale = destination_cell_extent / entry.metrics.xy;
+    return entry.ink_origin_size.xy * scale
+        + quad_corner * entry.ink_origin_size.zw * scale;
+}
+
 fn glyph_instance_placement(
     input: SceneVertexInput,
     primitive: PrimitiveGpuValue,
@@ -264,8 +274,11 @@ fn glyph_instance_placement(
     let is_wall = primitive.primitive_kind == 2u
         && primitive.instance_group == 0u
         && primitive.binding_index == 1u;
+    let is_floor = primitive.primitive_kind == 2u
+        && primitive.instance_group == 0u
+        && primitive.binding_index == 2u;
     var content_index = NONE_U32;
-    if (is_wall) {
+    if (is_wall || is_floor) {
         if (input.instance_index >= 130u) {
             return invalid_glyph_placement();
         }
@@ -301,7 +314,38 @@ fn glyph_instance_placement(
 
     var base = vec2<f32>(0.0);
     var instance_opacity = 1.0;
-    if (is_wall || primitive.instance_group == 1u || primitive.instance_group == 2u) {
+    var destination_cell_extent = cell_extent;
+    if (is_floor) {
+        if (input.instance_index >= 130u
+            || content.kind != 1u
+            || primitive.frame_base != 2u
+            || primitive.frame_base >= 16u) {
+            return invalid_glyph_placement();
+        }
+        let analytic = frame_buffer.analytics[primitive.frame_base];
+        let mask_tag = analytic.payload[0].x;
+        let facing_value = analytic.payload[0].y;
+        if ((analytic.flags & 1u) == 0u
+            || analytic.id != 2u
+            || analytic.semantic != 3u
+            || analytic.shape != 3u
+            || analytic.rect_points.z <= 0.0
+            || analytic.rect_points.w <= 0.0
+            || mask_tag != 1.0
+            || (facing_value != -1.0 && facing_value != 1.0)) {
+            return invalid_glyph_placement();
+        }
+        let floor_cell = analytic.rect_points.zw / vec2<f32>(13.0, 10.0);
+        let source_col = input.instance_index % 13u;
+        let source_row = input.instance_index / 13u;
+        let facing = i32(round(facing_value));
+        let projected_col = select(12u - source_col, source_col, facing > 0);
+        base = analytic.rect_points.xy + vec2<f32>(
+            f32(projected_col) * floor_cell.x,
+            f32(9u - source_row) * floor_cell.y,
+        );
+        destination_cell_extent = floor_cell;
+    } else if (is_wall || primitive.instance_group == 1u || primitive.instance_group == 2u) {
         if (input.instance_index >= 130u || content.kind != 1u) {
             return invalid_glyph_placement();
         }
@@ -382,7 +426,15 @@ fn glyph_instance_placement(
         return invalid_glyph_placement();
     }
 
-    let local_xy = base + metric_ink_offset(input.local_position.xy, entry);
+    var ink_offset = metric_ink_offset(input.local_position.xy, entry);
+    if (is_floor) {
+        ink_offset = projected_metric_ink_offset(
+            input.local_position.xy,
+            entry,
+            destination_cell_extent,
+        );
+    }
+    let local_xy = base + ink_offset;
     var world_position: vec4<f32>;
     if (is_wall) {
         if (primitive.frame_base >= 16u
@@ -492,7 +544,8 @@ fn vs_world_glyph(input: SceneVertexInput) -> SceneVertexOutput {
     output.saturation = placement.saturation;
     output.instance_group = primitive.instance_group;
     output.analytic_id = select(NONE_U32, primitive.binding_index,
-        primitive.primitive_kind == 2u && primitive.binding_index == 1u);
+        primitive.primitive_kind == 2u
+            && (primitive.binding_index == 1u || primitive.binding_index == 2u));
     output.point_position = placement.world_position.xy;
     output.local_coordinate = input.local_position.xy;
     return output;
@@ -810,33 +863,6 @@ fn fs_room_aperture(
     return analytic_premultiply(straight, 1.0, input.opacity, input.saturation);
 }
 
-fn fs_floor_projection(
-    input: SceneVertexOutput,
-    content: AnalyticContentGpuValue,
-    analytic: AnalyticFrameGpuValue,
-) -> vec4<f32> {
-    let center = analytic.payload[0].xy;
-    let radii = analytic.payload[0].zw;
-    let softness = analytic.payload[1].x;
-    if (min(radii.x, radii.y) <= 0.0 || softness < 0.0) {
-        return vec4<f32>(0.0);
-    }
-    let normalized = (input.point_position - center) / radii;
-    let radial = length(normalized);
-    let edge = max(fwidth(radial), 0.0001);
-    let coverage = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, radial);
-    let normalized_softness = clamp(softness / min(radii.x, radii.y), 0.0, 1.0);
-    let paint_mix = smoothstep(1.0 - normalized_softness, 1.0, radial);
-    let inner = packed_rgba8_linear(content.payload[0].x);
-    let outer = packed_rgba8_linear(content.payload[0].y);
-    return analytic_premultiply(
-        mix(inner, outer, paint_mix),
-        coverage,
-        input.opacity,
-        input.saturation,
-    );
-}
-
 fn fs_prop_shadows(
     input: SceneVertexOutput,
     content: AnalyticContentGpuValue,
@@ -1144,7 +1170,6 @@ fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     var output = vec4<f32>(0.0);
     switch input.analytic_id {
         case 0u: { output = fs_room_aperture(input, content, analytic); }
-        case 2u: { output = fs_floor_projection(input, content, analytic); }
         case 3u: { output = fs_status_tone(input, content, analytic); }
         case 4u: { output = fs_mood_rings(input, content, analytic); }
         case 5u: { output = fs_gauges(input, content, analytic); }
@@ -1244,6 +1269,45 @@ fn fs_wall_shadow_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     }
     let linear_rgb = packed_rgb8_linear(content.payload[0].x);
     return vec4<f32>(linear_rgb * alpha, alpha);
+}
+
+@fragment
+fn fs_floor_shadow_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
+    if (input.analytic_id != 2u
+        || input.content_index == NONE_U32
+        || input.content_index >= 462u) {
+        discard;
+    }
+    let analytic = frame_buffer.analytics[input.analytic_id];
+    let content = scene_content_buffer.analytics[input.analytic_id];
+    if (!valid_analytic_role(input.analytic_id, analytic, content)
+        || analytic.payload[0].x != 1.0
+        || (analytic.payload[0].y != -1.0 && analytic.payload[0].y != 1.0)) {
+        discard;
+    }
+    let glyph = scene_content_buffer.values[input.content_index];
+    if (glyph.kind != 1u
+        || glyph.glyph_entry_index == NONE_U32
+        || glyph.glyph_entry_index >= arrayLength(&glyph_entry_buffer.values)) {
+        discard;
+    }
+    let entry = glyph_entry_buffer.values[glyph.glyph_entry_index];
+    if ((entry.flags & GLYPH_FLAG_VISIBLE) == 0u) {
+        discard;
+    }
+    let uv = glyph_uv(input, entry);
+    var coverage: f32;
+    if ((entry.flags & GLYPH_FLAG_COLOR) != 0u) {
+        coverage = textureSampleLevel(color_texture, atlas_sampler, uv, 0.0).a;
+    } else {
+        coverage = textureSampleLevel(coverage_texture, atlas_sampler, uv, 0.0).r;
+    }
+    let paint = packed_rgba8_linear(content.payload[0].x);
+    let alpha = coverage * paint.a * input.opacity;
+    if (alpha <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(paint.rgb * alpha, alpha);
 }
 
 struct HudVertexOutput {

@@ -710,7 +710,7 @@ impl AnalyticSemantic {
         match self {
             Self::RoomBackground => AnalyticShape::ApertureRadial,
             Self::WallShadow => AnalyticShape::PetSilhouette,
-            Self::FloorProjection => AnalyticShape::RadialEllipse,
+            Self::FloorProjection => AnalyticShape::PetFloorProjection,
             Self::StatusHalo => AnalyticShape::StatusBeacon,
             Self::MoodAura => AnalyticShape::PetAura,
             Self::Gauges => AnalyticShape::PerimeterGaugeSet,
@@ -726,7 +726,7 @@ impl AnalyticSemantic {
 pub enum AnalyticShape {
     ApertureRadial,
     PetSilhouette,
-    RadialEllipse,
+    PetFloorProjection,
     StatusBeacon,
     PetAura,
     PerimeterGaugeSet,
@@ -974,9 +974,8 @@ pub enum AnalyticPaint {
         color_srgb8: [u8; 3],
         opacity_u8: u8,
     },
-    FloorShadowMultiplyRadial {
-        inner_srgba8: [u8; 4],
-        outer_srgba8: [u8; 4],
+    FloorShadowMultiplySilhouette {
+        color_srgba8: [u8; 4],
     },
     StatusBeacon {
         active_srgba8: [u8; 4],
@@ -1057,10 +1056,9 @@ pub enum AnalyticGeometry {
         offset_points: [f32; 2],
         softness_points: f32,
     },
-    RadialEllipse {
-        center_points: [f32; 2],
-        radii_points: [f32; 2],
-        softness_points: f32,
+    PetFloorProjection {
+        mask: AnalyticMaskSource,
+        facing: i8,
     },
     StatusBeacon {
         center_points: [f32; 2],
@@ -2964,6 +2962,22 @@ mod tests {
             content_checksum
         );
 
+        let mut changed_floor_paint = fixture.content.clone();
+        let AnalyticPaint::FloorShadowMultiplySilhouette { color_srgba8 } =
+            &mut changed_floor_paint.analytic_slots[2]
+                .value
+                .as_mut()
+                .unwrap()
+                .paint
+        else {
+            panic!("floor fixture uses silhouette multiply paint");
+        };
+        color_srgba8[0] ^= 1;
+        assert_ne!(
+            checksum::checksum_content(&changed_floor_paint).unwrap(),
+            content_checksum
+        );
+
         for lane in ["bed", "fleck"] {
             let mut changed_room = fixture.content.clone();
             let AnalyticPaint::ApertureDepth { bed_srgb8, fleck_srgb8, .. } =
@@ -2996,6 +3010,22 @@ mod tests {
             .rect_points[0] += 1.0;
         assert_ne!(
             checksum::checksum_frame(&fixture.template, &changed_frame).unwrap(),
+            frame_checksum
+        );
+
+        let mut changed_facing = fixture.frame.clone();
+        let AnalyticGeometry::PetFloorProjection { facing, .. } = &mut changed_facing
+            .analytic_slots[2]
+            .value
+            .as_mut()
+            .unwrap()
+            .geometry
+        else {
+            panic!("floor fixture uses pet-mask geometry");
+        };
+        *facing = -*facing;
+        assert_ne!(
+            checksum::checksum_frame(&fixture.template, &changed_facing).unwrap(),
             frame_checksum
         );
         assert_eq!(
@@ -3582,13 +3612,9 @@ mod tests {
                 assert_eq!(floor.opacity, f32::from(projection.alpha) / 235.0);
                 assert!(
                     generation.frame.analytic_slots[2].value.unwrap().geometry
-                        == AnalyticGeometry::RadialEllipse {
-                            center_points: [
-                                projection.center_x,
-                                snapshot.topology.layout.height_points - projection.center_y,
-                            ],
-                            radii_points: [projection.radius_x, projection.radius_y],
-                            softness_points: projection.radius_y,
+                        == AnalyticGeometry::PetFloorProjection {
+                            mask: AnalyticMaskSource::PetBody,
+                            facing: snapshot.frame.facing,
                         }
                 );
 
@@ -4691,9 +4717,8 @@ mod tests {
                 let shadow = crate::presentation::companion_effects::bed_shadow_srgb8(biome);
                 assert_eq!(
                     built.content().analytic_slots[2].value.unwrap().paint,
-                    AnalyticPaint::FloorShadowMultiplyRadial {
-                        inner_srgba8: [shadow[0], shadow[1], shadow[2], 235],
-                        outer_srgba8: [shadow[0], shadow[1], shadow[2], 0],
+                    AnalyticPaint::FloorShadowMultiplySilhouette {
+                        color_srgba8: [shadow[0], shadow[1], shadow[2], 235],
                     },
                     "{biome} {phase:?}"
                 );

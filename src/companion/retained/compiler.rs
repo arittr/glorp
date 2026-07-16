@@ -2112,9 +2112,8 @@ fn pack_analytic_content(value: AnalyticContentSlot) -> AnalyticContentGpuValue 
             payload[0] = pack_rgb8(color_srgb8);
             payload[1] = u32::from(opacity_u8);
         }
-        AnalyticPaint::FloorShadowMultiplyRadial { inner_srgba8, outer_srgba8 } => {
-            payload[0] = pack_rgba8(inner_srgba8);
-            payload[1] = pack_rgba8(outer_srgba8);
+        AnalyticPaint::FloorShadowMultiplySilhouette { color_srgba8 } => {
+            payload[0] = pack_rgba8(color_srgba8);
         }
         AnalyticPaint::StatusBeacon { active_srgba8, calm_srgba8 } => {
             payload[0] = pack_rgba8(active_srgba8);
@@ -2187,17 +2186,9 @@ fn pack_analytic_frame(value: AnalyticFrameSlot) -> AnalyticFrameGpuValue {
                 softness_points,
             ]);
         }
-        AnalyticGeometry::RadialEllipse {
-            center_points,
-            radii_points,
-            softness_points,
-        } => payload[..5].copy_from_slice(&[
-            center_points[0],
-            center_points[1],
-            radii_points[0],
-            radii_points[1],
-            softness_points,
-        ]),
+        AnalyticGeometry::PetFloorProjection { mask, facing } => {
+            payload[..2].copy_from_slice(&[analytic_mask_tag(mask) as f32, f32::from(facing)]);
+        }
         AnalyticGeometry::StatusBeacon {
             center_points,
             radius_points,
@@ -3330,7 +3321,7 @@ fn analytic_shape_tag(value: AnalyticShape) -> u32 {
     match value {
         AnalyticShape::ApertureRadial => 1,
         AnalyticShape::PetSilhouette => 2,
-        AnalyticShape::RadialEllipse => 3,
+        AnalyticShape::PetFloorProjection => 3,
         AnalyticShape::StatusBeacon => 4,
         AnalyticShape::PetAura => 5,
         AnalyticShape::PerimeterGaugeSet => 6,
@@ -3889,10 +3880,7 @@ mod tests {
                 fleck_srgb8: [10, 11, 12],
             },
             AnalyticPaint::PetShadowTint { color_srgb8: [7, 8, 9], opacity_u8: 10 },
-            AnalyticPaint::FloorShadowMultiplyRadial {
-                inner_srgba8: [11, 12, 13, 14],
-                outer_srgba8: [15, 16, 17, 18],
-            },
+            AnalyticPaint::FloorShadowMultiplySilhouette { color_srgba8: [11, 12, 13, 14] },
             AnalyticPaint::StatusBeacon {
                 active_srgba8: [19, 20, 21, 22],
                 calm_srgba8: [23, 24, 25, 26],
@@ -3923,16 +3911,7 @@ mod tests {
                 0,
             ],
             [packed_rgb([7, 8, 9]), 10, 0, 0, 0, 0, 0, 0],
-            [
-                packed_rgba([11, 12, 13, 14]),
-                packed_rgba([15, 16, 17, 18]),
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ],
+            [packed_rgba([11, 12, 13, 14]), 0, 0, 0, 0, 0, 0, 0],
             [
                 packed_rgba([19, 20, 21, 22]),
                 packed_rgba([23, 24, 25, 26]),
@@ -3992,10 +3971,9 @@ mod tests {
                 offset_points: [5.0, 6.0],
                 softness_points: 7.0,
             },
-            AnalyticGeometry::RadialEllipse {
-                center_points: [8.0, 9.0],
-                radii_points: [10.0, 11.0],
-                softness_points: 12.0,
+            AnalyticGeometry::PetFloorProjection {
+                mask: AnalyticMaskSource::PetBody,
+                facing: -1,
             },
             AnalyticGeometry::StatusBeacon {
                 center_points: [13.0, 14.0],
@@ -4030,7 +4008,7 @@ mod tests {
                 1.0, 5.0, 6.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             ],
             [
-                8.0, 9.0, 10.0, 11.0, 12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             ],
             [
                 13.0, 14.0, 15.0, 16.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,

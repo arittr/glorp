@@ -1722,8 +1722,8 @@ fn validate_analytic_paint(
         }
         (
             AnalyticSemantic::FloorProjection,
-            AnalyticPaint::FloorShadowMultiplyRadial { inner_srgba8, outer_srgba8 },
-        ) => rgba(inner_srgba8) && outer_srgba8[3] == 0,
+            AnalyticPaint::FloorShadowMultiplySilhouette { color_srgba8 },
+        ) => rgba(color_srgba8),
         (
             AnalyticSemantic::StatusHalo,
             AnalyticPaint::StatusBeacon { active_srgba8, calm_srgba8 },
@@ -1919,8 +1919,6 @@ fn validate_analytic_frame(
         return Err(SceneValidationError::InvalidFrameValue);
     }
     let finite2 = |values: [f32; 2]| values.into_iter().all(f32::is_finite);
-    let positive2 =
-        |values: [f32; 2]| finite2(values) && values.into_iter().all(|value| value > 0.0);
     let geometry_finite = match value.geometry {
         AnalyticGeometry::ApertureRadial {
             center_points,
@@ -1941,11 +1939,7 @@ fn validate_analytic_frame(
         AnalyticGeometry::PetSilhouette { offset_points, softness_points, .. } => {
             finite2(offset_points) && softness_points.is_finite()
         }
-        AnalyticGeometry::RadialEllipse {
-            center_points,
-            radii_points,
-            softness_points,
-        } => finite2(center_points) && finite2(radii_points) && softness_points.is_finite(),
+        AnalyticGeometry::PetFloorProjection { .. } => true,
         AnalyticGeometry::PetAura {
             center_points,
             max_radius_points,
@@ -1995,15 +1989,7 @@ fn validate_analytic_frame(
         AnalyticGeometry::PetSilhouette { offset_points, softness_points, .. } => {
             bounded2(offset_points) && softness_points.abs() <= spatial_limit
         }
-        AnalyticGeometry::RadialEllipse {
-            center_points,
-            radii_points,
-            softness_points,
-        } => {
-            bounded2(center_points)
-                && bounded2(radii_points)
-                && softness_points.abs() <= spatial_limit
-        }
+        AnalyticGeometry::PetFloorProjection { .. } => true,
         AnalyticGeometry::PetAura {
             center_points,
             max_radius_points,
@@ -2075,18 +2061,11 @@ fn validate_analytic_frame(
         }
         (
             AnalyticSemantic::FloorProjection,
-            AnalyticGeometry::RadialEllipse {
-                center_points,
-                radii_points,
-                softness_points,
+            AnalyticGeometry::PetFloorProjection {
+                mask: AnalyticMaskSource::PetBody,
+                facing,
             },
-        ) => {
-            finite2(center_points)
-                && positive2(radii_points)
-                && value.rect_points == centered_rect(center_points, radii_points)
-                && softness_points.is_finite()
-                && softness_points >= 0.0
-        }
+        ) => matches!(facing, -1 | 1),
         (
             AnalyticSemantic::StatusHalo,
             AnalyticGeometry::StatusBeacon {
@@ -2535,6 +2514,32 @@ mod tests {
         );
 
         let mut fixture = SceneFixture::valid();
+        fixture.content.analytic_slots[2]
+            .value
+            .as_mut()
+            .unwrap()
+            .paint = AnalyticPaint::FloorShadowMultiplySilhouette { color_srgba8: [1, 2, 3, 0] };
+        assert_eq!(
+            validate_content(&fixture.content),
+            Err(SceneValidationError::InvalidContentValue)
+        );
+
+        for facing in [0, 2, -2] {
+            let mut fixture = SceneFixture::valid();
+            let floor = fixture.frame.analytic_slots[2].value.as_mut().unwrap();
+            floor.geometry = AnalyticGeometry::PetFloorProjection {
+                mask: AnalyticMaskSource::PetBody,
+                facing,
+            };
+            assert_eq!(
+                validate_full_generation(&fixture.template, &fixture.content, &fixture.frame)
+                    .map(|_| ()),
+                Err(SceneValidationError::InvalidFrameValue),
+                "facing {facing} must fail closed",
+            );
+        }
+
+        let mut fixture = SceneFixture::valid();
         fixture.content.prop_slots[0].content = Some(PropSemanticContent {
             sprite_phase: None,
             twinkle_active: None,
@@ -2578,20 +2583,6 @@ mod tests {
             }),
             (1, |value, extreme| match &mut value.geometry {
                 AnalyticGeometry::PetSilhouette { softness_points, .. } => {
-                    *softness_points = extreme
-                }
-                _ => unreachable!(),
-            }),
-            (2, |value, extreme| match &mut value.geometry {
-                AnalyticGeometry::RadialEllipse { center_points, .. } => center_points[1] = extreme,
-                _ => unreachable!(),
-            }),
-            (2, |value, extreme| match &mut value.geometry {
-                AnalyticGeometry::RadialEllipse { radii_points, .. } => radii_points[0] = extreme,
-                _ => unreachable!(),
-            }),
-            (2, |value, extreme| match &mut value.geometry {
-                AnalyticGeometry::RadialEllipse { softness_points, .. } => {
                     *softness_points = extreme
                 }
                 _ => unreachable!(),
@@ -2790,10 +2781,12 @@ mod tests {
     }
 
     #[test]
-    fn analytic_rectangles_must_match_their_geometry_in_full_and_delta_paths() {
+    fn derivable_analytic_rectangles_must_match_their_geometry_in_full_and_delta_paths() {
         let fixture = SceneFixture::valid();
         let accepted = validate_template(&fixture.template).unwrap();
-        for slot in [0_usize, 2, 3, 4, 5, 6, 7] {
+        // Floor projection geometry carries only its mask and facing; the compiler owns
+        // its projected rectangle, which is still checked for positive bounded extent.
+        for slot in [0_usize, 3, 4, 5, 6, 7] {
             let mut changed = fixture.frame.analytic_slots[slot];
             changed.value.as_mut().unwrap().rect_points[2] *= 0.5;
 

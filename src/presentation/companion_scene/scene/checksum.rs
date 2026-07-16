@@ -687,10 +687,9 @@ fn encode_analytic_paint(hash: &mut Fnv1a64, paint: AnalyticPaint) {
             encode_rgb(hash, color_srgb8);
             hash.u8(opacity_u8);
         }
-        AnalyticPaint::FloorShadowMultiplyRadial { inner_srgba8, outer_srgba8 } => {
+        AnalyticPaint::FloorShadowMultiplySilhouette { color_srgba8 } => {
             hash.u8(3);
-            encode_rgba(hash, inner_srgba8);
-            encode_rgba(hash, outer_srgba8);
+            encode_rgba(hash, color_srgba8);
         }
         AnalyticPaint::StatusBeacon { active_srgba8, calm_srgba8 } => {
             hash.u8(4);
@@ -757,16 +756,13 @@ fn encode_analytic_geometry(
             hash.f32(softness_points)
                 .map_err(|_| SceneGenerationError::NonFinite)?;
         }
-        AnalyticGeometry::RadialEllipse {
-            center_points,
-            radii_points,
-            softness_points,
+        AnalyticGeometry::PetFloorProjection {
+            mask: AnalyticMaskSource::PetBody,
+            facing,
         } => {
             hash.u8(3);
-            encode_points(hash, center_points)?;
-            encode_points(hash, radii_points)?;
-            hash.f32(softness_points)
-                .map_err(|_| SceneGenerationError::NonFinite)?;
+            hash.u8(1);
+            hash.u8(facing as u8);
         }
         AnalyticGeometry::StatusBeacon {
             center_points,
@@ -845,7 +841,7 @@ fn analytic_shape_tag(value: AnalyticShape) -> u8 {
     match value {
         AnalyticShape::ApertureRadial => 1,
         AnalyticShape::PetSilhouette => 2,
-        AnalyticShape::RadialEllipse => 3,
+        AnalyticShape::PetFloorProjection => 3,
         AnalyticShape::StatusBeacon => 4,
         AnalyticShape::PetAura => 5,
         AnalyticShape::PerimeterGaugeSet => 6,
