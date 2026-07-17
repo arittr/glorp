@@ -32,14 +32,15 @@ use crate::presentation::pixel::{
 use crate::presentation::smooth::{
     validate_smooth_layer, SmoothBlendMode, SmoothBounds, SmoothClip, SmoothCompanionLayer,
     SmoothCompanionScenePlan, SmoothFill, SmoothGeometryError, SmoothLayerItem,
-    SmoothLayerMotionBinding, SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
+    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
 };
+use crate::round::depth::{CompanionDepthComposition, CompanionGaugeLane, PetStatisticsOrder};
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
     daily_overage_marker_fraction, mood_aura_radius, perimeter_gauge_colors,
     perimeter_gauge_layout, prepare_hud_layout, prepared_perimeter_gauge_arcs,
     tank_background_sample, tank_core_color, CompanionHudText, GaugeFractions, HudLineMetrics,
-    LineCap, COMPANION_GAUGE_GAP_DEG,
+    LineCap, PreparedGaugeArc, COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
@@ -146,6 +147,7 @@ pub(super) struct PreparedCompanionFrame {
     hud_plane: crate::round::hud::CompanionHudDepthPlane,
     renderer: PreparedRendererFrame,
     gauges: PreparedGaugeFrame,
+    gauge_arcs: Vec<PreparedGaugeArc>,
     hud: CompanionHudText,
     hud_font_size: f64,
     overlay_commands: Vec<RoundDrawCommand>,
@@ -176,7 +178,84 @@ enum PreparedRendererFrame {
         /// deliberately moved beneath props), so the native painter used to
         /// allocate and sort this list again on every repaint.
         draw_order: Vec<usize>,
+        composition: CompanionDepthComposition,
+        passes: PreparedSmoothDepthPasses,
+        paint_schedule: [SmoothAppKitPaintStep; 9],
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PreparedSmoothDepthPasses {
+    world_before_statistics: Vec<usize>,
+    pet_front: Vec<usize>,
+    foreground: Vec<usize>,
+}
+
+#[cfg(feature = "retained-renderer")]
+pub(super) struct SmoothDepthIdentitySource<'a> {
+    pub(super) pet_effective_z: f32,
+    pub(super) pet_statistics_order: PetStatisticsOrder,
+    pub(super) world_before_statistics: &'a [usize],
+    pub(super) pet_front: &'a [usize],
+    pub(super) foreground: &'a [usize],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmoothDepthBucket {
+    WorldBeforeStatistics,
+    PetFront,
+    Foreground,
+    ScreenReservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothAppKitPaintStep {
+    WorldBeforeStatistics,
+    PetFront,
+    Statistics,
+    Foreground,
+    Gauge(CompanionGaugeLane),
+    StatusTrouble,
+    Dim,
+}
+
+pub const fn smooth_appkit_paint_schedule(
+    pet_statistics_order: PetStatisticsOrder,
+) -> [SmoothAppKitPaintStep; 9] {
+    let crossing_steps = match pet_statistics_order {
+        PetStatisticsOrder::BehindStatistics => [
+            SmoothAppKitPaintStep::PetFront,
+            SmoothAppKitPaintStep::Statistics,
+        ],
+        PetStatisticsOrder::InFrontOfStatistics => [
+            SmoothAppKitPaintStep::Statistics,
+            SmoothAppKitPaintStep::PetFront,
+        ],
+    };
+    [
+        SmoothAppKitPaintStep::WorldBeforeStatistics,
+        crossing_steps[0],
+        crossing_steps[1],
+        SmoothAppKitPaintStep::Foreground,
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Xp),
+        SmoothAppKitPaintStep::StatusTrouble,
+        SmoothAppKitPaintStep::Dim,
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmoothPetFrontPaintStep {
+    MoodAura,
+    Layers,
+}
+
+const fn smooth_appkit_pet_front_paint_schedule() -> [SmoothPetFrontPaintStep; 2] {
+    [
+        SmoothPetFrontPaintStep::MoodAura,
+        SmoothPetFrontPaintStep::Layers,
+    ]
 }
 
 #[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
@@ -226,6 +305,19 @@ impl PreparedCompanionFrame {
         &self.overlay_commands
     }
 
+    pub(super) fn smooth_depth_identity_source(&self) -> Option<SmoothDepthIdentitySource<'_>> {
+        let PreparedRendererFrame::Smooth { composition, passes, .. } = &self.renderer else {
+            return None;
+        };
+        Some(SmoothDepthIdentitySource {
+            pet_effective_z: composition.pet_effective_z,
+            pet_statistics_order: composition.pet_statistics_order,
+            world_before_statistics: &passes.world_before_statistics,
+            pet_front: &passes.pet_front,
+            foreground: &passes.foreground,
+        })
+    }
+
     /// Hands out a borrowed view of the renderer payload so paired_review can
     /// project the renderer identity without app.rs depending on its serde
     /// projection types.
@@ -255,6 +347,7 @@ impl PreparedCompanionFrame {
                 pet_width_cells,
                 plan,
                 draw_order,
+                ..
             } => RendererIdentitySource::Smooth {
                 metrics: *metrics,
                 pet_center_col: *pet_center_col,
@@ -269,6 +362,13 @@ impl PreparedCompanionFrame {
     /// A deterministic prepared frame for review fixtures and tests. Built
     /// entirely from constants — never from live pet state.
     pub(super) fn fixture() -> Self {
+        let aperture = RoundAperture::new(360, 360);
+        let gauges = PreparedGaugeFrame {
+            xp_fraction: 0.5,
+            daily_fraction: 0.5,
+            daily_overage_fraction: 0.0,
+            pace_fraction: 0.5,
+        };
         PreparedCompanionFrame {
             bounds: PreparedBounds {
                 width_px: 360,
@@ -276,7 +376,7 @@ impl PreparedCompanionFrame {
                 width_f64: 360.0,
                 height_f64: 360.0,
             },
-            aperture: RoundAperture::new(360, 360),
+            aperture,
             background: RoundColor(0.05, 0.06, 0.10, 1.0),
             mood_aura_color: RoundColor(0.30, 0.40, 0.55, 0.80),
             dim_overlay: false,
@@ -284,12 +384,8 @@ impl PreparedCompanionFrame {
             renderer: PreparedRendererFrame::Pixel {
                 frame: PixelFrame::transparent(PixelViewport::companion_default()),
             },
-            gauges: PreparedGaugeFrame {
-                xp_fraction: 0.5,
-                daily_fraction: 0.5,
-                daily_overage_fraction: 0.0,
-                pace_fraction: 0.5,
-            },
+            gauges,
+            gauge_arcs: prepare_gauge_arcs(&aperture, gauges),
             hud: CompanionHudText {
                 today_total: "—".to_string(),
                 daily_percent: "—".to_string(),
@@ -393,6 +489,28 @@ fn prepare_gauge_frame(vm: &WatchViewModel) -> PreparedGaugeFrame {
     }
 }
 
+fn prepare_gauge_arcs(
+    aperture: &RoundAperture,
+    gauges: PreparedGaugeFrame,
+) -> Vec<PreparedGaugeArc> {
+    let layout = perimeter_gauge_layout(
+        aperture.center_x as f64,
+        aperture.center_y as f64,
+        aperture.radius as f64,
+        COMPANION_GAUGE_GAP_DEG,
+    );
+    prepared_perimeter_gauge_arcs(
+        &layout,
+        &perimeter_gauge_colors(),
+        GaugeFractions {
+            xp: gauges.xp_fraction,
+            daily: gauges.daily_fraction,
+            daily_overage: gauges.daily_overage_fraction,
+            pace: gauges.pace_fraction,
+        },
+    )
+}
+
 fn prepare_hud_frame(vm: &WatchViewModel, redacts_live_hud: bool) -> CompanionHudText {
     if redacts_live_hud {
         crate::round::hud::review_capture_hud_text()
@@ -489,6 +607,7 @@ fn prepare_companion_frame_at(
     // final review matrix, on top of any lifecycle-driven dim.
     let dim_overlay = scene.lifecycle.asleep || scene.lifecycle.calm || force_dim_overlay;
     let gauges = prepare_gauge_frame(vm);
+    let gauge_arcs = prepare_gauge_arcs(&aperture, gauges);
     let hud = prepare_hud_frame(vm, redacts_live_hud);
 
     let renderer = if renderer_mode.is_pixel() {
@@ -534,6 +653,10 @@ fn prepare_companion_frame_at(
                 }
             })?;
             let draw_order = smooth_layer_draw_order(&plan);
+            let passes = prepare_smooth_depth_passes(&plan, &draw_order);
+            let composition = CompanionDepthComposition::resolve(plan.pet.effective_depth)
+                .map_err(|_| CompanionFramePreparationError::SmoothInvalidDepth)?;
+            let paint_schedule = smooth_appkit_paint_schedule(composition.pet_statistics_order);
             // The aura follows the pet's composed depth transform, so it grows and
             // sinks with the creature instead of staying pinned to the unscaled art.
             let transformed = plan.pet.transformed_bounds;
@@ -549,6 +672,9 @@ fn prepare_companion_frame_at(
                 pet_width_cells,
                 plan: Box::new(plan),
                 draw_order,
+                composition,
+                passes,
+                paint_schedule,
             }
         } else {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
@@ -641,6 +767,7 @@ fn prepare_companion_frame_at(
         hud_plane: crate::round::hud::COMPANION_HUD_DEPTH_PLANE,
         renderer,
         gauges,
+        gauge_arcs,
         hud,
         hud_font_size,
         overlay_commands,
@@ -2443,6 +2570,7 @@ fn present_retained_frame_with(present_identity: RetainedPresentIdentity) {
             pet_width_cells,
             plan,
             draw_order,
+            ..
         } = &frame.renderer
         else {
             return None;
@@ -3210,10 +3338,6 @@ fn draw_scene(bounds: NSRect) -> AppKitPaintOutcome {
 fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
     let aperture = frame.aperture;
     let bg_color = frame.background;
-    let dim_overlay = frame.dim_overlay;
-    let commands = &frame.overlay_commands;
-    let hud_text = &frame.hud;
-    let hud_font_size = frame.hud_font_size;
 
     unsafe {
         // Circular clip so the scene stays inside the aperture.
@@ -3249,14 +3373,47 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
         // falloff is rendered once into a dithered bitmap and cached per size.
         draw_dithered_tank_background(&aperture, &bg_color);
 
-        // Blit the shared scene draw list (habitat + pet) when grid metrics are available.
+        // Pixel and Classic retain their flat scene/chrome sequence. Smooth
+        // consumes the complete semantic schedule prepared with its depth plan.
         match &frame.renderer {
             PreparedRendererFrame::Pixel { frame: pixel_frame } => {
-                crate::companion::pixel::draw_pixel_frame(pixel_frame, bounds, aperture, hud_text);
+                crate::companion::pixel::draw_pixel_frame(
+                    pixel_frame,
+                    bounds,
+                    aperture,
+                    &frame.hud,
+                );
+                paint_flat_appkit_chrome(bounds, frame);
             }
-            PreparedRendererFrame::Smooth { metrics, plan, draw_order, .. } => {
-                draw_mood_aura(frame, metrics);
-                appkit_blit_smooth_plan(plan, draw_order, metrics, &aperture);
+            PreparedRendererFrame::Smooth {
+                metrics, plan, passes, paint_schedule, ..
+            } => {
+                for step in paint_schedule {
+                    match *step {
+                        SmoothAppKitPaintStep::WorldBeforeStatistics => appkit_blit_smooth_plan(
+                            plan,
+                            &passes.world_before_statistics,
+                            metrics,
+                            &aperture,
+                        ),
+                        SmoothAppKitPaintStep::PetFront => {
+                            paint_smooth_pet_front(frame, plan, passes, metrics, &aperture)
+                        }
+                        SmoothAppKitPaintStep::Statistics => {
+                            paint_prepared_statistics(bounds, frame)
+                        }
+                        SmoothAppKitPaintStep::Foreground => {
+                            appkit_blit_smooth_plan(plan, &passes.foreground, metrics, &aperture)
+                        }
+                        SmoothAppKitPaintStep::Gauge(lane) => {
+                            paint_prepared_gauge_lane(frame, lane)
+                        }
+                        SmoothAppKitPaintStep::StatusTrouble => {
+                            paint_prepared_status_trouble(frame)
+                        }
+                        SmoothAppKitPaintStep::Dim => paint_prepared_dim(bounds, frame),
+                    }
+                }
             }
             PreparedRendererFrame::Classic { metrics, draw_list, .. } => {
                 draw_mood_aura(frame, metrics);
@@ -3268,36 +3425,48 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                     metrics.origin_x,
                     metrics.origin_y,
                 );
+                paint_flat_appkit_chrome(bounds, frame);
             }
         }
+    }
+}
 
-        // Companion perimeter gauges: XP, today vs yesterday, and live 10m pace.
-        // The arcs (which to draw, their angles, colours, and order) come from the
-        // shared `prepared_perimeter_gauge_arcs`, the same list the retained GPU prep
-        // consumes, so the gauge geometry lives in exactly one place.
-        {
-            let cx = aperture.center_x as f64;
-            let cy = aperture.center_y as f64;
-            let layout =
-                perimeter_gauge_layout(cx, cy, aperture.radius as f64, COMPANION_GAUGE_GAP_DEG);
-            let colors = perimeter_gauge_colors();
-            let arcs = prepared_perimeter_gauge_arcs(
-                &layout,
-                &colors,
-                GaugeFractions {
-                    xp: frame.gauges.xp_fraction,
-                    daily: frame.gauges.daily_fraction,
-                    daily_overage: frame.gauges.daily_overage_fraction,
-                    pace: frame.gauges.pace_fraction,
-                },
-            );
-            for arc in &arcs {
-                draw_prepared_gauge_arc(arc);
+fn paint_smooth_pet_front(
+    frame: &PreparedCompanionFrame,
+    plan: &SmoothCompanionScenePlan,
+    passes: &PreparedSmoothDepthPasses,
+    metrics: &CompanionGridMetrics,
+    aperture: &RoundAperture,
+) {
+    for step in smooth_appkit_pet_front_paint_schedule() {
+        match step {
+            SmoothPetFrontPaintStep::MoodAura => draw_mood_aura(frame, metrics),
+            SmoothPetFrontPaintStep::Layers => {
+                appkit_blit_smooth_plan(plan, &passes.pet_front, metrics, aperture)
             }
         }
+    }
+}
 
-        // Halo and trouble indicators drawn on top of the scene blit.
-        for command in commands
+fn paint_flat_appkit_chrome(bounds: NSRect, frame: &PreparedCompanionFrame) {
+    for arc in &frame.gauge_arcs {
+        draw_prepared_gauge_arc(arc);
+    }
+    paint_prepared_status_trouble(frame);
+    paint_prepared_statistics(bounds, frame);
+    paint_prepared_dim(bounds, frame);
+}
+
+fn paint_prepared_gauge_lane(frame: &PreparedCompanionFrame, lane: CompanionGaugeLane) {
+    for arc in frame.gauge_arcs.iter().filter(|arc| arc.lane == lane) {
+        draw_prepared_gauge_arc(arc);
+    }
+}
+
+fn paint_prepared_status_trouble(frame: &PreparedCompanionFrame) {
+    unsafe {
+        for command in frame
+            .overlay_commands
             .iter()
             .filter(|c| matches!(c.kind, RoundDrawKind::Halo | RoundDrawKind::Trouble))
         {
@@ -3311,17 +3480,20 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
             ns_color(&command.color).setFill();
             path.fill();
         }
+    }
+}
 
-        // Ambient HUD — drawn after halo beads and before the sleep/calm dim,
-        // so the dim overlay softens the HUD when the pet is resting.
-        // Pass the derived font size so HUD elements scale with the display.
-        match frame.hud_plane {
-            crate::round::hud::CompanionHudDepthPlane::FrontGlass => {
-                draw_hud(bounds, &aperture, hud_text, hud_font_size);
-            }
+fn paint_prepared_statistics(bounds: NSRect, frame: &PreparedCompanionFrame) {
+    match frame.hud_plane {
+        crate::round::hud::CompanionHudDepthPlane::FrontGlass => {
+            draw_hud(bounds, &frame.aperture, &frame.hud, frame.hud_font_size);
         }
+    }
+}
 
-        if dim_overlay {
+fn paint_prepared_dim(bounds: NSRect, frame: &PreparedCompanionFrame) {
+    if frame.dim_overlay {
+        unsafe {
             let dim = NSBezierPath::bezierPathWithRect(bounds);
             NSColor::colorWithSRGBRed_green_blue_alpha(0.05, 0.06, 0.10, 0.35).setFill();
             dim.fill();
@@ -3997,6 +4169,47 @@ fn smooth_layer_draw_order(plan: &SmoothCompanionScenePlan) -> Vec<usize> {
     order
 }
 
+fn smooth_depth_bucket(role: SmoothLayerRole) -> SmoothDepthBucket {
+    match role {
+        SmoothLayerRole::PetBody | SmoothLayerRole::PerformanceCue => SmoothDepthBucket::PetFront,
+        SmoothLayerRole::PropsForeground | SmoothLayerRole::TankLifeForeground => {
+            SmoothDepthBucket::Foreground
+        }
+        SmoothLayerRole::StatusHalo
+        | SmoothLayerRole::TroubleIndicator
+        | SmoothLayerRole::MoodAura
+        | SmoothLayerRole::DimOverlay => SmoothDepthBucket::ScreenReservation,
+        SmoothLayerRole::DepthRings
+        | SmoothLayerRole::BiomeWash
+        | SmoothLayerRole::RoomGlyphs
+        | SmoothLayerRole::TankBed
+        | SmoothLayerRole::Ambient
+        | SmoothLayerRole::Motes
+        | SmoothLayerRole::ActivityGlyphs
+        | SmoothLayerRole::PropsBehind
+        | SmoothLayerRole::TankLifeBehind
+        | SmoothLayerRole::ChestBubble
+        | SmoothLayerRole::WallShadow
+        | SmoothLayerRole::FloorProjection => SmoothDepthBucket::WorldBeforeStatistics,
+    }
+}
+
+fn prepare_smooth_depth_passes(
+    plan: &SmoothCompanionScenePlan,
+    draw_order: &[usize],
+) -> PreparedSmoothDepthPasses {
+    let mut passes = PreparedSmoothDepthPasses::default();
+    for &index in draw_order {
+        match smooth_depth_bucket(plan.layers[index].role) {
+            SmoothDepthBucket::WorldBeforeStatistics => passes.world_before_statistics.push(index),
+            SmoothDepthBucket::PetFront => passes.pet_front.push(index),
+            SmoothDepthBucket::Foreground => passes.foreground.push(index),
+            SmoothDepthBucket::ScreenReservation => {}
+        }
+    }
+    passes
+}
+
 /// Clip to the round porthole. Scene content never escapes it, whatever graphics
 /// state the caller left behind.
 unsafe fn appkit_aperture_clip(aperture: &RoundAperture) {
@@ -4377,6 +4590,219 @@ fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudTex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::smooth::{
+        CompanionChromeReservation, CompanionViewport, SmoothClassicFlattenCompat,
+        SmoothCompanionPrivacyClaims, SmoothLayerId, SmoothLayerRole, SmoothTransform,
+    };
+
+    fn smooth_pass_plan_fixture() -> SmoothCompanionScenePlan {
+        let roles = [
+            SmoothLayerRole::DepthRings,
+            SmoothLayerRole::BiomeWash,
+            SmoothLayerRole::RoomGlyphs,
+            SmoothLayerRole::TankBed,
+            SmoothLayerRole::Ambient,
+            SmoothLayerRole::Motes,
+            SmoothLayerRole::ActivityGlyphs,
+            SmoothLayerRole::PropsBehind,
+            SmoothLayerRole::TankLifeBehind,
+            SmoothLayerRole::ChestBubble,
+            SmoothLayerRole::WallShadow,
+            SmoothLayerRole::FloorProjection,
+            SmoothLayerRole::PetBody,
+            SmoothLayerRole::PerformanceCue,
+            SmoothLayerRole::PropsForeground,
+            SmoothLayerRole::TankLifeForeground,
+            SmoothLayerRole::StatusHalo,
+            SmoothLayerRole::TroubleIndicator,
+            SmoothLayerRole::MoodAura,
+            SmoothLayerRole::DimOverlay,
+        ];
+        let layers = roles
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| SmoothCompanionLayer {
+                id: SmoothLayerId(format!("pass-fixture-{}", role.as_str())),
+                role,
+                // Wall shadows happen to follow the pet transform, but remain
+                // paint on the receiving wall surface.
+                motion_binding: if role == SmoothLayerRole::WallShadow {
+                    SmoothLayerMotionBinding::PetAttached
+                } else {
+                    SmoothLayerMotionBinding::Fixed
+                },
+                z: index as i16,
+                local_bounds: SmoothBounds::default(),
+                anchor: SmoothPoint::default(),
+                transform_origin: SmoothPoint::default(),
+                transform: SmoothTransform {
+                    translation: SmoothPoint::default(),
+                    scale: SmoothPoint { x: 1.0, y: 1.0 },
+                    rotation_degrees: 0.0,
+                },
+                parallax_translation: SmoothPoint::default(),
+                opacity: 1.0,
+                clip: SmoothClip::None,
+                blend: SmoothBlendMode::Normal,
+                items: Vec::new(),
+                privacy: SmoothCompanionPrivacyClaims::external_companion(),
+            })
+            .collect();
+        SmoothCompanionScenePlan {
+            viewport: CompanionViewport::default(),
+            layers,
+            pet: Default::default(),
+            parallax_lifecycle_scale: 1.0,
+            chrome: CompanionChromeReservation::default(),
+            privacy: SmoothCompanionPrivacyClaims::external_companion(),
+            classic_flatten_compat: SmoothClassicFlattenCompat::None,
+        }
+    }
+
+    fn pass_roles(plan: &SmoothCompanionScenePlan, indices: &[usize]) -> Vec<SmoothLayerRole> {
+        indices
+            .iter()
+            .map(|&index| plan.layers[index].role)
+            .collect()
+    }
+
+    #[test]
+    fn smooth_appkit_pass_plan_groups_roles_without_following_motion_binding() {
+        let plan = smooth_pass_plan_fixture();
+        let draw_order = smooth_layer_draw_order(&plan);
+        let passes = prepare_smooth_depth_passes(&plan, &draw_order);
+
+        assert_eq!(
+            pass_roles(&plan, &passes.pet_front),
+            [SmoothLayerRole::PetBody, SmoothLayerRole::PerformanceCue]
+        );
+        let world_roles = pass_roles(&plan, &passes.world_before_statistics);
+        assert!(world_roles.contains(&SmoothLayerRole::WallShadow));
+        assert!(world_roles.contains(&SmoothLayerRole::FloorProjection));
+        assert_eq!(
+            pass_roles(&plan, &passes.foreground),
+            [
+                SmoothLayerRole::PropsForeground,
+                SmoothLayerRole::TankLifeForeground,
+            ]
+        );
+        assert_eq!(
+            passes.world_before_statistics.len() + passes.pet_front.len() + passes.foreground.len(),
+            plan.layers.len() - 4,
+            "screen reservations stay out of Smooth scene passes"
+        );
+    }
+
+    #[test]
+    fn smooth_appkit_pass_plan_places_external_mood_aura_with_crossing_pet() {
+        use crate::round::depth::{CompanionDepthComposition, PetStatisticsOrder};
+
+        assert_eq!(
+            smooth_appkit_pet_front_paint_schedule(),
+            [
+                SmoothPetFrontPaintStep::MoodAura,
+                SmoothPetFrontPaintStep::Layers
+            ]
+        );
+
+        let just_in_front = f32::from_bits(0.72_f32.to_bits() + 1);
+        for (depth, expected_order) in [
+            (-1.0, PetStatisticsOrder::BehindStatistics),
+            (0.0, PetStatisticsOrder::BehindStatistics),
+            (0.72, PetStatisticsOrder::BehindStatistics),
+            (just_in_front, PetStatisticsOrder::InFrontOfStatistics),
+            (1.0, PetStatisticsOrder::InFrontOfStatistics),
+        ] {
+            let composition = CompanionDepthComposition::resolve(depth).unwrap();
+            assert_eq!(composition.pet_statistics_order, expected_order);
+            let schedule = smooth_appkit_paint_schedule(composition.pet_statistics_order);
+            let pet = schedule
+                .iter()
+                .position(|step| *step == SmoothAppKitPaintStep::PetFront)
+                .unwrap();
+            let statistics = schedule
+                .iter()
+                .position(|step| *step == SmoothAppKitPaintStep::Statistics)
+                .unwrap();
+            assert_eq!(
+                pet < statistics,
+                expected_order == PetStatisticsOrder::BehindStatistics,
+                "depth {depth} selected the wrong side of statistics"
+            );
+        }
+    }
+
+    #[test]
+    fn smooth_appkit_pass_plan_is_fully_precomputed_from_effective_depth() {
+        use crate::round::depth::{CompanionGaugeLane, PetStatisticsOrder};
+
+        let now = time::macros::datetime!(2026-07-16 12:00 UTC);
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.day_context.asleep = true;
+        prepare_smooth_view_model_for_tick(&mut vm, 0, now).unwrap();
+        let scene = derive_round_scene_model(&vm, now);
+        let mut metric_cache = CompanionMetricCache::default();
+        let frame = prepare_companion_frame_at(
+            &vm,
+            &scene,
+            EffectiveCompanionRenderer::Smooth,
+            Some(1.0),
+            None,
+            0,
+            false,
+            false,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
+            &mut metric_cache,
+            now,
+            0,
+        )
+        .unwrap();
+
+        let lanes =
+            frame
+                .gauge_arcs
+                .iter()
+                .map(|arc| arc.lane)
+                .fold(Vec::new(), |mut lanes, lane| {
+                    if lanes.last() != Some(&lane) {
+                        lanes.push(lane);
+                    }
+                    lanes
+                });
+        assert_eq!(
+            lanes,
+            [
+                CompanionGaugeLane::Pace,
+                CompanionGaugeLane::Daily,
+                CompanionGaugeLane::Xp,
+            ]
+        );
+
+        let PreparedRendererFrame::Smooth {
+            plan,
+            composition,
+            passes,
+            paint_schedule,
+            ..
+        } = &frame.renderer
+        else {
+            panic!("Smooth preparation must produce a Smooth renderer payload")
+        };
+        assert_eq!(plan.pet.depth, 1.0, "raw depth stays available to the plan");
+        assert_eq!(plan.pet.effective_depth, 0.25);
+        assert_eq!(composition.pet_effective_z, plan.pet.effective_depth);
+        assert_eq!(
+            composition.pet_statistics_order,
+            PetStatisticsOrder::BehindStatistics
+        );
+        assert_eq!(
+            *paint_schedule,
+            smooth_appkit_paint_schedule(PetStatisticsOrder::BehindStatistics)
+        );
+        assert!(!passes.world_before_statistics.is_empty());
+        assert!(!passes.pet_front.is_empty());
+        assert!(!passes.foreground.is_empty());
+    }
 
     #[cfg(feature = "retained-renderer")]
     #[test]

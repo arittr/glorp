@@ -1,5 +1,8 @@
 const APP_SOURCE: &str = include_str!("../src/companion/app.rs");
 
+use glorp::companion::app::{smooth_appkit_paint_schedule, SmoothAppKitPaintStep};
+use glorp::round::depth::{CompanionDepthComposition, CompanionGaugeLane, PetStatisticsOrder};
+
 fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let start_index = source
         .find(start)
@@ -36,57 +39,48 @@ fn draw_scene_consumes_only_the_last_prepared_frame() {
 }
 
 #[test]
-fn appkit_front_glass_hud_follows_renderer_gauges_and_status_before_dim() {
-    let paint = source_between(
-        APP_SOURCE,
-        "\nfn paint_prepared_frame(",
-        "\n/// Paints the frozen prepared frame",
-    );
-    let stages = [
-        (
-            "renderer payload",
-            paint
-                .find("match &frame.renderer")
-                .expect("paint_prepared_frame must paint the renderer payload"),
-        ),
-        (
-            "perimeter gauge preparation",
-            paint
-                .find("let arcs = prepared_perimeter_gauge_arcs(")
-                .expect("paint_prepared_frame must prepare perimeter gauges"),
-        ),
-        (
-            "perimeter gauge draw",
-            paint
-                .find("draw_prepared_gauge_arc(arc);")
-                .expect("paint_prepared_frame must draw perimeter gauges"),
-        ),
-        (
-            "status/trouble command loop",
-            paint
-                .find("RoundDrawKind::Halo | RoundDrawKind::Trouble")
-                .expect("paint_prepared_frame must draw status/trouble commands"),
-        ),
-        (
-            "front-glass HUD",
-            paint
-                .find("match frame.hud_plane")
-                .expect("paint_prepared_frame must interpret the HUD depth plane"),
-        ),
-        (
-            "dim overlay",
-            paint
-                .find("if dim_overlay")
-                .expect("paint_prepared_frame must apply the dim overlay"),
-        ),
+fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
+    let behind = [
+        SmoothAppKitPaintStep::WorldBeforeStatistics,
+        SmoothAppKitPaintStep::PetFront,
+        SmoothAppKitPaintStep::Statistics,
+        SmoothAppKitPaintStep::Foreground,
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Xp),
+        SmoothAppKitPaintStep::StatusTrouble,
+        SmoothAppKitPaintStep::Dim,
+    ];
+    let in_front = [
+        SmoothAppKitPaintStep::WorldBeforeStatistics,
+        SmoothAppKitPaintStep::Statistics,
+        SmoothAppKitPaintStep::PetFront,
+        SmoothAppKitPaintStep::Foreground,
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Xp),
+        SmoothAppKitPaintStep::StatusTrouble,
+        SmoothAppKitPaintStep::Dim,
     ];
 
-    for pair in stages.windows(2) {
-        let (before_name, before_index) = pair[0];
-        let (after_name, after_index) = pair[1];
-        assert!(
-            before_index < after_index,
-            "{before_name} must be painted before {after_name}"
+    let just_in_front = f32::from_bits(0.72_f32.to_bits() + 1);
+    for (depth, expected_order, expected_schedule) in [
+        (-1.0, PetStatisticsOrder::BehindStatistics, behind),
+        (0.0, PetStatisticsOrder::BehindStatistics, behind),
+        (0.72, PetStatisticsOrder::BehindStatistics, behind),
+        (
+            just_in_front,
+            PetStatisticsOrder::InFrontOfStatistics,
+            in_front,
+        ),
+        (1.0, PetStatisticsOrder::InFrontOfStatistics, in_front),
+    ] {
+        let composition = CompanionDepthComposition::resolve(depth).unwrap();
+        assert_eq!(composition.pet_statistics_order, expected_order);
+        assert_eq!(
+            smooth_appkit_paint_schedule(composition.pet_statistics_order),
+            expected_schedule,
+            "effective depth {depth} produced the wrong AppKit schedule"
         );
     }
 }

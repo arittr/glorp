@@ -23,7 +23,9 @@ use crate::commands::companion_mode::{
     CompanionRendererRequest, CompanionReviewState, EffectiveCompanionRenderer,
     RendererRuntimeState,
 };
-use crate::companion::app::{CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame};
+use crate::companion::app::{
+    CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame, SmoothDepthIdentitySource,
+};
 use crate::companion::retained::{
     ActiveRetainedHost, CapacityContract, CompanionCapacityInventory, FrameDisposition,
     FrameMilestone, RetainedFailureCategory,
@@ -39,6 +41,7 @@ use crate::presentation::companion_scene::scene::{
 use crate::presentation::draw_list::SceneDrawList;
 use crate::presentation::pixel::PixelFrame;
 use crate::presentation::smooth::SmoothCompanionScenePlan;
+use crate::round::depth::PetStatisticsOrder;
 use crate::round::draw::{RoundColor, RoundDrawCommand, RoundDrawKind};
 use crate::round::hud::CompanionHudText;
 use crate::round::layout::RoundAperture;
@@ -237,8 +240,12 @@ impl PairedReviewFrame {
         frame_id: u64,
         resource_generation: u64,
     ) -> Self {
+        let renderer = RendererIdentity::from_source(
+            frame.renderer_source(),
+            frame.smooth_depth_identity_source(),
+        );
         let identity = PairedReviewIdentity {
-            renderer: RendererIdentity::from_source(frame.renderer_source()),
+            renderer,
             aperture: ApertureIdentity::from_aperture(frame.review_aperture()),
             background: color_channels(frame.review_background()),
             mood_aura: color_channels(frame.review_mood_aura()),
@@ -462,12 +469,19 @@ pub enum RendererIdentity {
         pet_center_row: f64,
         pet_width_cells: f64,
         plan_checksum: String,
-        draw_order: Vec<usize>,
+        pet_effective_z: f32,
+        pet_statistics_order: PetStatisticsOrder,
+        world_before_statistics: Vec<usize>,
+        pet_front: Vec<usize>,
+        foreground: Vec<usize>,
     },
 }
 
 impl RendererIdentity {
-    fn from_source(source: RendererIdentitySource<'_>) -> Self {
+    fn from_source(
+        source: RendererIdentitySource<'_>,
+        smooth_depth: Option<SmoothDepthIdentitySource<'_>>,
+    ) -> Self {
         match source {
             RendererIdentitySource::Pixel { frame } => {
                 RendererIdentity::Pixel { pixel_checksum: debug_checksum(frame) }
@@ -491,15 +505,23 @@ impl RendererIdentity {
                 pet_center_row,
                 pet_width_cells,
                 plan,
-                draw_order,
-            } => RendererIdentity::Smooth {
-                metrics: MetricsIdentity::from_metrics(metrics),
-                pet_center_col,
-                pet_center_row,
-                pet_width_cells,
-                plan_checksum: debug_checksum(plan),
-                draw_order: draw_order.to_vec(),
-            },
+                draw_order: _,
+            } => {
+                let smooth_depth =
+                    smooth_depth.expect("Smooth renderer identity requires prepared depth passes");
+                RendererIdentity::Smooth {
+                    metrics: MetricsIdentity::from_metrics(metrics),
+                    pet_center_col,
+                    pet_center_row,
+                    pet_width_cells,
+                    plan_checksum: debug_checksum(plan),
+                    pet_effective_z: smooth_depth.pet_effective_z,
+                    pet_statistics_order: smooth_depth.pet_statistics_order,
+                    world_before_statistics: smooth_depth.world_before_statistics.to_vec(),
+                    pet_front: smooth_depth.pet_front.to_vec(),
+                    foreground: smooth_depth.foreground.to_vec(),
+                }
+            }
         }
     }
 }
@@ -1188,6 +1210,75 @@ mod tests {
         let mut changed = frame.clone();
         changed.identity.gauges.pace_fraction = 0.75;
         assert_ne!(frame.checksum, changed.recompute_checksum());
+    }
+
+    fn smooth_renderer_identity(
+        pet_effective_z: f32,
+        pet_statistics_order: crate::round::depth::PetStatisticsOrder,
+    ) -> RendererIdentity {
+        RendererIdentity::Smooth {
+            metrics: MetricsIdentity {
+                font_size: 10.0,
+                cell_w: 4.0,
+                cell_h: 8.0,
+                grid_cols: 36,
+                grid_rows: 18,
+                origin_x: 0.0,
+                origin_y: 144.0,
+            },
+            pet_center_col: 18.0,
+            pet_center_row: 9.0,
+            pet_width_cells: 13.0,
+            plan_checksum: "prepared-smooth-plan".to_string(),
+            pet_effective_z,
+            pet_statistics_order,
+            world_before_statistics: vec![0, 1, 2],
+            pet_front: vec![3, 4],
+            foreground: vec![5, 6],
+        }
+    }
+
+    #[test]
+    fn smooth_identity_checksum_records_depth_order_and_semantic_passes() {
+        use crate::round::depth::PetStatisticsOrder;
+
+        let mut base = PairedReviewFrame::fixture().identity;
+        base.renderer = smooth_renderer_identity(0.72, PetStatisticsOrder::BehindStatistics);
+        let base_checksum = canonical_frame_checksum(&base);
+
+        let mut changed_depth = base.clone();
+        let RendererIdentity::Smooth { pet_effective_z, .. } = &mut changed_depth.renderer else {
+            unreachable!()
+        };
+        *pet_effective_z = f32::from_bits(0.72_f32.to_bits() + 1);
+        assert_ne!(base_checksum, canonical_frame_checksum(&changed_depth));
+
+        let mut changed_order = base.clone();
+        let RendererIdentity::Smooth { pet_statistics_order, .. } = &mut changed_order.renderer
+        else {
+            unreachable!()
+        };
+        *pet_statistics_order = PetStatisticsOrder::InFrontOfStatistics;
+        assert_ne!(base_checksum, canonical_frame_checksum(&changed_order));
+
+        let mut changed_pass = base.clone();
+        let RendererIdentity::Smooth { pet_front, .. } = &mut changed_pass.renderer else {
+            unreachable!()
+        };
+        pet_front.swap(0, 1);
+        assert_ne!(base_checksum, canonical_frame_checksum(&changed_pass));
+
+        let json = serde_json::to_value(&base.renderer).unwrap();
+        let smooth = json
+            .get("Smooth")
+            .expect("externally tagged Smooth identity");
+        assert!(smooth.get("draw_order").is_none());
+        assert_eq!(
+            smooth["world_before_statistics"],
+            serde_json::json!([0, 1, 2])
+        );
+        assert_eq!(smooth["pet_front"], serde_json::json!([3, 4]));
+        assert_eq!(smooth["foreground"], serde_json::json!([5, 6]));
     }
 
     #[test]
