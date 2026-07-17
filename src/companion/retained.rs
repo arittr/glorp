@@ -418,6 +418,20 @@ impl RetainedSceneGenerationState {
             .map_err(|_| hud::HudPreparationError::InvalidGeometry)?;
         snapshot_depth_composition(lease.source_snapshot())
     }
+
+    fn active_hud_depth_composition_for_version(
+        &self,
+        expected: crate::presentation::companion_scene::SceneVersion,
+    ) -> Result<crate::round::depth::CompanionDepthComposition, hud::HudPreparationError> {
+        let lease = self
+            .runtime
+            .capture_lease()
+            .map_err(|_| hud::HudPreparationError::InvalidGeometry)?;
+        if lease.version() != expected {
+            return Err(hud::HudPreparationError::InvalidGeometry);
+        }
+        snapshot_depth_composition(lease.source_snapshot())
+    }
     fn new(
         runtime: crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState,
     ) -> Self {
@@ -759,7 +773,9 @@ impl RetainedSceneGenerationState {
             ));
         }
         let request = render::SceneRenderRequest::new(version, request_extent, backing_scale);
-        let draw_count = active.gpu.submitted_draw_count();
+        let draw_count = active
+            .gpu
+            .submitted_draw_count(prepared_hud.statistics_interaction().enabled());
         let (dirty_metrics, timings) = if active.version.applied == version.applied {
             let (_, timings) = renderer.submit_active_to_surface(
                 device,
@@ -824,7 +840,9 @@ impl RetainedSceneGenerationState {
             ));
         }
         let request = render::SceneRenderRequest::new(version, request_extent, backing_scale);
-        let draw_count = active.gpu.submitted_draw_count();
+        let draw_count = active
+            .gpu
+            .submitted_draw_count(prepared_hud.statistics_interaction().enabled());
         let (submission, dirty_metrics, timings) = if active.version.applied == version.applied {
             let (submission, timings) = renderer.submit_active_offscreen(
                 device,
@@ -884,10 +902,10 @@ impl RetainedSceneGenerationState {
         self.active.as_ref().map(|active| active.version)
     }
 
-    fn ready_candidate_draw_count(&self) -> Option<u64> {
+    fn ready_candidate_draw_count(&self, hud_interaction_enabled: bool) -> Option<u64> {
         self.ready_candidate
             .as_ref()
-            .map(|candidate| candidate.gpu.submitted_draw_count())
+            .map(|candidate| candidate.gpu.submitted_draw_count(hud_interaction_enabled))
     }
 
     fn active_backing_scale(&self) -> Option<f64> {

@@ -1750,7 +1750,7 @@ impl ActiveRetainedHost {
                 .as_ref()
                 .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?
                 .generations
-                .active_hud_depth_composition()
+                .active_hud_depth_composition_for_version(receipt.scene_version)
                 .map_err(|_| RetainedFailureCategory::CaptureUnsupportedVariant)?,
         );
         let activation = self
@@ -2905,7 +2905,9 @@ impl RetainedHost {
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let draw_count = generations.ready_candidate_draw_count().unwrap_or(0);
+        let draw_count = generations
+            .ready_candidate_draw_count(prepared_hud.statistics_interaction().enabled())
+            .unwrap_or(0);
         let encode_started_at = Instant::now();
         let encoded = {
             let candidate = generations

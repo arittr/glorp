@@ -3199,7 +3199,7 @@ impl GpuSceneCandidate {
         GpuSceneCandidateFacts::EXPECTED
     }
 
-    pub(super) fn submitted_draw_count(&self) -> u64 {
+    pub(super) fn submitted_draw_count(&self, hud_interaction_enabled: bool) -> u64 {
         let scene_draws = self
             .draw_plan
             .opaque
@@ -3207,11 +3207,17 @@ impl GpuSceneCandidate {
             .saturating_add(self.draw_plan.world_blended_unsorted.len())
             .saturating_add(self.draw_plan.chrome.prefix.len())
             .saturating_add(self.draw_plan.chrome.suffix.len());
-        // The world count already includes the sealed HUD marker. The renderer
-        // also issues aperture composite and final surface draws.
+        // The logical scene count includes one sealed marker that is not a
+        // physical draw. Replace it with the echo and primary HUD draws, then
+        // include aperture composite and final surface. In the interaction
+        // band the three authored pet layers are replayed in place of their
+        // ordinary draws, so only the three masked overlays are additional.
         u64::try_from(scene_draws)
             .unwrap_or(u64::MAX)
+            .saturating_sub(1)
             .saturating_add(2)
+            .saturating_add(2)
+            .saturating_add(if hud_interaction_enabled { 3 } else { 0 })
     }
 }
 
@@ -13975,7 +13981,32 @@ mod tests {
         use crate::round::smooth::CompanionContentIdentity;
 
         let (device, queue) = native_device();
-        let cpu = super::super::compiler::compile_projected_full_scene_for_render_test(0);
+        let base = super::super::compiler::compile_projected_full_scene_for_render_test(0);
+        let generation_key = base.generation_key;
+        let source_revisions = base.source_revisions;
+        let cpu_at = |pet_depth: f32| {
+            let mut snapshot =
+                super::super::compiler::projected_full_scene_snapshot_for_render_test(0);
+            assert!(!snapshot.frame.asleep && !snapshot.frame.calm);
+            snapshot.frame.pet_depth = pet_depth;
+            snapshot.frame.pet_depth_override = Some(pet_depth);
+            let resolved = crate::round::depth::resolve_smooth_depth(pet_depth, 1.0).unwrap();
+            snapshot.frame.pet_depth_cue = crate::presentation::companion_scene::DepthCue {
+                scale: resolved.scale,
+                y_offset_points_up: -resolved.perspective_y
+                    * snapshot.topology.glyph_grid.cell_extent_points[1],
+                opacity: resolved.atmosphere,
+                saturation: 1.0,
+            };
+            let generation =
+                crate::presentation::companion_scene::scene::build_scene_generation_owned(
+                    std::sync::Arc::new(snapshot),
+                    generation_key,
+                    source_revisions,
+                )
+                .unwrap();
+            super::super::compiler::compile_cpu_generation(&generation).unwrap()
+        };
         let resources = super::super::resources::CompiledRetainedResources::compile(
             &super::super::resources::GlyphRepertoireManifest::for_active_pet(
                 CompanionContentIdentity::for_pet(Species::Fuzz),
@@ -13985,42 +14016,57 @@ mod tests {
         .unwrap();
         let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
             resources.atlas(),
-            cpu.generation_key.resources,
+            generation_key.resources,
         )
         .unwrap();
-        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
-        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
-        let mut candidate =
-            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, generation_key.device).unwrap();
+        let candidate_at = |depth| {
+            let upload = prepare_scene_upload(&cpu_at(depth), &atlas).unwrap();
+            materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap()
+        };
+        let at_start_z = crate::round::depth::COMPANION_STATISTICS_INTERACTION_START_Z;
+        let at_mid_z = 0.68;
+        let at_plane_z = crate::round::depth::COMPANION_STATISTICS_Z;
+        let just_front_z = f32::from_bits(at_plane_z.to_bits() + 1);
+        let mut at_start_candidate = candidate_at(at_start_z);
+        let mut at_mid_candidate = candidate_at(at_mid_z);
+        let mut at_plane_candidate = candidate_at(at_plane_z);
+        let mut just_front_candidate = candidate_at(just_front_z);
         let sealed = super::super::hud::SealedHudFrame::redacted_capture().unwrap();
-        let prepare_hud = |depth| {
+        let prepare_hud = |candidate: &GpuSceneCandidate, depth| {
             candidate
                 .hud
                 .prepared_atlas()
-                .prepare_redacted_capture(
-                    &sealed,
-                    hud_geometry_at(upload.generation_key.resources, depth),
-                )
+                .prepare_redacted_capture(&sealed, hud_geometry_at(generation_key.resources, depth))
                 .unwrap()
         };
-        let at_start = prepare_hud(0.64);
-        let at_mid = prepare_hud(0.68);
-        let at_plane = prepare_hud(0.72);
-        let request = render_request_fixture(
-            candidate.generation_key,
-            candidate.source_revisions,
-            candidate.logical_viewport_points,
-            2.0,
-        );
+        let at_start_hud = prepare_hud(&at_start_candidate, at_start_z);
+        let at_mid_hud = prepare_hud(&at_mid_candidate, at_mid_z);
+        let at_plane_hud = prepare_hud(&at_plane_candidate, at_plane_z);
+        let just_front_hud = prepare_hud(&just_front_candidate, just_front_z);
+        assert_eq!(at_start_candidate.submitted_draw_count(false), 25);
+        assert_eq!(at_mid_candidate.submitted_draw_count(true), 28);
+        let request_for = |candidate: &GpuSceneCandidate| {
+            render_request_fixture(
+                candidate.generation_key,
+                candidate.source_revisions,
+                candidate.logical_viewport_points,
+                2.0,
+            )
+        };
+        let at_start_request = request_for(&at_start_candidate);
+        let at_mid_request = request_for(&at_mid_candidate);
+        let at_plane_request = request_for(&at_plane_candidate);
+        let just_front_request = request_for(&just_front_candidate);
         let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         let start = renderer
             .render_offscreen(
                 &device,
                 &queue,
                 &shared,
-                &mut candidate,
-                request.clone(),
-                &at_start,
+                &mut at_start_candidate,
+                at_start_request,
+                &at_start_hud,
             )
             .unwrap();
         let mid = renderer
@@ -14028,9 +14074,9 @@ mod tests {
                 &device,
                 &queue,
                 &shared,
-                &mut candidate,
-                request.clone(),
-                &at_mid,
+                &mut at_mid_candidate,
+                at_mid_request.clone(),
+                &at_mid_hud,
             )
             .unwrap();
         let plane = renderer
@@ -14038,13 +14084,20 @@ mod tests {
                 &device,
                 &queue,
                 &shared,
-                &mut candidate,
-                request.clone(),
-                &at_plane,
+                &mut at_plane_candidate,
+                at_plane_request,
+                &at_plane_hud,
             )
             .unwrap();
-        let restored = renderer
-            .render_offscreen(&device, &queue, &shared, &mut candidate, request, &at_start)
+        let just_front = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut just_front_candidate,
+                just_front_request,
+                &just_front_hud,
+            )
             .unwrap();
 
         let difference = |left: &[u8], right: &[u8]| {
@@ -14057,15 +14110,109 @@ mod tests {
         let full_reveal = difference(&start.rgba, &plane.rgba);
         assert!(mid_reveal > 0);
         assert!(mid_reveal < full_reveal);
-        assert_eq!(restored.rgba, start.rgba);
 
-        let changed_pixels = start
+        let mean_plane_front_rgb_difference = plane
             .rgba
             .chunks_exact(4)
-            .zip(plane.rgba.chunks_exact(4))
-            .filter(|(start, plane)| start != plane)
+            .zip(just_front.rgba.chunks_exact(4))
+            .map(|(plane, front)| {
+                plane[..3]
+                    .iter()
+                    .zip(&front[..3])
+                    .map(|(plane, front)| u64::from(plane.abs_diff(*front)))
+                    .sum::<u64>()
+            })
+            .sum::<u64>() as f64
+            / f64::from(plane.physical_extent_pixels[0] * plane.physical_extent_pixels[1] * 3);
+        assert!(mean_plane_front_rgb_difference <= 1.0);
+
+        let [width, height] = plane.physical_extent_pixels;
+        for (pixel_index, (plane, front)) in plane
+            .rgba
+            .chunks_exact(4)
+            .zip(just_front.rgba.chunks_exact(4))
+            .enumerate()
+        {
+            let x = pixel_index as u32 % width;
+            let y_up = height - 1 - pixel_index as u32 / width;
+            let inside_statistics_band =
+                (40..=width - 40).contains(&x) && (height / 4..=height * 3 / 4).contains(&y_up);
+            if !inside_statistics_band {
+                assert_eq!(plane, front, "non-overlap pixel changed at ({x}, {y_up})");
+            }
+        }
+
+        let blank_mid = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test_at(
+            generation_key.resources,
+            at_mid_z,
+        );
+        let after_covered_frame = renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut at_mid_candidate,
+                at_mid_request,
+                &blank_mid,
+            )
+            .unwrap();
+        let mut fresh_mid_candidate = candidate_at(at_mid_z);
+        let fresh_mid_request = request_for(&fresh_mid_candidate);
+        let mut fresh_renderer = SceneRenderer::new(&device, &queue, &shared);
+        let fresh_blank = fresh_renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut fresh_mid_candidate,
+                fresh_mid_request,
+                &blank_mid,
+            )
+            .unwrap();
+        assert_eq!(after_covered_frame.rgba, fresh_blank.rgba);
+
+        let blank_start = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test_at(
+            generation_key.resources,
+            at_start_z,
+        );
+        let mut fresh_start_candidate = candidate_at(at_start_z);
+        let fresh_start_request = request_for(&fresh_start_candidate);
+        let fresh_start_blank = fresh_renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut fresh_start_candidate,
+                fresh_start_request,
+                &blank_start,
+            )
+            .unwrap();
+
+        let rear_echo_occluded_pixels = mid
+            .rgba
+            .chunks_exact(4)
+            .zip(after_covered_frame.rgba.chunks_exact(4))
+            .zip(
+                start
+                    .rgba
+                    .chunks_exact(4)
+                    .zip(fresh_start_blank.rgba.chunks_exact(4)),
+            )
+            .enumerate()
+            .filter(
+                |(pixel_index, ((mid_with_hud, mid_blank), (start_with_hud, start_blank)))| {
+                    let x = *pixel_index as u32 % width;
+                    let y_up = height - 1 - *pixel_index as u32 / width;
+                    (width / 3..=width * 2 / 3).contains(&x)
+                        && (height / 3..=height * 2 / 3).contains(&y_up)
+                        && start_with_hud != start_blank
+                        && mid_with_hud == mid_blank
+                        && mid_blank[3] == 255
+                        && mid_blank[0] > mid_blank[2]
+                },
+            )
             .count();
-        assert!(changed_pixels < start.rgba.len() / 4 / 20);
+        assert!(rear_echo_occluded_pixels > 0);
     }
 
     #[cfg(target_os = "macos")]

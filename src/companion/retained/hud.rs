@@ -909,6 +909,21 @@ impl CaptureSafePreparedHudFrame {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn zeroed_for_test_at(
+        resource_generation: ResourceGeneration,
+        pet_effective_z: f32,
+    ) -> Self {
+        let composition = crate::round::depth::CompanionDepthComposition::resolve(pet_effective_z)
+            .expect("test HUD depth is valid");
+        Self {
+            records: [HudGlyphGpuValue::zeroed(); MAX_COMPANION_HUD_GLYPHS],
+            interaction: HudInteractionGpuValue::from_composition(composition),
+            draw_count: HUD_GPU_DRAW_INSTANCES,
+            resource_generation,
+        }
+    }
+
     pub(super) const fn statistics_interaction(&self) -> HudInteractionGpuValue {
         self.interaction
     }
@@ -984,6 +999,10 @@ fn measure_line(metrics: impl Iterator<Item = HudAtlasMetric>, font_size: f32) -
 }
 
 fn validate_geometry(geometry: HudPreparationGeometry) -> Result<(), HudPreparationError> {
+    let expected_depth_composition = crate::round::depth::CompanionDepthComposition::resolve(
+        geometry.depth_composition.pet_effective_z,
+    )
+    .map_err(|_| HudPreparationError::InvalidGeometry)?;
     let values = [
         geometry.gap.center_x,
         geometry.gap.baseline_y,
@@ -1000,6 +1019,8 @@ fn validate_geometry(geometry: HudPreparationGeometry) -> Result<(), HudPreparat
             .statistics_interaction
             .reveal_mix
             .is_finite()
+        || !(0.0..=1.0).contains(&geometry.depth_composition.statistics_interaction.reveal_mix)
+        || geometry.depth_composition != expected_depth_composition
         || geometry.gap.max_width <= 0.0
         || geometry.aperture_radius <= 0.0
         || geometry.view_width <= 0.0
@@ -1469,6 +1490,29 @@ mod tests {
             format!("{:?}", prepared.statistics_interaction()),
             "HudInteractionGpuValue(<private>)"
         );
+    }
+
+    #[test]
+    fn hud_interaction_rejects_out_of_range_or_incoherent_composition() {
+        let atlas = PreparedHudAtlas::from_scene_atlas(&prepared_atlas()).unwrap();
+        let sealed = live(12_345.0, Some(0.5), 789.0);
+        let mut out_of_range = geometry();
+        out_of_range
+            .depth_composition
+            .statistics_interaction
+            .reveal_mix = 1.01;
+        let mut incoherent_boundary = geometry();
+        incoherent_boundary
+            .depth_composition
+            .statistics_interaction
+            .start_z = 0.63;
+
+        for invalid in [out_of_range, incoherent_boundary] {
+            assert!(matches!(
+                atlas.prepare_sensitive(&sealed, invalid),
+                Err(HudPreparationError::InvalidGeometry)
+            ));
+        }
     }
 
     #[test]
