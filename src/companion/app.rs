@@ -711,7 +711,7 @@ fn prepare_companion_frame_at(
         let metrics = metric_cache.metrics_for(prepared_bounds)?;
         if renderer_mode.uses_smooth_scene() {
             // Normal runs pass None here and keep their roam-driven depth.
-            let plan = crate::round::smooth::try_build_round_smooth_scene_plan_with_options(
+            let plan = crate::round::smooth::try_build_round_smooth_scene_plan_with_grid_points(
                 vm,
                 now,
                 metrics.grid_cols,
@@ -725,6 +725,7 @@ fn prepare_companion_frame_at(
                         prepared_bounds.height_f64 as f32,
                     ]),
                 },
+                Some(appkit_smooth_grid_point_geometry(metrics)),
             )
             .map_err(|err| match err {
                 SmoothScenePlanError::MissingPetBody => {
@@ -4171,6 +4172,18 @@ pub(super) struct CompanionGridMetrics {
     pub origin_y: f64,
 }
 
+fn appkit_smooth_grid_point_geometry(
+    metrics: CompanionGridMetrics,
+) -> crate::round::smooth::SmoothGridPointGeometry {
+    crate::round::smooth::SmoothGridPointGeometry {
+        cell_extent_points: [metrics.cell_w as f32, metrics.cell_h as f32],
+        row_zero_bottom_left_y_up_points: [
+            metrics.origin_x as f32,
+            (metrics.origin_y - metrics.cell_h) as f32,
+        ],
+    }
+}
+
 /// Target number of columns across the view's short axis.
 ///
 /// **TUNABLE** — the pet is PET_W=13 of these columns; FEWER cols = bigger
@@ -4864,7 +4877,7 @@ fn prop_shadow_field_rgba(
     let mut rgba = vec![0_u8; pixel_count.checked_mul(4)?];
     let row_stride = usize::try_from(target.pixel_width).ok()?.checked_mul(4)?;
     for row in 0..target.pixel_height {
-        let point_y = bounds.origin.y + bounds.size.height - (f64::from(row) + 0.5) / backing_scale;
+        let point_y = bounds.origin.y + (f64::from(row) + 0.5) / backing_scale;
         for col in 0..target.pixel_width {
             let point_x = bounds.origin.x + (f64::from(col) + 0.5) / backing_scale;
             let coverage = crate::presentation::props::prop_shadow_union_coverage(
@@ -5244,9 +5257,9 @@ mod tests {
         .unwrap();
         let tint = SmoothRgba8 { r: 48, g: 52, b: 62, a: 255 };
         let target = PreparedAppKitBitmapTarget {
-            logical_size: NSSize::new(32.0, 32.0),
-            pixel_width: 32,
-            pixel_height: 32,
+            logical_size: NSSize::new(64.0, 64.0),
+            pixel_width: 64,
+            pixel_height: 64,
         };
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), target.logical_size);
         let once = prop_shadow_field_rgba(
@@ -5266,6 +5279,36 @@ mod tests {
 
         assert!(once.chunks_exact(4).any(|pixel| pixel[3] > 0));
         assert_eq!(once, twice);
+        let alpha_at = |rgba: &[u8], x: usize, y: usize| rgba[(y * 64 + x) * 4 + 3];
+        assert!(alpha_at(&once, 11, 16) > alpha_at(&once, 11, 47));
+    }
+
+    #[test]
+    fn appkit_prop_shadow_origin_matches_top_row_cell_point_with_centered_grid() {
+        let metrics = CompanionGridMetrics {
+            font_size: 10.0,
+            cell_w: 4.25,
+            cell_h: 7.5,
+            grid_cols: 36,
+            grid_rows: 18,
+            origin_x: 3.25,
+            origin_y: 98.75,
+        };
+        let origin = crate::round::smooth::prop_shadow_source_origin_y_up_points(
+            [3.0, 2.0, 1.0, 2.0],
+            SmoothPoint::default(),
+            appkit_smooth_grid_point_geometry(metrics),
+        );
+        let expected = cell_to_point(
+            3,
+            2,
+            metrics.cell_w,
+            metrics.cell_h,
+            metrics.origin_x,
+            metrics.origin_y,
+        );
+
+        assert_eq!(origin, [expected.0 as f32, expected.1 as f32]);
     }
 
     #[test]

@@ -76,6 +76,12 @@ pub struct SmoothSceneBuildOptions {
     pub viewport_points: Option<[f32; 2]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SmoothGridPointGeometry {
+    pub(crate) cell_extent_points: [f32; 2],
+    pub(crate) row_zero_bottom_left_y_up_points: [f32; 2],
+}
+
 pub fn try_build_round_smooth_scene_plan(
     vm: &WatchViewModel,
     now: time::OffsetDateTime,
@@ -104,6 +110,22 @@ pub fn try_build_round_smooth_scene_plan_with_options(
     motion: &CompanionMotion,
     elapsed_ms: u64,
     options: SmoothSceneBuildOptions,
+) -> std::result::Result<SmoothCompanionScenePlan, SmoothScenePlanError> {
+    try_build_round_smooth_scene_plan_with_grid_points(
+        vm, now, grid_cols, grid_rows, motion, elapsed_ms, options, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Private AppKit metrics seam preserves the public builder contract.
+pub(crate) fn try_build_round_smooth_scene_plan_with_grid_points(
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+    grid_cols: u16,
+    grid_rows: u16,
+    motion: &CompanionMotion,
+    elapsed_ms: u64,
+    options: SmoothSceneBuildOptions,
+    grid_points: Option<SmoothGridPointGeometry>,
 ) -> std::result::Result<SmoothCompanionScenePlan, SmoothScenePlanError> {
     let (vm, layout, placement) =
         build_round_pet_layout_with_placement(vm, now, grid_cols, grid_rows, motion);
@@ -150,6 +172,8 @@ pub fn try_build_round_smooth_scene_plan_with_options(
     let viewport_points = options
         .viewport_points
         .unwrap_or([f32::from(grid_cols), f32::from(grid_rows) * 2.0]);
+    let prop_shadow_grid_points =
+        validated_prop_shadow_grid_points(grid_points, viewport_points, grid_cols, grid_rows)?;
     let mut motion_projection = placement.motion_projection;
     motion_projection.bob_offset_y_cells = crate::round::motion::round_companion_bob(elapsed_ms);
     let depth_placement = crate::round::placement::resolve_round_depth_placement(
@@ -431,10 +455,7 @@ pub fn try_build_round_smooth_scene_plan_with_options(
     }
 
     if let Some(bed) = tank_bed.as_ref() {
-        let cell_extent_points = [
-            viewport_points[0] / f32::from(grid_cols),
-            viewport_points[1] / f32::from(grid_rows),
-        ];
+        let cell_extent_points = prop_shadow_grid_points.cell_extent_points;
         let translation_for = |pet_layer| {
             let role = match pet_layer {
                 crate::game::habitat::HabitatPetLayer::Background
@@ -451,7 +472,7 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         let mut shadows = Vec::new();
         for source in prop_shadow_sources {
             let translation = translation_for(source.pet_layer);
-            let [x, y, width, height] = source.bounds_cells;
+            let [_, _, width, height] = source.bounds_cells;
             let resolved = resolve_prop_shadow(PropShadowResolveInput {
                 profile: source.profile,
                 visible: true,
@@ -463,13 +484,11 @@ pub fn try_build_round_smooth_scene_plan_with_options(
                 ],
                 cell_extent_points,
                 contact_strength: source.contact_strength,
-                origin_y_up_points: [
-                    (x + translation.x) * cell_extent_points[0],
-                    viewport_points[1]
-                        - y * cell_extent_points[1]
-                        - cell_extent_points[1]
-                        - translation.y * cell_extent_points[1],
-                ],
+                origin_y_up_points: prop_shadow_source_origin_y_up_points(
+                    source.bounds_cells,
+                    translation,
+                    prop_shadow_grid_points,
+                ),
             })
             .map_err(|_| SmoothScenePlanError::InvalidPropShadow)?;
             if resolved.contact_strength > 0.0 || resolved.cast.is_some() {
@@ -538,6 +557,55 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         privacy: SmoothCompanionPrivacyClaims::external_companion(),
         classic_flatten_compat: SmoothClassicFlattenCompat::UniformPortholeRecolor { grid_rows },
     })
+}
+
+fn validated_prop_shadow_grid_points(
+    provided: Option<SmoothGridPointGeometry>,
+    viewport_points: [f32; 2],
+    grid_cols: u16,
+    grid_rows: u16,
+) -> Result<SmoothGridPointGeometry, SmoothScenePlanError> {
+    let geometry = if let Some(provided) = provided {
+        provided
+    } else {
+        if grid_cols == 0 || grid_rows == 0 {
+            return Err(SmoothScenePlanError::InvalidPropShadow);
+        }
+        let cell_extent_points = [
+            viewport_points[0] / f32::from(grid_cols),
+            viewport_points[1] / f32::from(grid_rows),
+        ];
+        SmoothGridPointGeometry {
+            cell_extent_points,
+            row_zero_bottom_left_y_up_points: [0.0, viewport_points[1] - cell_extent_points[1]],
+        }
+    };
+    if geometry
+        .cell_extent_points
+        .into_iter()
+        .any(|value| !value.is_finite() || value <= 0.0)
+        || geometry
+            .row_zero_bottom_left_y_up_points
+            .into_iter()
+            .any(|value| !value.is_finite())
+    {
+        return Err(SmoothScenePlanError::InvalidPropShadow);
+    }
+    Ok(geometry)
+}
+
+pub(crate) fn prop_shadow_source_origin_y_up_points(
+    bounds_cells: [f32; 4],
+    translation_y_down_cells: SmoothPoint,
+    grid_points: SmoothGridPointGeometry,
+) -> [f32; 2] {
+    let [x, y, _, _] = bounds_cells;
+    [
+        grid_points.row_zero_bottom_left_y_up_points[0]
+            + (x + translation_y_down_cells.x) * grid_points.cell_extent_points[0],
+        grid_points.row_zero_bottom_left_y_up_points[1]
+            - (y + translation_y_down_cells.y) * grid_points.cell_extent_points[1],
+    ]
 }
 
 fn tank_bed_layer(
