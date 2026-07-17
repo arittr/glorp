@@ -427,6 +427,7 @@ fn render_pixel_artifact_with_reference(
         art_reference: &art_reference,
         viewport: PixelViewport::companion_default(),
         now,
+        reduce_motion: false,
         state: &mut state,
     });
     (
@@ -484,6 +485,7 @@ fn render_pixel_artifact_with_provider(
         art_reference: &art_reference,
         viewport: PixelViewport::companion_default(),
         now,
+        reduce_motion: false,
         state: &mut state,
     });
     (

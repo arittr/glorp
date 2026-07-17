@@ -41,6 +41,7 @@ fn draw_scene_consumes_only_the_last_prepared_frame() {
 #[test]
 fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
     let behind = [
+        SmoothAppKitPaintStep::StatisticsRearShadow,
         SmoothAppKitPaintStep::WorldBeforeStatistics,
         SmoothAppKitPaintStep::PetFront,
         SmoothAppKitPaintStep::StatisticsEcho,
@@ -54,6 +55,7 @@ fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
         SmoothAppKitPaintStep::Dim,
     ];
     let in_front = [
+        SmoothAppKitPaintStep::StatisticsRearShadow,
         SmoothAppKitPaintStep::WorldBeforeStatistics,
         SmoothAppKitPaintStep::StatisticsEcho,
         SmoothAppKitPaintStep::StatisticsPrimary,
@@ -67,6 +69,7 @@ fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
         SmoothAppKitPaintStep::Dim,
     ];
     let interacting = [
+        SmoothAppKitPaintStep::StatisticsRearShadow,
         SmoothAppKitPaintStep::WorldBeforeStatistics,
         SmoothAppKitPaintStep::StatisticsEcho,
         SmoothAppKitPaintStep::PetFront,
@@ -94,6 +97,11 @@ fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
     ] {
         let composition = CompanionDepthComposition::resolve(depth).unwrap();
         assert_eq!(composition.pet_statistics_order, expected_order);
+        assert_eq!(
+            expected_schedule.first(),
+            Some(&SmoothAppKitPaintStep::StatisticsRearShadow),
+            "the rear-wall statistics projection must be the first Smooth paint step"
+        );
         assert_eq!(
             smooth_appkit_paint_schedule(composition),
             expected_schedule,

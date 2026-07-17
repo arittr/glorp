@@ -5,6 +5,8 @@ use super::raster::{alpha_blend_pixel, fill_circle, fill_ellipse, fill_rect};
 use super::scene::PixelPetScene;
 use crate::pet::generation::Species;
 
+const PIXEL_PET_RIM_RADIUS: u32 = 1;
+
 #[derive(Debug, Clone)]
 pub struct PixelRendererState {
     pub(crate) start: time::OffsetDateTime,
@@ -32,6 +34,7 @@ pub struct PixelRendererTick<'a> {
     pub art_reference: &'a PixelPetArtReference,
     pub viewport: PixelViewport,
     pub now: time::OffsetDateTime,
+    pub reduce_motion: bool,
     pub state: &'a mut PixelRendererState,
 }
 
@@ -43,23 +46,134 @@ pub fn render_pixel_frame(tick: PixelRendererTick<'_>) -> PixelFrame {
         tick.now,
     );
     let mut frame = PixelFrame::transparent(tick.viewport);
-    let cx =
-        i16::try_from(tick.viewport.logical_width / 2).unwrap() + scene.wander_x.round() as i16;
-    let cy =
-        i16::try_from(tick.viewport.logical_height / 2).unwrap() + scene.breath_y.round() as i16;
-    draw_shadow(&mut frame, cx, cy + scene.body_ry + 6, scene.body_rx);
-    if tick.art_reference.occupied_cells.is_empty() {
-        draw_fallback_body(&mut frame, tick.input, &scene, cx, cy);
-        draw_fallback_face(&mut frame, tick.input, &scene, cx, cy);
-        draw_fallback_accents(&mut frame, tick.input, &scene, cx, cy);
-    } else {
-        draw_reference_cells(&mut frame, tick.input, &scene, tick.art_reference, cx, cy);
-        if tick.art_reference.role_count(PixelArtRole::Eye) == 0 {
-            draw_fallback_face(&mut frame, tick.input, &scene, cx, cy);
-        }
+    let (cx, cy) = pixel_scene_center(tick.viewport, &scene);
+    let body_alpha = pixel_body_occupancy_alpha(
+        tick.viewport,
+        tick.input,
+        &scene,
+        tick.art_reference,
+        cx,
+        cy,
+    );
+    if let Some(rim_alpha) = pixel_rim_alpha(
+        &body_alpha,
+        tick.viewport,
+        scene.pulse_alpha,
+        tick.reduce_motion,
+    ) {
+        draw_pixel_rim(&mut frame, &rim_alpha, tick.input.mood);
     }
+    draw_shadow(&mut frame, cx, cy + scene.body_ry + 6, scene.body_rx);
+    draw_pixel_pet_foreground(&mut frame, tick.input, &scene, tick.art_reference, cx, cy);
     clear_outside_round_aperture(&mut frame);
     frame
+}
+
+fn pixel_scene_center(viewport: PixelViewport, scene: &PixelPetScene) -> (i16, i16) {
+    (
+        i16::try_from(viewport.logical_width / 2).unwrap() + scene.wander_x.round() as i16,
+        i16::try_from(viewport.logical_height / 2).unwrap() + scene.breath_y.round() as i16,
+    )
+}
+
+fn draw_pixel_pet_foreground(
+    frame: &mut PixelFrame,
+    input: &PixelPetInput,
+    scene: &PixelPetScene,
+    reference: &PixelPetArtReference,
+    cx: i16,
+    cy: i16,
+) {
+    if reference.occupied_cells.is_empty() {
+        draw_fallback_body(frame, input, scene, cx, cy);
+        draw_fallback_face(frame, input, scene, cx, cy);
+        draw_fallback_accents(frame, input, scene, cx, cy);
+    } else {
+        draw_reference_cells(frame, input, scene, reference, cx, cy);
+        if reference.role_count(PixelArtRole::Eye) == 0 {
+            draw_fallback_face(frame, input, scene, cx, cy);
+        }
+    }
+}
+
+fn pixel_body_occupancy_alpha(
+    viewport: PixelViewport,
+    input: &PixelPetInput,
+    scene: &PixelPetScene,
+    reference: &PixelPetArtReference,
+    cx: i16,
+    cy: i16,
+) -> Vec<u8> {
+    let mut coverage = PixelFrame::transparent(viewport);
+    if reference.occupied_cells.is_empty() {
+        draw_fallback_body(&mut coverage, input, scene, cx, cy);
+    } else {
+        draw_reference_cells(&mut coverage, input, scene, reference, cx, cy);
+    }
+    coverage.pixels.into_iter().map(|pixel| pixel.a).collect()
+}
+
+fn pixel_rim_alpha(
+    body_alpha: &[u8],
+    viewport: PixelViewport,
+    activity_opacity: f32,
+    reduce_motion: bool,
+) -> Option<Vec<u8>> {
+    let style =
+        crate::presentation::companion_effects::pet_rim_style(activity_opacity, reduce_motion);
+    if !style.enabled {
+        return None;
+    }
+    let radius = PIXEL_PET_RIM_RADIUS;
+    let mut rim = crate::presentation::companion_effects::exterior_dilated_alpha(
+        body_alpha,
+        u32::from(viewport.logical_width),
+        u32::from(viewport.logical_height),
+        radius,
+    )?;
+    for (index, alpha) in rim.iter_mut().enumerate() {
+        let x = u16::try_from(index % usize::from(viewport.logical_width)).ok()?;
+        let y = u16::try_from(index / usize::from(viewport.logical_width)).ok()?;
+        let cx = i32::from(viewport.logical_width / 2);
+        let cy = i32::from(viewport.logical_height / 2);
+        let radius = i32::from(viewport.logical_width.min(viewport.logical_height) / 2);
+        let dx = i32::from(x) - cx;
+        let dy = i32::from(y) - cy;
+        if dx * dx + dy * dy > radius * radius {
+            *alpha = 0;
+        } else {
+            *alpha = if *alpha == 0 {
+                0
+            } else {
+                ((f32::from(*alpha) / 255.0) * style.alpha * 255.0)
+                    .round()
+                    .max(1.0) as u8
+            };
+        }
+    }
+    Some(rim)
+}
+
+fn draw_pixel_rim(frame: &mut PixelFrame, rim_alpha: &[u8], mood: crate::game::metabolism::Mood) {
+    let color = crate::round::hud::mood_rim_color(mood);
+    for (index, alpha) in rim_alpha.iter().copied().enumerate() {
+        if alpha == 0 {
+            continue;
+        }
+        let x = i16::try_from(index % usize::from(frame.width)).unwrap();
+        let y = i16::try_from(index / usize::from(frame.width)).unwrap();
+        alpha_blend_pixel(
+            frame,
+            x,
+            y,
+            Rgba8 {
+                r: (color.0 * 255.0).round() as u8,
+                g: (color.1 * 255.0).round() as u8,
+                b: (color.2 * 255.0).round() as u8,
+                a: alpha,
+            },
+        );
+    }
 }
 
 fn draw_shadow(frame: &mut PixelFrame, cx: i16, cy: i16, body_rx: i16) {
@@ -416,6 +530,7 @@ mod tests {
             art_reference: &reference,
             viewport: PixelViewport::companion_default(),
             now,
+            reduce_motion: false,
             state: &mut state,
         });
         let center_x = i16::try_from(frame.width / 2).unwrap() + scene.wander_x.round() as i16;
@@ -429,6 +544,213 @@ mod tests {
             probe,
             Rgba8::TRANSPARENT,
             "a broad idle ellipse leaked outside the body, shadow, and future narrow rim band"
+        );
+    }
+
+    #[test]
+    fn pixel_rim_is_exterior_to_rendered_body_and_bounded_by_style_radius() {
+        let now = datetime!(2026-07-08 12:00 UTC);
+        let input = PixelPetInput::from_watch_view_model(&WatchViewModel::fixture(), now);
+        let reference = empty_reference(&input);
+        let state = PixelRendererState::new(&input, now);
+        let scene = PixelPetScene::from_input_and_reference(&input, &reference, &state, now);
+        let center = pixel_scene_center(PixelViewport::companion_default(), &scene);
+        let body_alpha = pixel_body_occupancy_alpha(
+            PixelViewport::companion_default(),
+            &input,
+            &scene,
+            &reference,
+            center.0,
+            center.1,
+        );
+        let viewport = PixelViewport::companion_default();
+        let rim_alpha = pixel_rim_alpha(&body_alpha, viewport, scene.pulse_alpha, false)
+            .expect("the body mask must produce an exterior rim");
+        let mut expected = crate::presentation::companion_effects::exterior_dilated_alpha(
+            &body_alpha,
+            u32::from(viewport.logical_width),
+            u32::from(viewport.logical_height),
+            PIXEL_PET_RIM_RADIUS,
+        )
+        .expect("the fixed logical Pixel rim radius must be valid");
+        let style = crate::presentation::companion_effects::pet_rim_style(scene.pulse_alpha, false);
+        for alpha in &mut expected {
+            *alpha = if *alpha == 0 {
+                0
+            } else {
+                ((f32::from(*alpha) / 255.0) * style.alpha * 255.0)
+                    .round()
+                    .max(1.0) as u8
+            };
+        }
+
+        assert_eq!(rim_alpha, expected);
+        for (body, rim) in body_alpha.iter().zip(&rim_alpha) {
+            assert!(
+                *rim == 0 || *body == 0,
+                "the rim must not recolor body interior"
+            );
+        }
+    }
+
+    #[test]
+    fn pixel_rim_paints_before_shadow_and_pet() {
+        let now = datetime!(2026-07-08 12:00 UTC);
+        let input = PixelPetInput::from_watch_view_model(&WatchViewModel::fixture(), now);
+        let reference = empty_reference(&input);
+        let mut state = PixelRendererState::new(&input, now);
+        let scene = PixelPetScene::from_input_and_reference(&input, &reference, &state, now);
+        let viewport = PixelViewport::companion_default();
+        let center = pixel_scene_center(viewport, &scene);
+        let body_alpha =
+            pixel_body_occupancy_alpha(viewport, &input, &scene, &reference, center.0, center.1);
+        let rim_alpha = pixel_rim_alpha(&body_alpha, viewport, scene.pulse_alpha, false)
+            .expect("the body mask must produce an exterior rim");
+
+        let rendered = render_pixel_frame(PixelRendererTick {
+            input: &input,
+            art_reference: &reference,
+            viewport,
+            now,
+            reduce_motion: false,
+            state: &mut state,
+        });
+        let mut expected = PixelFrame::transparent(viewport);
+        draw_pixel_rim(&mut expected, &rim_alpha, input.mood);
+        draw_shadow(
+            &mut expected,
+            center.0,
+            center.1 + scene.body_ry + 6,
+            scene.body_rx,
+        );
+        draw_pixel_pet_foreground(
+            &mut expected,
+            &input,
+            &scene,
+            &reference,
+            center.0,
+            center.1,
+        );
+        clear_outside_round_aperture(&mut expected);
+
+        let mut wrong_order = PixelFrame::transparent(viewport);
+        draw_shadow(
+            &mut wrong_order,
+            center.0,
+            center.1 + scene.body_ry + 6,
+            scene.body_rx,
+        );
+        draw_pixel_rim(&mut wrong_order, &rim_alpha, input.mood);
+        draw_pixel_pet_foreground(
+            &mut wrong_order,
+            &input,
+            &scene,
+            &reference,
+            center.0,
+            center.1,
+        );
+        clear_outside_round_aperture(&mut wrong_order);
+
+        assert_ne!(
+            expected, wrong_order,
+            "the fixture must include rim pixels that the shadow can cover"
+        );
+        assert_eq!(
+            rendered.changed_pixel_count(&expected),
+            0,
+            "the rim must paint behind the ground shadow and pet foreground"
+        );
+    }
+
+    #[test]
+    fn pixel_active_rim_reduce_motion_removes_only_activity_alpha_bonus() {
+        let now = datetime!(2026-07-08 12:00 UTC);
+        let mut active = PixelPetInput::from_watch_view_model(&WatchViewModel::fixture(), now);
+        active.pulse.active = true;
+        active.pulse.age_ms = 0;
+        let reference = empty_reference(&active);
+        let standard_state = PixelRendererState::new(&active, now);
+        let reduced_state = PixelRendererState::new(&active, now);
+        let standard_scene =
+            PixelPetScene::from_input_and_reference(&active, &reference, &standard_state, now);
+        let reduced_scene =
+            PixelPetScene::from_input_and_reference(&active, &reference, &reduced_state, now);
+        let viewport = PixelViewport::companion_default();
+        let standard_center = pixel_scene_center(viewport, &standard_scene);
+        let reduced_center = pixel_scene_center(viewport, &reduced_scene);
+        assert_eq!(standard_center, reduced_center);
+        let standard_body = pixel_body_occupancy_alpha(
+            viewport,
+            &active,
+            &standard_scene,
+            &reference,
+            standard_center.0,
+            standard_center.1,
+        );
+        let reduced_body = pixel_body_occupancy_alpha(
+            viewport,
+            &active,
+            &reduced_scene,
+            &reference,
+            reduced_center.0,
+            reduced_center.1,
+        );
+        let standard_rim =
+            pixel_rim_alpha(&standard_body, viewport, standard_scene.pulse_alpha, false).unwrap();
+        let reduced_rim =
+            pixel_rim_alpha(&reduced_body, viewport, reduced_scene.pulse_alpha, true).unwrap();
+
+        assert_eq!(
+            standard_rim
+                .iter()
+                .map(|alpha| *alpha > 0)
+                .collect::<Vec<_>>(),
+            reduced_rim
+                .iter()
+                .map(|alpha| *alpha > 0)
+                .collect::<Vec<_>>(),
+            "Reduce Motion must keep the active rim footprint fixed"
+        );
+        assert!(
+            standard_rim.iter().copied().max() > reduced_rim.iter().copied().max(),
+            "Reduce Motion must remove only the active rim alpha bonus"
+        );
+
+        let mut standard_state = PixelRendererState::new(&active, now);
+        let standard_frame = render_pixel_frame(PixelRendererTick {
+            input: &active,
+            art_reference: &reference,
+            viewport,
+            now,
+            reduce_motion: false,
+            state: &mut standard_state,
+        });
+        let mut reduced_state = PixelRendererState::new(&active, now);
+        let reduced_frame = render_pixel_frame(PixelRendererTick {
+            input: &active,
+            art_reference: &reference,
+            viewport,
+            now,
+            reduce_motion: true,
+            state: &mut reduced_state,
+        });
+        let changed_pixels = standard_frame
+            .pixels
+            .iter()
+            .zip(&reduced_frame.pixels)
+            .enumerate()
+            .filter_map(|(index, (standard, reduced))| (standard != reduced).then_some(index))
+            .collect::<Vec<_>>();
+
+        assert!(
+            !changed_pixels.is_empty(),
+            "the rendered Pixel frame must receive the Reduce Motion flag"
+        );
+        assert!(
+            changed_pixels
+                .iter()
+                .all(|index| standard_rim[*index] > 0 && reduced_rim[*index] > 0),
+            "Reduce Motion may change only active rim alpha, not the pet, shadow, or rim extent"
         );
     }
 }

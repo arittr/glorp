@@ -26,6 +26,7 @@ fn frame_for_with_reference(
         art_reference: &reference,
         viewport: PixelViewport::companion_default(),
         now,
+        reduce_motion: false,
         state: &mut state,
     });
     (frame, reference)
@@ -42,6 +43,7 @@ fn frame_for(vm: &WatchViewModel, ms: i64) -> glorp::presentation::pixel::PixelF
         art_reference: &reference,
         viewport: PixelViewport::companion_default(),
         now,
+        reduce_motion: false,
         state: &mut state,
     })
 }
@@ -60,6 +62,7 @@ fn frame_for_reference(
         art_reference: &reference,
         viewport: PixelViewport::companion_default(),
         now,
+        reduce_motion: false,
         state: &mut state,
     })
 }
@@ -149,6 +152,7 @@ fn frame_for_procedural_fallback(
         art_reference: &reference,
         viewport: PixelViewport::companion_default(),
         now,
+        reduce_motion: false,
         state: &mut state,
     })
 }
@@ -268,6 +272,7 @@ fn pixel_renderer_is_deterministic_for_same_input_sequence() {
             art_reference: &reference_a,
             viewport: PixelViewport::companion_default(),
             now,
+            reduce_motion: false,
             state: &mut state_a,
         });
         let frame_b = render_pixel_frame(PixelRendererTick {
@@ -275,6 +280,7 @@ fn pixel_renderer_is_deterministic_for_same_input_sequence() {
             art_reference: &reference_b,
             viewport: PixelViewport::companion_default(),
             now,
+            reduce_motion: false,
             state: &mut state_b,
         });
         assert_eq!(frame_a, frame_b);

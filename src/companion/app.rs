@@ -185,8 +185,9 @@ enum PreparedRendererFrame {
         draw_order: Vec<usize>,
         composition: CompanionDepthComposition,
         passes: PreparedSmoothDepthPasses,
-        paint_schedule: [SmoothAppKitPaintStep; 11],
+        paint_schedule: [SmoothAppKitPaintStep; 12],
         appkit_hud_volume: Option<Box<PreparedAppKitHudVolume>>,
+        appkit_pet_rim: Option<Box<PreparedAppKitPetRim>>,
         appkit_prop_shadow_field: Option<Box<PreparedAppKitPropShadowField>>,
     },
 }
@@ -209,7 +210,30 @@ struct PreparedAppKitHudLine {
 struct PreparedAppKitHudVolume {
     lines: [PreparedAppKitHudLine; 3],
     primary_coverage: Retained<NSImage>,
+    rear_wall_projection: Option<Retained<NSImage>>,
     bitmap_target: PreparedAppKitBitmapTarget,
+}
+
+#[derive(Clone)]
+struct PreparedAppKitPetRim {
+    image: Retained<NSImage>,
+    bounds: NSRect,
+}
+
+impl std::fmt::Debug for PreparedAppKitPetRim {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedAppKitPetRim(<private>)")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AppKitPetRimPreparation<'a> {
+    metrics: CompanionGridMetrics,
+    aperture: &'a RoundAperture,
+    bitmap_target: PreparedAppKitBitmapTarget,
+    backing_scale: f64,
+    style: crate::presentation::companion_effects::PetRimStyle,
+    tint: RoundColor,
 }
 
 #[derive(Clone)]
@@ -255,6 +279,9 @@ impl Drop for CurrentGraphicsContextRestore {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PreparedSmoothDepthPasses {
     world_before_statistics: Vec<usize>,
+    /// The private body-only coverage source used for the AppKit rim. It never
+    /// includes attached performance paint or any receiving-surface layer.
+    pet_body: Vec<usize>,
     pet_front: Vec<usize>,
     foreground: Vec<usize>,
 }
@@ -278,6 +305,7 @@ enum SmoothDepthBucket {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmoothAppKitPaintStep {
+    StatisticsRearShadow,
     WorldBeforeStatistics,
     StatisticsEcho,
     PetFront,
@@ -291,7 +319,7 @@ pub enum SmoothAppKitPaintStep {
 
 pub fn smooth_appkit_paint_schedule(
     composition: CompanionDepthComposition,
-) -> [SmoothAppKitPaintStep; 11] {
+) -> [SmoothAppKitPaintStep; 12] {
     let crossing = if composition.pet_effective_z <= composition.statistics_interaction.start_z {
         [
             SmoothAppKitPaintStep::PetFront,
@@ -315,6 +343,7 @@ pub fn smooth_appkit_paint_schedule(
         ]
     };
     [
+        SmoothAppKitPaintStep::StatisticsRearShadow,
         SmoothAppKitPaintStep::WorldBeforeStatistics,
         crossing[0],
         crossing[1],
@@ -331,11 +360,15 @@ pub fn smooth_appkit_paint_schedule(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SmoothPetFrontPaintStep {
+    Rim,
     Layers,
 }
 
-const fn smooth_appkit_pet_front_paint_schedule() -> [SmoothPetFrontPaintStep; 1] {
-    [SmoothPetFrontPaintStep::Layers]
+const fn smooth_appkit_pet_front_paint_schedule() -> [SmoothPetFrontPaintStep; 2] {
+    [
+        SmoothPetFrontPaintStep::Rim,
+        SmoothPetFrontPaintStep::Layers,
+    ]
 }
 
 #[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
@@ -502,7 +535,9 @@ enum CompanionFramePreparationError {
     InvalidBounds,
     MissingGridMetrics,
     AppKitHudVolumeUnavailable,
+    AppKitPetRimUnavailable,
     SmoothMissingPetBody,
+    SmoothPrivatePetCoverageUnavailable,
     SmoothInvalidParallaxGeometry,
     SmoothInvalidDepth,
     SmoothInvalidLayerGeometry,
@@ -517,7 +552,11 @@ impl CompanionFramePreparationError {
             CompanionFramePreparationError::AppKitHudVolumeUnavailable => {
                 "appkit-hud-volume-unavailable"
             }
+            CompanionFramePreparationError::AppKitPetRimUnavailable => "appkit-pet-rim-unavailable",
             CompanionFramePreparationError::SmoothMissingPetBody => "smooth-missing-pet-body",
+            CompanionFramePreparationError::SmoothPrivatePetCoverageUnavailable => {
+                "smooth-private-pet-coverage-unavailable"
+            }
             CompanionFramePreparationError::SmoothInvalidParallaxGeometry => {
                 "smooth-invalid-parallax-geometry"
             }
@@ -634,6 +673,7 @@ fn prepare_companion_frame(
     smooth_started_at: Option<Instant>,
     smooth_semantic_art_tick_index: u64,
     redacts_live_hud: bool,
+    reduce_motion: bool,
     force_dim_overlay: bool,
     bounds: NSRect,
     appkit_backing_scale: Option<f64>,
@@ -652,6 +692,7 @@ fn prepare_companion_frame(
         pixel_frame,
         smooth_semantic_art_tick_index,
         redacts_live_hud,
+        reduce_motion,
         force_dim_overlay,
         bounds,
         appkit_backing_scale,
@@ -670,6 +711,7 @@ fn prepare_companion_frame_at(
     pixel_frame: Option<&PixelFrame>,
     smooth_semantic_art_tick_index: u64,
     redacts_live_hud: bool,
+    reduce_motion: bool,
     force_dim_overlay: bool,
     bounds: NSRect,
     appkit_backing_scale: Option<f64>,
@@ -744,7 +786,7 @@ fn prepare_companion_frame_at(
                 }
             })?;
             let draw_order = smooth_layer_draw_order(&plan);
-            let passes = prepare_smooth_depth_passes(&plan, &draw_order);
+            let passes = prepare_smooth_depth_passes(&plan, &draw_order)?;
             let composition = CompanionDepthComposition::resolve(plan.pet.effective_depth)
                 .map_err(|_| CompanionFramePreparationError::SmoothInvalidDepth)?;
             let paint_schedule = smooth_appkit_paint_schedule(composition);
@@ -762,9 +804,37 @@ fn prepare_companion_frame_at(
             };
             let appkit_hud_volume = if let Some(target) = appkit_target {
                 Some(Box::new(
-                    prepare_appkit_hud_volume(bounds, &aperture, &hud, metrics.font_size, target)
-                        .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
+                    prepare_appkit_hud_volume(
+                        bounds,
+                        &aperture,
+                        &hud,
+                        metrics,
+                        target,
+                        scene.room.biome,
+                        redacts_live_hud,
+                    )
+                    .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
                 ))
+            } else {
+                None
+            };
+            let appkit_pet_rim = if let Some(target) = appkit_target {
+                prepare_appkit_pet_rim(
+                    &plan,
+                    &passes,
+                    AppKitPetRimPreparation {
+                        metrics,
+                        aperture: &aperture,
+                        bitmap_target: target,
+                        backing_scale: appkit_backing_scale
+                            .ok_or(CompanionFramePreparationError::AppKitPetRimUnavailable)?,
+                        style: crate::presentation::companion_effects::pet_rim_style(
+                            round_activity_pulse_opacity(scene.halo.activity_pulse),
+                            reduce_motion,
+                        ),
+                        tint: crate::round::hud::mood_rim_color(scene.pet.mood),
+                    },
+                )?
             } else {
                 None
             };
@@ -797,6 +867,7 @@ fn prepare_companion_frame_at(
                 passes,
                 paint_schedule,
                 appkit_hud_volume,
+                appkit_pet_rim,
                 appkit_prop_shadow_field,
             }
         } else {
@@ -913,6 +984,7 @@ pub(super) fn prepare_capacity_fixture_frame(
         None,
         0,
         true,
+        false,
         dimmed,
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
         None,
@@ -946,7 +1018,6 @@ struct AppState {
     scene_semantic_dirty: bool,
     #[cfg(feature = "retained-renderer")]
     scene_surface_transition: SceneSurfaceTransitionState,
-    #[cfg(feature = "retained-renderer")]
     reduce_motion: bool,
     #[cfg(feature = "retained-renderer")]
     scene_progress: SceneProgressPolicy,
@@ -1687,7 +1758,6 @@ pub fn run(request: CompanionRendererRequest, review: CompanionReviewOptions) ->
             scene_semantic_dirty: true,
             #[cfg(feature = "retained-renderer")]
             scene_surface_transition: SceneSurfaceTransitionState::default(),
-            #[cfg(feature = "retained-renderer")]
             reduce_motion: unsafe {
                 NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
             },
@@ -2630,6 +2700,7 @@ fn prepare_current_frame_from_state() {
                 smooth_started_at,
                 smooth_semantic_art_tick_index,
                 redacts_live_hud,
+                reduce_motion,
                 force_dim_overlay,
                 metric_cache,
                 ..
@@ -2645,6 +2716,7 @@ fn prepare_current_frame_from_state() {
                 *smooth_started_at,
                 *smooth_semantic_art_tick_index,
                 *redacts_live_hud,
+                *reduce_motion,
                 *force_dim_overlay,
                 bounds,
                 appkit_backing_scale,
@@ -2937,9 +3009,10 @@ fn animate_pet() {
         let state = state.as_mut()?;
         if state.renderer_runtime.effective().is_pixel() {
             let now = time::OffsetDateTime::now_utc();
+            let reduce_motion = state.reduce_motion;
             if let Some(pixel_state) = state.pixel_state.as_mut() {
                 let (pixel_frame, pixel_input) =
-                    render_live_pixel_frame(&state.vm, pixel_state, now);
+                    render_live_pixel_frame(&state.vm, pixel_state, now, reduce_motion);
                 state.pixel_input = Some(pixel_input);
                 state.pixel_frame = Some(pixel_frame);
             }
@@ -3379,6 +3452,7 @@ fn render_live_pixel_frame(
     vm: &WatchViewModel,
     pixel_state: &mut PixelRendererState,
     now: time::OffsetDateTime,
+    reduce_motion: bool,
 ) -> (PixelFrame, PixelPetInput) {
     let (input, request) = PixelPetInput::from_watch_view_model_with_art_request(vm, now);
     let art_reference = pixel_state.art_reference_for(&request);
@@ -3387,6 +3461,7 @@ fn render_live_pixel_frame(
         art_reference: &art_reference,
         viewport: PixelViewport::companion_default(),
         now,
+        reduce_motion,
         state: pixel_state,
     });
     (frame, input)
@@ -3505,11 +3580,26 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                 passes,
                 paint_schedule,
                 appkit_hud_volume,
+                appkit_pet_rim,
                 appkit_prop_shadow_field,
                 ..
             } => {
                 for step in paint_schedule {
                     match *step {
+                        SmoothAppKitPaintStep::StatisticsRearShadow => {
+                            if let Some(volume) = appkit_hud_volume.as_deref() {
+                                if let Some(projection) = volume.rear_wall_projection.as_deref() {
+                                    draw_appkit_image(
+                                        projection,
+                                        NSRect::new(
+                                            NSPoint::new(0.0, 0.0),
+                                            volume.bitmap_target.logical_size,
+                                        ),
+                                        1.0,
+                                    );
+                                }
+                            }
+                        }
                         SmoothAppKitPaintStep::WorldBeforeStatistics => appkit_blit_smooth_plan(
                             plan,
                             &passes.world_before_statistics,
@@ -3517,9 +3607,13 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                             &aperture,
                             appkit_prop_shadow_field.as_deref(),
                         ),
-                        SmoothAppKitPaintStep::PetFront => {
-                            paint_smooth_pet_front(plan, passes, metrics, &aperture)
-                        }
+                        SmoothAppKitPaintStep::PetFront => paint_smooth_pet_front(
+                            plan,
+                            passes,
+                            metrics,
+                            &aperture,
+                            appkit_pet_rim.as_deref(),
+                        ),
                         SmoothAppKitPaintStep::StatisticsEcho => {
                             if let Some(volume) = appkit_hud_volume {
                                 draw_prepared_hud_lines(volume, true);
@@ -3541,6 +3635,7 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                                         metrics,
                                         &aperture,
                                         volume,
+                                        appkit_pet_rim.as_deref(),
                                         composition.statistics_interaction.reveal_mix,
                                     );
                                 }
@@ -3583,9 +3678,15 @@ fn paint_smooth_pet_front(
     passes: &PreparedSmoothDepthPasses,
     metrics: &CompanionGridMetrics,
     aperture: &RoundAperture,
+    appkit_pet_rim: Option<&PreparedAppKitPetRim>,
 ) {
     for step in smooth_appkit_pet_front_paint_schedule() {
         match step {
+            SmoothPetFrontPaintStep::Rim => {
+                if let Some(rim) = appkit_pet_rim {
+                    draw_appkit_image(&rim.image, rim.bounds, 1.0);
+                }
+            }
             SmoothPetFrontPaintStep::Layers => {
                 appkit_blit_smooth_plan(plan, &passes.pet_front, metrics, aperture, None)
             }
@@ -3599,12 +3700,14 @@ fn paint_smooth_statistics_interaction(
     metrics: &CompanionGridMetrics,
     aperture: &RoundAperture,
     hud_volume: &PreparedAppKitHudVolume,
+    appkit_pet_rim: Option<&PreparedAppKitPetRim>,
     reveal_mix: f32,
 ) {
     if !(0.0..=1.0).contains(&reveal_mix) || reveal_mix == 0.0 {
         return;
     }
-    let Some(overlay) = render_masked_pet_front_image(plan, passes, metrics, aperture, hud_volume)
+    let Some(overlay) =
+        render_masked_pet_front_image(plan, passes, metrics, aperture, hud_volume, appkit_pet_rim)
     else {
         return;
     };
@@ -3621,6 +3724,7 @@ fn render_masked_pet_front_image(
     metrics: &CompanionGridMetrics,
     aperture: &RoundAperture,
     hud_volume: &PreparedAppKitHudVolume,
+    appkit_pet_rim: Option<&PreparedAppKitPetRim>,
 ) -> Option<Retained<NSImage>> {
     let bitmap_target = hud_volume.bitmap_target;
     let bounds = NSRect::new(NSPoint::new(0.0, 0.0), bitmap_target.logical_size);
@@ -3628,7 +3732,7 @@ fn render_masked_pet_front_image(
         let rep = allocate_srgb_bitmap_rep(bitmap_target)?;
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
         let restore = CurrentGraphicsContextRestore::install(&context);
-        paint_smooth_pet_front(plan, passes, metrics, aperture);
+        paint_smooth_pet_front(plan, passes, metrics, aperture, appkit_pet_rim);
         hud_volume
             .primary_coverage
             .drawInRect_fromRect_operation_fraction(
@@ -4372,17 +4476,39 @@ fn smooth_depth_bucket(role: SmoothLayerRole) -> SmoothDepthBucket {
 fn prepare_smooth_depth_passes(
     plan: &SmoothCompanionScenePlan,
     draw_order: &[usize],
-) -> PreparedSmoothDepthPasses {
+) -> std::result::Result<PreparedSmoothDepthPasses, CompanionFramePreparationError> {
     let mut passes = PreparedSmoothDepthPasses::default();
     for &index in draw_order {
         match smooth_depth_bucket(plan.layers[index].role) {
             SmoothDepthBucket::WorldBeforeStatistics => passes.world_before_statistics.push(index),
-            SmoothDepthBucket::PetFront => passes.pet_front.push(index),
+            SmoothDepthBucket::PetFront => {
+                if plan.layers[index].role == SmoothLayerRole::PetBody {
+                    passes.pet_body.push(index);
+                }
+                passes.pet_front.push(index);
+            }
             SmoothDepthBucket::Foreground => passes.foreground.push(index),
             SmoothDepthBucket::ScreenReservation => {}
         }
     }
-    passes
+    if passes.pet_body.len() != 1
+        || plan
+            .layers
+            .get(passes.pet_body[0])
+            .is_none_or(|layer| layer.role != SmoothLayerRole::PetBody)
+    {
+        return Err(CompanionFramePreparationError::SmoothPrivatePetCoverageUnavailable);
+    }
+    Ok(passes)
+}
+
+fn round_activity_pulse_opacity(pulse: crate::round::model::RoundActivityPulse) -> f32 {
+    match pulse {
+        crate::round::model::RoundActivityPulse::Quiet => 0.0,
+        crate::round::model::RoundActivityPulse::Recent { age_ms } => {
+            (1.0 - f32::from(age_ms) / 2_000.0).clamp(0.0, 1.0)
+        }
+    }
 }
 
 /// Clip to the round porthole. Scene content never escapes it, whatever graphics
@@ -4866,6 +4992,226 @@ fn nsimage_from_straight_rgba(
     }
 }
 
+fn appkit_bitmap_alpha(
+    bitmap: &NSBitmapImageRep,
+    target: PreparedAppKitBitmapTarget,
+) -> Option<Vec<u8>> {
+    let width = usize::try_from(target.pixel_width).ok()?;
+    let height = usize::try_from(target.pixel_height).ok()?;
+    let packed_row_bytes = width.checked_mul(4)?;
+    unsafe {
+        if bitmap.pixelsWide() != isize::try_from(target.pixel_width).ok()?
+            || bitmap.pixelsHigh() != isize::try_from(target.pixel_height).ok()?
+        {
+            return None;
+        }
+        let row_bytes = usize::try_from(bitmap.bytesPerRow()).ok()?;
+        let data = bitmap.bitmapData();
+        if data.is_null() || row_bytes < packed_row_bytes {
+            return None;
+        }
+        let mut alpha = vec![0; width.checked_mul(height)?];
+        for row in 0..height {
+            for col in 0..width {
+                alpha[row * width + col] = *data.add(row * row_bytes + col * 4 + 3);
+            }
+        }
+        Some(alpha)
+    }
+}
+
+#[cfg(test)]
+fn appkit_image_rgba(image: &NSImage, target: PreparedAppKitBitmapTarget) -> Option<Vec<u8>> {
+    let bounds = NSRect::new(NSPoint::new(0.0, 0.0), target.logical_size);
+    unsafe {
+        let rep = allocate_srgb_bitmap_rep(target)?;
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        let restore = CurrentGraphicsContextRestore::install(&context);
+        image.drawInRect_fromRect_operation_fraction(
+            bounds,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            NSCompositingOperation::Copy,
+            1.0,
+        );
+        context.flushGraphics();
+        drop(restore);
+
+        let width = usize::try_from(target.pixel_width).ok()?;
+        let height = usize::try_from(target.pixel_height).ok()?;
+        let packed_row_bytes = width.checked_mul(4)?;
+        let row_bytes = usize::try_from(rep.bytesPerRow()).ok()?;
+        let data = rep.bitmapData();
+        if data.is_null() || row_bytes < packed_row_bytes {
+            return None;
+        }
+        let mut rgba = vec![0; packed_row_bytes.checked_mul(height)?];
+        for row in 0..height {
+            std::ptr::copy_nonoverlapping(
+                data.add(row * row_bytes),
+                rgba.as_mut_ptr().add(row * packed_row_bytes),
+                packed_row_bytes,
+            );
+        }
+        Some(rgba)
+    }
+}
+
+fn box_blur_alpha_separable(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    radius: u32,
+) -> Option<Vec<u8>> {
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    if source.len() != width.checked_mul(height)? {
+        return None;
+    }
+    let radius = usize::try_from(radius).ok()?;
+    let horizontal_radius = radius.min(width.saturating_sub(1));
+    let vertical_radius = radius.min(height.saturating_sub(1));
+    let mut horizontal = vec![0; source.len()];
+    let mut output = vec![0; source.len()];
+
+    for y in 0..height {
+        for x in 0..width {
+            let left = x.saturating_sub(horizontal_radius);
+            let right = x.saturating_add(horizontal_radius).min(width - 1);
+            let count = u32::try_from(right - left + 1).ok()?;
+            let sum: u32 = source[y * width + left..=y * width + right]
+                .iter()
+                .map(|alpha| u32::from(*alpha))
+                .sum();
+            horizontal[y * width + x] = u8::try_from((sum + count / 2) / count).ok()?;
+        }
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let top = y.saturating_sub(vertical_radius);
+            let bottom = y.saturating_add(vertical_radius).min(height - 1);
+            let count = u32::try_from(bottom - top + 1).ok()?;
+            let sum: u32 = (top..=bottom)
+                .map(|sample_y| u32::from(horizontal[sample_y * width + x]))
+                .sum();
+            output[y * width + x] = u8::try_from((sum + count / 2) / count).ok()?;
+        }
+    }
+    Some(output)
+}
+
+fn physical_pixel_is_inside_aperture(
+    x: usize,
+    y: usize,
+    aperture: &RoundAperture,
+    backing_scale: f64,
+) -> bool {
+    let point_x = (x as f64 + 0.5) / backing_scale;
+    let point_y = (y as f64 + 0.5) / backing_scale;
+    let dx = point_x - f64::from(aperture.center_x);
+    let dy = point_y - f64::from(aperture.center_y);
+    dx.mul_add(dx, dy * dy) <= f64::from(aperture.radius).powi(2)
+}
+
+fn translated_alpha(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    offset_x: i64,
+    offset_y: i64,
+) -> Option<Vec<u8>> {
+    let width_usize = usize::try_from(width).ok()?;
+    let height_usize = usize::try_from(height).ok()?;
+    if source.len() != width_usize.checked_mul(height_usize)? {
+        return None;
+    }
+    let mut translated = vec![0; source.len()];
+    for source_y in 0..height_usize {
+        let destination_y = i64::try_from(source_y).ok()?.checked_add(offset_y)?;
+        if !(0..i64::try_from(height_usize).ok()?).contains(&destination_y) {
+            continue;
+        }
+        for source_x in 0..width_usize {
+            let destination_x = i64::try_from(source_x).ok()?.checked_add(offset_x)?;
+            if !(0..i64::try_from(width_usize).ok()?).contains(&destination_x) {
+                continue;
+            }
+            translated[usize::try_from(destination_y).ok()? * width_usize
+                + usize::try_from(destination_x).ok()?] = source[source_y * width_usize + source_x];
+        }
+    }
+    Some(translated)
+}
+
+fn statistics_rear_shadow_rgba(
+    primary_alpha: &[u8],
+    target: PreparedAppKitBitmapTarget,
+    aperture: &RoundAperture,
+    style: crate::presentation::companion_effects::StatisticsRearShadowStyle,
+    backing_scale: f64,
+    tint: [u8; 3],
+) -> Option<Vec<u8>> {
+    if !backing_scale.is_finite() || backing_scale <= 0.0 {
+        return None;
+    }
+    let blur_radius = (f64::from(style.softness_points) * backing_scale)
+        .round()
+        .max(1.0);
+    if !blur_radius.is_finite() || blur_radius > f64::from(u32::MAX) {
+        return None;
+    }
+    let blurred = box_blur_alpha_separable(
+        primary_alpha,
+        target.pixel_width,
+        target.pixel_height,
+        blur_radius as u32,
+    )?;
+    let offset_x = (f64::from(style.offset_y_up_points[0]) * backing_scale).round();
+    let offset_y = (f64::from(style.offset_y_up_points[1]) * backing_scale).round();
+    if !offset_x.is_finite()
+        || !offset_y.is_finite()
+        || offset_x < i64::MIN as f64
+        || offset_x > i64::MAX as f64
+        || offset_y < i64::MIN as f64
+        || offset_y > i64::MAX as f64
+    {
+        return None;
+    }
+    let shifted = translated_alpha(
+        &blurred,
+        target.pixel_width,
+        target.pixel_height,
+        offset_x as i64,
+        offset_y as i64,
+    )?;
+    let width = usize::try_from(target.pixel_width).ok()?;
+    let height = usize::try_from(target.pixel_height).ok()?;
+    let mut rgba = vec![0; shifted.len().checked_mul(4)?];
+    for y in 0..height {
+        for x in 0..width {
+            if !physical_pixel_is_inside_aperture(x, y, aperture, backing_scale) {
+                continue;
+            }
+            let alpha =
+                ((f32::from(shifted[y * width + x]) / 255.0) * style.opacity * 255.0).round() as u8;
+            let offset = (y * width + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&[tint[0], tint[1], tint[2], alpha]);
+        }
+    }
+    Some(rgba)
+}
+
+fn room_biome_alias(biome: crate::tui::room::RoomBiome) -> &'static str {
+    use crate::tui::room::RoomBiomeTag;
+    match biome.primary {
+        RoomBiomeTag::Starter => "starter",
+        RoomBiomeTag::Botanical => "botanical",
+        RoomBiomeTag::Technical => "technical",
+        RoomBiomeTag::Celestial => "celestial",
+        RoomBiomeTag::Artifact => "artifact",
+        RoomBiomeTag::Cozy => "cozy",
+    }
+}
+
 fn prepare_appkit_prop_shadow_field(
     plan: &SmoothCompanionScenePlan,
     target: PreparedAppKitBitmapTarget,
@@ -4889,8 +5235,10 @@ fn prepare_appkit_hud_volume(
     bounds: NSRect,
     aperture: &RoundAperture,
     hud_text: &CompanionHudText,
-    font_size: f64,
+    metrics: CompanionGridMetrics,
     bitmap_target: PreparedAppKitBitmapTarget,
+    biome: crate::tui::room::RoomBiome,
+    redacts_live_hud: bool,
 ) -> Option<PreparedAppKitHudVolume> {
     let gauge_layout = perimeter_gauge_layout(
         aperture.center_x as f64,
@@ -4916,7 +5264,7 @@ fn prepare_appkit_hud_volume(
         gap,
         aperture.radius as f64,
         bounds.size.height,
-        font_size,
+        metrics.font_size,
         |sizes| {
             let mut metrics = [HudLineMetrics { width: 0.0, height: 0.0 }; 3];
             for (index, metric) in metrics.iter_mut().enumerate() {
@@ -4953,8 +5301,125 @@ fn prepare_appkit_hud_volume(
 
         let primary_coverage = NSImage::initWithSize(NSImage::alloc(), bitmap_target.logical_size);
         primary_coverage.addRepresentation(&rep);
-        Some(PreparedAppKitHudVolume { lines, primary_coverage, bitmap_target })
+        let rear_wall_projection = if redacts_live_hud {
+            None
+        } else {
+            let primary_alpha = appkit_bitmap_alpha(&rep, bitmap_target)?;
+            let style = crate::presentation::companion_effects::statistics_rear_shadow_style([
+                metrics.cell_w as f32,
+                metrics.cell_h as f32,
+            ])?;
+            let backing_scale =
+                f64::from(bitmap_target.pixel_width) / bitmap_target.logical_size.width;
+            let rgba = statistics_rear_shadow_rgba(
+                &primary_alpha,
+                bitmap_target,
+                aperture,
+                style,
+                backing_scale,
+                crate::presentation::companion_effects::bed_shadow_srgb8(room_biome_alias(biome)),
+            )?;
+            nsimage_from_straight_rgba(
+                rgba,
+                NSRect::new(NSPoint::new(0.0, 0.0), bitmap_target.logical_size),
+                backing_scale,
+            )
+        };
+        Some(PreparedAppKitHudVolume {
+            lines,
+            primary_coverage,
+            rear_wall_projection,
+            bitmap_target,
+        })
     }
+}
+
+fn prepare_appkit_pet_rim(
+    plan: &SmoothCompanionScenePlan,
+    passes: &PreparedSmoothDepthPasses,
+    preparation: AppKitPetRimPreparation<'_>,
+) -> std::result::Result<Option<Box<PreparedAppKitPetRim>>, CompanionFramePreparationError> {
+    let AppKitPetRimPreparation {
+        metrics,
+        aperture,
+        bitmap_target,
+        backing_scale,
+        style,
+        tint,
+    } = preparation;
+    if !style.enabled {
+        return Ok(None);
+    }
+    if passes.pet_body.len() != 1
+        || plan
+            .layers
+            .get(passes.pet_body[0])
+            .is_none_or(|layer| layer.role != SmoothLayerRole::PetBody)
+    {
+        return Err(CompanionFramePreparationError::SmoothPrivatePetCoverageUnavailable);
+    }
+    let radius_pixels = (f64::from(style.radius_points) * backing_scale)
+        .round()
+        .max(1.0);
+    if !radius_pixels.is_finite() || radius_pixels > f64::from(u32::MAX) {
+        return Err(CompanionFramePreparationError::AppKitPetRimUnavailable);
+    }
+    let body_alpha = unsafe {
+        let rep = allocate_srgb_bitmap_rep(bitmap_target)
+            .ok_or(CompanionFramePreparationError::AppKitPetRimUnavailable)?;
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)
+            .ok_or(CompanionFramePreparationError::AppKitPetRimUnavailable)?;
+        let restore = CurrentGraphicsContextRestore::install(&context);
+        appkit_blit_smooth_plan(plan, &passes.pet_body, &metrics, aperture, None);
+        context.flushGraphics();
+        drop(restore);
+        appkit_bitmap_alpha(&rep, bitmap_target)
+            .ok_or(CompanionFramePreparationError::AppKitPetRimUnavailable)?
+    };
+    let exterior = crate::presentation::companion_effects::exterior_dilated_alpha(
+        &body_alpha,
+        bitmap_target.pixel_width,
+        bitmap_target.pixel_height,
+        radius_pixels as u32,
+    )
+    .ok_or(CompanionFramePreparationError::AppKitPetRimUnavailable)?;
+    let width = usize::try_from(bitmap_target.pixel_width)
+        .map_err(|_| CompanionFramePreparationError::AppKitPetRimUnavailable)?;
+    let height = usize::try_from(bitmap_target.pixel_height)
+        .map_err(|_| CompanionFramePreparationError::AppKitPetRimUnavailable)?;
+    let mut rgba = vec![
+        0;
+        exterior
+            .len()
+            .checked_mul(4)
+            .ok_or(CompanionFramePreparationError::AppKitPetRimUnavailable,)?
+    ];
+    for y in 0..height {
+        for x in 0..width {
+            if !physical_pixel_is_inside_aperture(x, y, aperture, backing_scale) {
+                continue;
+            }
+            let source_alpha = exterior[y * width + x];
+            let alpha = if source_alpha == 0 {
+                0
+            } else {
+                ((f32::from(source_alpha) / 255.0) * style.alpha * 255.0)
+                    .round()
+                    .max(1.0) as u8
+            };
+            let offset = (y * width + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&[
+                (tint.0 * 255.0).round() as u8,
+                (tint.1 * 255.0).round() as u8,
+                (tint.2 * 255.0).round() as u8,
+                alpha,
+            ]);
+        }
+    }
+    let bounds = NSRect::new(NSPoint::new(0.0, 0.0), bitmap_target.logical_size);
+    let image = nsimage_from_straight_rgba(rgba, bounds, backing_scale)
+        .ok_or(CompanionFramePreparationError::AppKitPetRimUnavailable)?;
+    Ok(Some(Box::new(PreparedAppKitPetRim { image, bounds })))
 }
 
 fn for_each_prepared_hud_line_draw(
@@ -5126,8 +5591,14 @@ mod tests {
                 daily_percent: daily_percent.to_string(),
                 pace: pace.to_string(),
             },
-            8.5,
+            companion_grid_metrics(bounds.size.width, bounds.size.height)
+                .expect("normal fixture bounds provide AppKit grid metrics"),
             target,
+            crate::tui::room::RoomBiome {
+                primary: crate::tui::room::RoomBiomeTag::Starter,
+                secondary: None,
+            },
+            false,
         )
         .expect("HUD fixture preparation must succeed")
     }
@@ -5150,6 +5621,7 @@ mod tests {
             depth,
             None,
             0,
+            false,
             false,
             false,
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
@@ -5272,6 +5744,7 @@ mod tests {
                     .expect("Retained preparation must not allocate AppKit HUD material");
             let PreparedRendererFrame::Smooth {
                 appkit_hud_volume,
+                appkit_pet_rim,
                 appkit_prop_shadow_field,
                 ..
             } = retained.renderer
@@ -5279,6 +5752,7 @@ mod tests {
                 panic!("Retained preparation must retain the shared Smooth scene payload")
             };
             assert!(appkit_hud_volume.is_none());
+            assert!(appkit_pet_rim.is_none());
             assert!(appkit_prop_shadow_field.is_none());
         }
 
@@ -5297,6 +5771,7 @@ mod tests {
                 composition,
                 paint_schedule,
                 appkit_hud_volume,
+                appkit_pet_rim,
                 appkit_prop_shadow_field,
                 ..
             } = &frame.renderer
@@ -5312,6 +5787,7 @@ mod tests {
             );
             assert_eq!(*paint_schedule, smooth_appkit_paint_schedule(*composition));
             assert!(appkit_hud_volume.is_some());
+            assert!(appkit_pet_rim.is_some());
             assert!(appkit_prop_shadow_field.is_some());
         }
     }
@@ -5395,7 +5871,7 @@ mod tests {
     #[test]
     fn appkit_statistics_interaction_group_excludes_receiving_surface_shadows() {
         let plan = smooth_pass_plan_fixture();
-        let passes = prepare_smooth_depth_passes(&plan, &smooth_layer_draw_order(&plan));
+        let passes = prepare_smooth_depth_passes(&plan, &smooth_layer_draw_order(&plan)).unwrap();
         let roles = pass_roles(&plan, &passes.pet_front);
         assert_eq!(
             roles,
@@ -5406,11 +5882,215 @@ mod tests {
     }
 
     #[test]
-    fn prepared_appkit_hud_volume_debug_never_exposes_live_text() {
+    fn prepared_appkit_hud_volume_debug_redacts_shadow_and_live_text() {
         let prepared = prepared_appkit_hud_volume_fixture("981.7M", "49% yday", "349.4k/10m");
         let debug = format!("{prepared:?}");
         assert_eq!(debug, "PreparedAppKitHudVolume(<private>)");
         assert!(!debug.contains("981.7M"));
+        assert!(prepared.rear_wall_projection.is_some());
+        assert!(!debug.contains("rear_wall_projection"));
+    }
+
+    #[test]
+    fn appkit_redacted_review_omits_statistics_projection() {
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0));
+        let target = prepare_appkit_bitmap_target(prepare_bounds(bounds).unwrap(), 2.0).unwrap();
+        let prepared = prepare_appkit_hud_volume(
+            bounds,
+            &RoundAperture::new(360, 360),
+            &CompanionHudText {
+                today_total: "981.7M".to_string(),
+                daily_percent: "49% yday".to_string(),
+                pace: "349.4k/10m".to_string(),
+            },
+            companion_grid_metrics(bounds.size.width, bounds.size.height)
+                .expect("normal fixture bounds provide AppKit grid metrics"),
+            target,
+            crate::tui::room::RoomBiome {
+                primary: crate::tui::room::RoomBiomeTag::Starter,
+                secondary: None,
+            },
+            true,
+        )
+        .expect("redacted HUD preparation must retain only the private interaction mask");
+
+        assert!(prepared.rear_wall_projection.is_none());
+        assert_eq!(
+            format!("{prepared:?}"),
+            "PreparedAppKitHudVolume(<private>)"
+        );
+    }
+
+    #[test]
+    fn appkit_statistics_shadow_is_after_tank_background_and_before_world() {
+        let schedule = smooth_appkit_paint_schedule(
+            CompanionDepthComposition::resolve(0.68).expect("fixture depth is valid"),
+        );
+        assert_eq!(
+            schedule.first(),
+            Some(&SmoothAppKitPaintStep::StatisticsRearShadow),
+            "the rear-wall receiving surface is the first Smooth schedule step after tank paint"
+        );
+        assert_eq!(
+            schedule.get(1),
+            Some(&SmoothAppKitPaintStep::WorldBeforeStatistics),
+            "world paint belongs in front of the rear-wall statistics projection"
+        );
+    }
+
+    #[test]
+    fn appkit_statistics_shadow_is_displaced_soft_and_not_readable_at_full_strength() {
+        let prepared = prepared_appkit_hud_volume_fixture("981.7M", "49% yday", "349.4k/10m");
+        let primary = appkit_image_rgba(&prepared.primary_coverage, prepared.bitmap_target)
+            .expect("the private primary HUD coverage must remain readable to the painter");
+        let projection = appkit_image_rgba(
+            prepared
+                .rear_wall_projection
+                .as_deref()
+                .expect("live HUD preparation must include a rear-wall projection"),
+            prepared.bitmap_target,
+        )
+        .expect("the private rear-wall projection must be readable to the painter");
+        let primary_alpha: Vec<_> = primary.chunks_exact(4).map(|pixel| pixel[3]).collect();
+        let projection_alpha: Vec<_> = projection.chunks_exact(4).map(|pixel| pixel[3]).collect();
+        let threshold = u8::try_from((0.10_f32 * 255.0).round() as i16).unwrap();
+
+        assert!(projection_alpha.iter().any(|alpha| *alpha > 0));
+        assert!(projection_alpha.iter().all(|alpha| *alpha <= threshold));
+        assert_ne!(
+            primary_alpha
+                .iter()
+                .map(|alpha| *alpha > 0)
+                .collect::<Vec<_>>(),
+            projection_alpha
+                .iter()
+                .map(|alpha| *alpha >= threshold)
+                .collect::<Vec<_>>(),
+            "a threshold of the capped projection must not reconstruct the binary live HUD mask"
+        );
+    }
+
+    #[test]
+    fn appkit_pet_rim_uses_only_pet_body_alpha() {
+        let plan = smooth_pass_plan_fixture();
+        let passes = prepare_smooth_depth_passes(&plan, &smooth_layer_draw_order(&plan)).unwrap();
+
+        assert_eq!(
+            pass_roles(&plan, &passes.pet_body),
+            [SmoothLayerRole::PetBody]
+        );
+        assert!(!passes.pet_body.iter().any(|&index| {
+            matches!(
+                plan.layers[index].role,
+                SmoothLayerRole::PerformanceCue
+                    | SmoothLayerRole::WallShadow
+                    | SmoothLayerRole::FloorProjection
+            )
+        }));
+    }
+
+    #[test]
+    fn appkit_reduce_motion_keeps_rim_extent_and_removes_only_activity_bonus() {
+        let now = time::macros::datetime!(2026-07-16 12:00 UTC);
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.day_context.asleep = false;
+        vm.life_profile.calm_mode = false;
+        prepare_smooth_view_model_for_tick(&mut vm, 0, now).unwrap();
+        let mut scene = derive_round_scene_model(&vm, now);
+        scene.halo.activity_pulse = crate::round::model::RoundActivityPulse::Recent { age_ms: 0 };
+        let prepare = |reduce_motion| {
+            prepare_companion_frame_at(
+                &vm,
+                &scene,
+                EffectiveCompanionRenderer::Smooth,
+                Some(0.68),
+                None,
+                0,
+                false,
+                reduce_motion,
+                false,
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
+                Some(2.0),
+                &mut CompanionMetricCache::default(),
+                now,
+                0,
+            )
+            .expect("Smooth fixture preparation must succeed")
+        };
+        let standard = prepare(false);
+        let reduced = prepare(true);
+        let rim_alpha = |frame: &PreparedCompanionFrame| {
+            let PreparedRendererFrame::Smooth { appkit_hud_volume, appkit_pet_rim, .. } =
+                &frame.renderer
+            else {
+                panic!("fixture must retain the Smooth AppKit payload")
+            };
+            let target = appkit_hud_volume
+                .as_deref()
+                .expect("Smooth fixture must retain private HUD coverage")
+                .bitmap_target;
+            let rim = appkit_pet_rim
+                .as_deref()
+                .expect("enabled rim style must prepare a private AppKit rim");
+            assert_eq!(format!("{rim:?}"), "PreparedAppKitPetRim(<private>)");
+            appkit_image_rgba(&rim.image, target)
+                .expect("private rim image must remain readable to the painter")
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>()
+        };
+        let standard = rim_alpha(&standard);
+        let reduced = rim_alpha(&reduced);
+
+        assert_eq!(
+            standard.iter().map(|alpha| *alpha > 0).collect::<Vec<_>>(),
+            reduced.iter().map(|alpha| *alpha > 0).collect::<Vec<_>>(),
+            "Reduce Motion must not alter the rim's fixed body-local extent"
+        );
+        assert!(
+            standard.iter().copied().max() > reduced.iter().copied().max(),
+            "Reduce Motion suppresses only the activity alpha bonus"
+        );
+    }
+
+    #[test]
+    fn appkit_pet_front_paints_rim_before_body_and_crosses_statistics_as_one_group() {
+        assert_eq!(
+            smooth_appkit_pet_front_paint_schedule().as_slice(),
+            &[
+                SmoothPetFrontPaintStep::Rim,
+                SmoothPetFrontPaintStep::Layers
+            ]
+        );
+
+        for depth in [0.63, 0.68, 0.73] {
+            let schedule = smooth_appkit_paint_schedule(
+                CompanionDepthComposition::resolve(depth).expect("fixture depth is valid"),
+            );
+            let group = schedule
+                .iter()
+                .position(|step| *step == SmoothAppKitPaintStep::PetFront)
+                .expect("the rim and body must cross statistics as one PetFront group");
+            let primary = schedule
+                .iter()
+                .position(|step| *step == SmoothAppKitPaintStep::StatisticsPrimary)
+                .expect("statistics primary must remain in the schedule");
+            assert_eq!(group < primary, depth <= 0.72);
+        }
+    }
+
+    #[test]
+    fn appkit_missing_private_coverage_fails_frame_preparation() {
+        let mut plan = smooth_pass_plan_fixture();
+        plan.layers
+            .retain(|layer| layer.role != SmoothLayerRole::PetBody);
+        let error = prepare_smooth_depth_passes(&plan, &smooth_layer_draw_order(&plan))
+            .expect_err("AppKit frame preparation must reject missing body-only coverage");
+
+        assert_eq!(
+            error,
+            CompanionFramePreparationError::SmoothPrivatePetCoverageUnavailable
+        );
     }
 
     #[test]
@@ -5435,7 +6115,7 @@ mod tests {
     fn smooth_appkit_pass_plan_groups_roles_without_following_motion_binding() {
         let plan = smooth_pass_plan_fixture();
         let draw_order = smooth_layer_draw_order(&plan);
-        let passes = prepare_smooth_depth_passes(&plan, &draw_order);
+        let passes = prepare_smooth_depth_passes(&plan, &draw_order).unwrap();
 
         assert_eq!(
             pass_roles(&plan, &passes.pet_front),
@@ -5453,7 +6133,7 @@ mod tests {
         );
         assert_eq!(
             passes.world_before_statistics.len() + passes.pet_front.len() + passes.foreground.len(),
-            plan.layers.len() - 4,
+            plan.layers.len() - 3,
             "screen reservations stay out of Smooth scene passes"
         );
     }
@@ -5464,7 +6144,10 @@ mod tests {
 
         assert_eq!(
             smooth_appkit_pet_front_paint_schedule().as_slice(),
-            &[SmoothPetFrontPaintStep::Layers]
+            &[
+                SmoothPetFrontPaintStep::Rim,
+                SmoothPetFrontPaintStep::Layers
+            ]
         );
 
         let just_in_front = f32::from_bits(0.72_f32.to_bits() + 1);
@@ -5511,6 +6194,7 @@ mod tests {
             Some(1.0),
             None,
             0,
+            false,
             false,
             false,
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
@@ -6108,6 +6792,7 @@ mod tests {
             0,
             false,
             false,
+            false,
             measured_bounds,
             None,
             &mut metric_cache,
@@ -6129,6 +6814,7 @@ mod tests {
             None,
             None,
             0,
+            false,
             false,
             false,
             fallback_bounds,
@@ -6371,11 +7057,13 @@ mod tests {
         let initial_input = PixelPetInput::from_watch_view_model(&vm, base);
         let mut pixel_state = PixelRendererState::new(&initial_input, base);
 
-        let (first_frame, first_input) = render_live_pixel_frame(&vm, &mut pixel_state, base);
+        let (first_frame, first_input) =
+            render_live_pixel_frame(&vm, &mut pixel_state, base, false);
         let (late_frame, late_input) = render_live_pixel_frame(
             &vm,
             &mut pixel_state,
             base + time::Duration::milliseconds(1_600),
+            false,
         );
 
         let first_accent_alpha = accent_alpha_sum(&first_frame, &first_input);
@@ -6383,6 +7071,25 @@ mod tests {
         assert!(
             late_accent_alpha < first_accent_alpha,
             "live Pixel tick should decay the feed-pulse accent without waiting for the next poll: first={first_accent_alpha}, late={late_accent_alpha}"
+        );
+    }
+
+    #[test]
+    fn live_pixel_renderer_forwards_reduce_motion_to_active_rim() {
+        let now = time::macros::datetime!(2026-07-08 12:00 UTC);
+        let mut vm = WatchViewModel::fixture();
+        vm.life_profile.burst_level = 0.95;
+        vm.last_feed_pulse_at = Some(now);
+
+        let input = PixelPetInput::from_watch_view_model(&vm, now);
+        let mut standard_state = PixelRendererState::new(&input, now);
+        let (standard, _) = render_live_pixel_frame(&vm, &mut standard_state, now, false);
+        let mut reduced_state = PixelRendererState::new(&input, now);
+        let (reduced, _) = render_live_pixel_frame(&vm, &mut reduced_state, now, true);
+
+        assert!(
+            standard.changed_pixel_count(&reduced) > 0,
+            "the live Pixel wrapper must forward Reduce Motion to the active rim"
         );
     }
 
