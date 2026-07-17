@@ -153,7 +153,6 @@ pub(super) struct PreparedCompanionFrame {
     gauge_arcs: Vec<PreparedGaugeArc>,
     hud: CompanionHudText,
     hud_font_size: f64,
-    hud_volume: PreparedAppKitHudVolume,
     overlay_commands: Vec<RoundDrawCommand>,
     review_sample: Option<crate::companion::review_capture::SmoothReviewFrameSample>,
 }
@@ -185,7 +184,15 @@ enum PreparedRendererFrame {
         composition: CompanionDepthComposition,
         passes: PreparedSmoothDepthPasses,
         paint_schedule: [SmoothAppKitPaintStep; 11],
+        appkit_hud_volume: Option<Box<PreparedAppKitHudVolume>>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PreparedAppKitBitmapTarget {
+    logical_size: NSSize,
+    pixel_width: u32,
+    pixel_height: u32,
 }
 
 #[derive(Clone)]
@@ -199,11 +206,34 @@ struct PreparedAppKitHudLine {
 struct PreparedAppKitHudVolume {
     lines: [PreparedAppKitHudLine; 3],
     primary_coverage: Retained<NSImage>,
+    bitmap_target: PreparedAppKitBitmapTarget,
 }
 
 impl std::fmt::Debug for PreparedAppKitHudVolume {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("PreparedAppKitHudVolume(<private>)")
+    }
+}
+
+struct CurrentGraphicsContextRestore {
+    previous: Option<Retained<NSGraphicsContext>>,
+}
+
+impl CurrentGraphicsContextRestore {
+    fn install(context: &NSGraphicsContext) -> Self {
+        unsafe {
+            let previous = NSGraphicsContext::currentContext();
+            NSGraphicsContext::setCurrentContext(Some(context));
+            Self { previous }
+        }
+    }
+}
+
+impl Drop for CurrentGraphicsContextRestore {
+    fn drop(&mut self) {
+        unsafe {
+            NSGraphicsContext::setCurrentContext(self.previous.as_deref());
+        }
     }
 }
 
@@ -407,9 +437,6 @@ impl PreparedCompanionFrame {
             daily_percent: "—".to_string(),
             pace: "—".to_string(),
         };
-        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0));
-        let hud_volume = prepare_appkit_hud_volume(bounds, &aperture, &hud, 8.5)
-            .expect("constant prepared HUD fixture must be drawable");
         let gauges = PreparedGaugeFrame {
             xp_fraction: 0.5,
             daily_fraction: 0.5,
@@ -434,7 +461,6 @@ impl PreparedCompanionFrame {
             gauge_arcs: prepare_gauge_arcs(&aperture, gauges),
             hud,
             hud_font_size: 8.5,
-            hud_volume,
             overlay_commands: Vec::new(),
             review_sample: None,
         }
@@ -599,6 +625,7 @@ fn prepare_companion_frame(
     redacts_live_hud: bool,
     force_dim_overlay: bool,
     bounds: NSRect,
+    appkit_backing_scale: Option<f64>,
     metric_cache: &mut CompanionMetricCache,
 ) -> std::result::Result<PreparedCompanionFrame, CompanionFramePreparationError> {
     let now = time::OffsetDateTime::now_utc();
@@ -616,6 +643,7 @@ fn prepare_companion_frame(
         redacts_live_hud,
         force_dim_overlay,
         bounds,
+        appkit_backing_scale,
         metric_cache,
         now,
         elapsed_ms,
@@ -633,6 +661,7 @@ fn prepare_companion_frame_at(
     redacts_live_hud: bool,
     force_dim_overlay: bool,
     bounds: NSRect,
+    appkit_backing_scale: Option<f64>,
     metric_cache: &mut CompanionMetricCache,
     now: time::OffsetDateTime,
     elapsed_ms: u64,
@@ -704,6 +733,20 @@ fn prepare_companion_frame_at(
             let composition = CompanionDepthComposition::resolve(plan.pet.effective_depth)
                 .map_err(|_| CompanionFramePreparationError::SmoothInvalidDepth)?;
             let paint_schedule = smooth_appkit_paint_schedule(composition);
+            let appkit_hud_volume = if renderer_mode.is_smooth() {
+                let target = prepare_appkit_bitmap_target(
+                    prepared_bounds,
+                    appkit_backing_scale
+                        .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
+                )
+                .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?;
+                Some(Box::new(
+                    prepare_appkit_hud_volume(bounds, &aperture, &hud, metrics.font_size, target)
+                        .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
+                ))
+            } else {
+                None
+            };
             // The aura follows the pet's composed depth transform, so it grows and
             // sinks with the creature instead of staying pinned to the unscaled art.
             let transformed = plan.pet.transformed_bounds;
@@ -722,6 +765,7 @@ fn prepare_companion_frame_at(
                 composition,
                 passes,
                 paint_schedule,
+                appkit_hud_volume,
             }
         } else {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
@@ -804,9 +848,6 @@ fn prepare_companion_frame_at(
         }
         _ => None,
     };
-    let hud_volume = prepare_appkit_hud_volume(bounds, &aperture, &hud, hud_font_size)
-        .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?;
-
     Ok(PreparedCompanionFrame {
         bounds: prepared_bounds,
         aperture,
@@ -818,7 +859,6 @@ fn prepare_companion_frame_at(
         gauge_arcs,
         hud,
         hud_font_size,
-        hud_volume,
         overlay_commands,
         review_sample,
     })
@@ -843,6 +883,7 @@ pub(super) fn prepare_capacity_fixture_frame(
         true,
         dimmed,
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
+        None,
         &mut metric_cache,
         now,
         0,
@@ -2562,6 +2603,7 @@ fn prepare_current_frame_from_state() {
                 ..
             } = state;
             let bounds = view.bounds();
+            let appkit_backing_scale = view.window().map(|window| window.backingScaleFactor());
             prepare_companion_frame(
                 vm,
                 scene,
@@ -2573,6 +2615,7 @@ fn prepare_current_frame_from_state() {
                 *redacts_live_hud,
                 *force_dim_overlay,
                 bounds,
+                appkit_backing_scale,
                 metric_cache,
             )
         };
@@ -3440,6 +3483,7 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                 composition,
                 passes,
                 paint_schedule,
+                appkit_hud_volume,
                 ..
             } => {
                 for step in paint_schedule {
@@ -3454,22 +3498,30 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                             paint_smooth_pet_front(frame, plan, passes, metrics, &aperture)
                         }
                         SmoothAppKitPaintStep::StatisticsEcho => {
-                            draw_prepared_hud_lines(&frame.hud_volume, true)
+                            if let Some(volume) = appkit_hud_volume {
+                                draw_prepared_hud_lines(volume, true);
+                            }
                         }
                         SmoothAppKitPaintStep::StatisticsPrimary => {
-                            draw_prepared_hud_lines(&frame.hud_volume, false)
+                            if let Some(volume) = appkit_hud_volume {
+                                draw_prepared_hud_lines(volume, false);
+                            } else {
+                                paint_prepared_statistics(bounds, frame);
+                            }
                         }
                         SmoothAppKitPaintStep::StatisticsInteraction => {
                             if composition.pet_effective_z <= composition.statistics_z {
-                                paint_smooth_statistics_interaction(
-                                    bounds,
-                                    frame,
-                                    plan,
-                                    passes,
-                                    metrics,
-                                    &aperture,
-                                    composition.statistics_interaction.reveal_mix,
-                                );
+                                if let Some(volume) = appkit_hud_volume {
+                                    paint_smooth_statistics_interaction(
+                                        frame,
+                                        plan,
+                                        passes,
+                                        metrics,
+                                        &aperture,
+                                        volume,
+                                        composition.statistics_interaction.reveal_mix,
+                                    );
+                                }
                             }
                         }
                         SmoothAppKitPaintStep::Foreground => {
@@ -3519,27 +3571,26 @@ fn paint_smooth_pet_front(
 }
 
 fn paint_smooth_statistics_interaction(
-    bounds: NSRect,
     frame: &PreparedCompanionFrame,
     plan: &SmoothCompanionScenePlan,
     passes: &PreparedSmoothDepthPasses,
     metrics: &CompanionGridMetrics,
     aperture: &RoundAperture,
+    hud_volume: &PreparedAppKitHudVolume,
     reveal_mix: f32,
 ) {
     if !(0.0..=1.0).contains(&reveal_mix) || reveal_mix == 0.0 {
         return;
     }
-    let Some(overlay) = render_masked_pet_front_image(
-        frame,
-        plan,
-        passes,
-        metrics,
-        aperture,
-        &frame.hud_volume.primary_coverage,
-    ) else {
+    let Some(overlay) =
+        render_masked_pet_front_image(frame, plan, passes, metrics, aperture, hud_volume)
+    else {
         return;
     };
+    let bounds = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        hud_volume.bitmap_target.logical_size,
+    );
     draw_appkit_image(&overlay, bounds, f64::from(reveal_mix));
 }
 
@@ -3549,53 +3600,27 @@ fn render_masked_pet_front_image(
     passes: &PreparedSmoothDepthPasses,
     metrics: &CompanionGridMetrics,
     aperture: &RoundAperture,
-    primary_coverage: &NSImage,
+    hud_volume: &PreparedAppKitHudVolume,
 ) -> Option<Retained<NSImage>> {
-    let pixel_width = frame.bounds.width_px as isize;
-    let pixel_height = frame.bounds.height_px as isize;
-    let bytes_per_row = pixel_width.checked_mul(4)?;
-    let bounds = NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(frame.bounds.width_f64, frame.bounds.height_f64),
-    );
+    let bitmap_target = hud_volume.bitmap_target;
+    let bounds = NSRect::new(NSPoint::new(0.0, 0.0), bitmap_target.logical_size);
     unsafe {
-        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
-            NSBitmapImageRep::alloc(),
-            std::ptr::null_mut(),
-            pixel_width,
-            pixel_height,
-            8,
-            4,
-            true,
-            false,
-            NSCalibratedRGBColorSpace,
-            bytes_per_row,
-            32,
-        )?;
-        let data = rep.bitmapData();
-        if data.is_null() {
-            return None;
-        }
-        std::ptr::write_bytes(
-            data,
-            0,
-            usize::try_from(bytes_per_row.checked_mul(pixel_height)?).ok()?,
-        );
-        rep.setSize(bounds.size);
+        let rep = allocate_srgb_bitmap_rep(bitmap_target)?;
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
-        let previous = NSGraphicsContext::currentContext();
-        NSGraphicsContext::setCurrentContext(Some(&context));
+        let restore = CurrentGraphicsContextRestore::install(&context);
         paint_smooth_pet_front(frame, plan, passes, metrics, aperture);
-        primary_coverage.drawInRect_fromRect_operation_fraction(
-            bounds,
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
-            NSCompositingOperation::DestinationIn,
-            1.0,
-        );
+        hud_volume
+            .primary_coverage
+            .drawInRect_fromRect_operation_fraction(
+                bounds,
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+                NSCompositingOperation::DestinationIn,
+                1.0,
+            );
         context.flushGraphics();
-        NSGraphicsContext::setCurrentContext(previous.as_deref());
+        drop(restore);
 
-        let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+        let image = NSImage::initWithSize(NSImage::alloc(), bitmap_target.logical_size);
         image.addRepresentation(&rep);
         Some(image)
     }
@@ -3715,15 +3740,14 @@ pub(super) fn render_prepared_frame_to_rgba(
             NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep).ok_or_else(|| {
                 GlorpError::Message("failed to create paired smooth capture context".into())
             })?;
-        let previous = NSGraphicsContext::currentContext();
-        NSGraphicsContext::setCurrentContext(Some(&context));
+        let restore = CurrentGraphicsContextRestore::install(&context);
         let bounds = NSRect::new(
             NSPoint::new(0.0, 0.0),
             NSSize::new(logical_width, logical_height),
         );
         paint_prepared_frame(bounds, frame);
         context.flushGraphics();
-        NSGraphicsContext::setCurrentContext(previous.as_deref());
+        drop(restore);
 
         // Compositing already happened in sRGB (the rep is retagged sRGB above), so
         // this convert-to-sRGB is now an identity kept for symmetry and to drop any
@@ -4697,11 +4721,75 @@ fn live_hud_text(vm: &WatchViewModel) -> CompanionHudText {
     )
 }
 
+fn prepare_appkit_bitmap_target(
+    bounds: PreparedBounds,
+    backing_scale: f64,
+) -> Option<PreparedAppKitBitmapTarget> {
+    if !backing_scale.is_finite() || backing_scale <= 0.0 {
+        return None;
+    }
+    let physical_dimension = |logical: f64| {
+        let physical = (logical * backing_scale).round();
+        if !physical.is_finite()
+            || physical < 1.0
+            || physical > f64::from(u32::MAX)
+            || physical > isize::MAX as f64
+        {
+            None
+        } else {
+            Some(physical as u32)
+        }
+    };
+    Some(PreparedAppKitBitmapTarget {
+        logical_size: NSSize::new(bounds.width_f64, bounds.height_f64),
+        pixel_width: physical_dimension(bounds.width_f64)?,
+        pixel_height: physical_dimension(bounds.height_f64)?,
+    })
+}
+
+fn allocate_srgb_bitmap_rep(
+    target: PreparedAppKitBitmapTarget,
+) -> Option<Retained<NSBitmapImageRep>> {
+    let pixel_width = isize::try_from(target.pixel_width).ok()?;
+    let pixel_height = isize::try_from(target.pixel_height).ok()?;
+    let bytes_per_row = pixel_width.checked_mul(4)?;
+    unsafe {
+        let storage = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            pixel_width,
+            pixel_height,
+            8,
+            4,
+            true,
+            false,
+            NSCalibratedRGBColorSpace,
+            bytes_per_row,
+            32,
+        )?;
+        let rep = storage.bitmapImageRepByRetaggingWithColorSpace(
+            &objc2_app_kit::NSColorSpace::sRGBColorSpace(),
+        )?;
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        std::ptr::write_bytes(
+            data,
+            0,
+            usize::try_from(rep.bytesPerRow().checked_mul(pixel_height)?).ok()?,
+        );
+        rep.setSize(target.logical_size);
+        Some(rep)
+    }
+}
+
 fn prepare_appkit_hud_volume(
     bounds: NSRect,
     aperture: &RoundAperture,
     hud_text: &CompanionHudText,
     font_size: f64,
+    bitmap_target: PreparedAppKitBitmapTarget,
 ) -> Option<PreparedAppKitHudVolume> {
     let gauge_layout = perimeter_gauge_layout(
         aperture.center_x as f64,
@@ -4750,59 +4838,21 @@ fn prepare_appkit_hud_volume(
         }
     });
 
-    let pixel_width = bounds.size.width.ceil();
-    let pixel_height = bounds.size.height.ceil();
-    if !pixel_width.is_finite()
-        || !pixel_height.is_finite()
-        || pixel_width <= 0.0
-        || pixel_height <= 0.0
-        || pixel_width > isize::MAX as f64
-        || pixel_height > isize::MAX as f64
-    {
-        return None;
-    }
-    let pixel_width = pixel_width as isize;
-    let pixel_height = pixel_height as isize;
-    let bytes_per_row = pixel_width.checked_mul(4)?;
-
     unsafe {
-        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
-            NSBitmapImageRep::alloc(),
-            std::ptr::null_mut(),
-            pixel_width,
-            pixel_height,
-            8,
-            4,
-            true,
-            false,
-            NSCalibratedRGBColorSpace,
-            bytes_per_row,
-            32,
-        )?;
-        let data = rep.bitmapData();
-        if data.is_null() {
-            return None;
-        }
-        std::ptr::write_bytes(
-            data,
-            0,
-            usize::try_from(bytes_per_row.checked_mul(pixel_height)?).ok()?,
-        );
-        rep.setSize(bounds.size);
+        let rep = allocate_srgb_bitmap_rep(bitmap_target)?;
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
-        let previous = NSGraphicsContext::currentContext();
-        NSGraphicsContext::setCurrentContext(Some(&context));
+        let restore = CurrentGraphicsContextRestore::install(&context);
         let white = RoundColor(1.0, 1.0, 1.0, 1.0);
         for (index, prepared) in lines.iter().enumerate() {
             let mask = attributed_pet_glyph(texts[index].0, layout.lines[index].font_size, &white);
             mask.drawAtPoint(prepared.origin);
         }
         context.flushGraphics();
-        NSGraphicsContext::setCurrentContext(previous.as_deref());
+        drop(restore);
 
-        let primary_coverage = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+        let primary_coverage = NSImage::initWithSize(NSImage::alloc(), bitmap_target.logical_size);
         primary_coverage.addRepresentation(&rep);
-        Some(PreparedAppKitHudVolume { lines, primary_coverage })
+        Some(PreparedAppKitHudVolume { lines, primary_coverage, bitmap_target })
     }
 }
 
@@ -4956,6 +5006,7 @@ mod tests {
         pace: &str,
     ) -> PreparedAppKitHudVolume {
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0));
+        let target = prepare_appkit_bitmap_target(prepare_bounds(bounds).unwrap(), 2.0).unwrap();
         prepare_appkit_hud_volume(
             bounds,
             &RoundAperture::new(360, 360),
@@ -4965,8 +5016,136 @@ mod tests {
                 pace: pace.to_string(),
             },
             8.5,
+            target,
         )
         .expect("HUD fixture preparation must succeed")
+    }
+
+    fn prepare_renderer_fixture(
+        renderer: EffectiveCompanionRenderer,
+        depth: Option<f32>,
+        backing_scale: Option<f64>,
+    ) -> std::result::Result<PreparedCompanionFrame, CompanionFramePreparationError> {
+        let now = time::macros::datetime!(2026-07-16 12:00 UTC);
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.day_context.asleep = false;
+        vm.life_profile.calm_mode = false;
+        prepare_smooth_view_model_for_tick(&mut vm, 0, now).unwrap();
+        let scene = derive_round_scene_model(&vm, now);
+        prepare_companion_frame_at(
+            &vm,
+            &scene,
+            renderer,
+            depth,
+            None,
+            0,
+            false,
+            false,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
+            backing_scale,
+            &mut CompanionMetricCache::default(),
+            now,
+            0,
+        )
+    }
+
+    #[test]
+    fn appkit_bitmap_target_uses_retina_pixels_and_srgb_compositing() {
+        let bounds = prepare_bounds(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(360.0, 240.0),
+        ))
+        .unwrap();
+        let target = prepare_appkit_bitmap_target(bounds, 2.0).unwrap();
+        assert_eq!((target.pixel_width, target.pixel_height), (720, 480));
+        assert_eq!(target.logical_size, NSSize::new(360.0, 240.0));
+
+        let rep = allocate_srgb_bitmap_rep(target).expect("Retina bitmap allocation must succeed");
+        unsafe {
+            assert_eq!((rep.pixelsWide(), rep.pixelsHigh()), (720, 480));
+            assert_eq!(rep.size(), target.logical_size);
+            assert_eq!(
+                rep.colorSpace(),
+                objc2_app_kit::NSColorSpace::sRGBColorSpace()
+            );
+        }
+    }
+
+    #[test]
+    fn frame_preparation_keeps_appkit_hud_smooth_only_and_carries_effective_reveal() {
+        for renderer in [
+            EffectiveCompanionRenderer::Pixel,
+            EffectiveCompanionRenderer::Classic,
+        ] {
+            prepare_renderer_fixture(renderer, None, None)
+                .unwrap_or_else(|error| panic!("{renderer:?} unexpectedly failed: {error:?}"));
+        }
+        #[cfg(feature = "retained-renderer")]
+        {
+            let retained =
+                prepare_renderer_fixture(EffectiveCompanionRenderer::Retained, Some(0.68), None)
+                    .expect("Retained preparation must not allocate AppKit HUD material");
+            let PreparedRendererFrame::Smooth { appkit_hud_volume, .. } = retained.renderer else {
+                panic!("Retained preparation must retain the shared Smooth scene payload")
+            };
+            assert!(appkit_hud_volume.is_none());
+        }
+
+        let just_in_front = f32::from_bits(0.72_f32.to_bits() + 1);
+        for (depth, expected_reveal) in
+            [(0.64, 0.0), (0.68, 0.5), (0.72, 1.0), (just_in_front, 1.0)]
+        {
+            let frame = prepare_renderer_fixture(
+                EffectiveCompanionRenderer::Smooth,
+                Some(depth),
+                Some(2.0),
+            )
+            .unwrap();
+            let PreparedRendererFrame::Smooth {
+                plan,
+                composition,
+                paint_schedule,
+                appkit_hud_volume,
+                ..
+            } = &frame.renderer
+            else {
+                panic!("Smooth preparation must produce a Smooth renderer payload")
+            };
+            assert_eq!(plan.pet.effective_depth, depth);
+            assert_eq!(composition.pet_effective_z, plan.pet.effective_depth);
+            assert!(
+                (composition.statistics_interaction.reveal_mix - expected_reveal).abs()
+                    <= f32::EPSILON * 8.0,
+                "effective depth {depth} carried the wrong reveal mix"
+            );
+            assert_eq!(*paint_schedule, smooth_appkit_paint_schedule(*composition));
+            assert!(appkit_hud_volume.is_some());
+        }
+    }
+
+    #[test]
+    fn bitmap_context_guard_restores_previous_context_after_unwind() {
+        let bounds =
+            prepare_bounds(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(8.0, 8.0))).unwrap();
+        let target = prepare_appkit_bitmap_target(bounds, 1.0).unwrap();
+        let outer_rep = allocate_srgb_bitmap_rep(target).unwrap();
+        let inner_rep = allocate_srgb_bitmap_rep(target).unwrap();
+        let outer =
+            unsafe { NSGraphicsContext::graphicsContextWithBitmapImageRep(&outer_rep) }.unwrap();
+        let inner =
+            unsafe { NSGraphicsContext::graphicsContextWithBitmapImageRep(&inner_rep) }.unwrap();
+        let _outer_restore = CurrentGraphicsContextRestore::install(&outer);
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _inner_restore = CurrentGraphicsContextRestore::install(&inner);
+            panic!("exercise bitmap context restoration");
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(
+            unsafe { NSGraphicsContext::currentContext() }.unwrap(),
+            outer
+        );
     }
 
     #[test]
@@ -5127,6 +5306,7 @@ mod tests {
             false,
             false,
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0)),
+            Some(1.0),
             &mut metric_cache,
             now,
             0,
@@ -5721,6 +5901,7 @@ mod tests {
             false,
             false,
             measured_bounds,
+            None,
             &mut metric_cache,
         )
         .unwrap();
@@ -5743,6 +5924,7 @@ mod tests {
             false,
             false,
             fallback_bounds,
+            None,
             &mut metric_cache,
         )
         .expect("missing Pixel metrics should not fail frame preparation");
