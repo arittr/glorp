@@ -1772,8 +1772,14 @@ impl SceneTargetTextureUsages {
         .union(wgpu::TextureUsages::TEXTURE_BINDING)
         .union(wgpu::TextureUsages::COPY_SRC);
     pub(super) const DEPTH: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+    #[cfg(not(test))]
     pub(super) const STATISTICS_COVERAGE: wgpu::TextureUsages =
         wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+    #[cfg(test)]
+    pub(super) const STATISTICS_COVERAGE: wgpu::TextureUsages =
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            .union(wgpu::TextureUsages::TEXTURE_BINDING)
+            .union(wgpu::TextureUsages::COPY_SRC);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4425,6 +4431,7 @@ enum SceneRenderTestFault {
     MapCallbackCancelled,
     MappedRangeFailure,
     NormalizeShortBuffer,
+    OmitHudInteractionOverlay,
 }
 
 /// Persistent offscreen execution state for scene-v2. Device and queue remain
@@ -4566,6 +4573,8 @@ impl SceneRenderer {
                 shared,
                 candidate,
                 PreparedCaptureHud::Sensitive(prepared_hud),
+                #[cfg(test)]
+                false,
             )?;
             encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
             self.staging_belt.finish();
@@ -4891,6 +4900,8 @@ impl SceneRenderer {
                 shared,
                 candidate,
                 PreparedCaptureHud::Sensitive(prepared_hud),
+                #[cfg(test)]
+                false,
             )?;
             encode_aperture_composite(&mut encoder, targets, shared, candidate);
             let encode_elapsed = encode_started_at
@@ -5134,6 +5145,8 @@ impl SceneRenderer {
                 shared,
                 candidate,
                 PreparedCaptureHud::Sensitive(prepared_hud),
+                #[cfg(test)]
+                false,
             )?;
             encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
             let encode_elapsed = encode_started_at
@@ -5373,6 +5386,9 @@ impl SceneRenderer {
 
         #[cfg(test)]
         let test_fault = std::mem::take(&mut self.test_fault);
+        #[cfg(test)]
+        let omit_hud_interaction_overlay =
+            test_fault == SceneRenderTestFault::OmitHudInteractionOverlay;
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -5397,6 +5413,8 @@ impl SceneRenderer {
                 shared,
                 candidate,
                 prepared_hud,
+                #[cfg(test)]
+                omit_hud_interaction_overlay,
             )?;
             encode_aperture_composite(&mut encoder, targets, shared, candidate);
             encoder.copy_texture_to_buffer(
@@ -5668,6 +5686,7 @@ fn encode_scene_with_sealed_hud(
     shared: &SceneGpuShared,
     candidate: &mut GpuSceneCandidate,
     prepared_hud: PreparedCaptureHud<'_>,
+    #[cfg(test)] omit_hud_interaction_overlay: bool,
 ) -> Result<(), super::hud::HudGpuStagingError> {
     let hud_order_position = candidate
         .blended_order
@@ -5713,7 +5732,11 @@ fn encode_scene_with_sealed_hud(
         candidate,
         super::hud::HudDrawPhase::Primary,
     )?;
-    if interaction_enabled {
+    #[cfg(test)]
+    let draw_hud_interaction_overlay = !omit_hud_interaction_overlay;
+    #[cfg(not(test))]
+    let draw_hud_interaction_overlay = true;
+    if interaction_enabled && draw_hud_interaction_overlay {
         encode_hud_interaction_overlay(encoder, targets, shared, candidate, prepared_hud);
     }
     encode_scene_world_suffix(
@@ -14028,10 +14051,6 @@ mod tests {
         let at_mid_z = 0.68;
         let at_plane_z = crate::round::depth::COMPANION_STATISTICS_Z;
         let just_front_z = f32::from_bits(at_plane_z.to_bits() + 1);
-        let mut at_start_candidate = candidate_at(at_start_z);
-        let mut at_mid_candidate = candidate_at(at_mid_z);
-        let mut at_plane_candidate = candidate_at(at_plane_z);
-        let mut just_front_candidate = candidate_at(just_front_z);
         let sealed = super::super::hud::SealedHudFrame::redacted_capture().unwrap();
         let prepare_hud = |candidate: &GpuSceneCandidate, depth| {
             candidate
@@ -14040,12 +14059,6 @@ mod tests {
                 .prepare_redacted_capture(&sealed, hud_geometry_at(generation_key.resources, depth))
                 .unwrap()
         };
-        let at_start_hud = prepare_hud(&at_start_candidate, at_start_z);
-        let at_mid_hud = prepare_hud(&at_mid_candidate, at_mid_z);
-        let at_plane_hud = prepare_hud(&at_plane_candidate, at_plane_z);
-        let just_front_hud = prepare_hud(&just_front_candidate, just_front_z);
-        assert_eq!(at_start_candidate.submitted_draw_count(false), 25);
-        assert_eq!(at_mid_candidate.submitted_draw_count(true), 28);
         let request_for = |candidate: &GpuSceneCandidate| {
             render_request_fixture(
                 candidate.generation_key,
@@ -14054,41 +14067,182 @@ mod tests {
                 2.0,
             )
         };
-        let at_start_request = request_for(&at_start_candidate);
-        let at_mid_request = request_for(&at_mid_candidate);
-        let at_plane_request = request_for(&at_plane_candidate);
-        let just_front_request = request_for(&just_front_candidate);
+
+        fn read_statistics_coverage(
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            renderer: &SceneRenderer,
+            width: u32,
+            height: u32,
+        ) -> Vec<u8> {
+            let targets = renderer.targets.current().expect("render target exists");
+            let bytes_per_row = width.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glorp-statistics-coverage-test-readback"),
+                size: u64::from(bytes_per_row) * u64::from(height),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glorp-statistics-coverage-test-encoder"),
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &targets.statistics_coverage_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            let submission = queue.submit([encoder.finish()]);
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = sender.send(result);
+                });
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: None,
+                })
+                .unwrap();
+            receiver.recv().unwrap().unwrap();
+            let mapped = readback.slice(..).get_mapped_range().unwrap();
+            let mut coverage = Vec::with_capacity((width * height) as usize);
+            for row in mapped.chunks_exact(bytes_per_row as usize) {
+                coverage.extend_from_slice(&row[..width as usize]);
+            }
+            drop(mapped);
+            readback.unmap();
+            coverage
+        }
+
+        struct OverlapProbe {
+            normal: Vec<u8>,
+            pet_without_hud: Vec<u8>,
+            contribution: u64,
+        }
+
         let mut renderer = SceneRenderer::new(&device, &queue, &shared);
-        let start = renderer
-            .render_offscreen(
-                &device,
-                &queue,
-                &shared,
-                &mut at_start_candidate,
-                at_start_request,
-                &at_start_hud,
-            )
-            .unwrap();
-        let mid = renderer
-            .render_offscreen(
-                &device,
-                &queue,
-                &shared,
-                &mut at_mid_candidate,
-                at_mid_request.clone(),
-                &at_mid_hud,
-            )
-            .unwrap();
-        let plane = renderer
-            .render_offscreen(
-                &device,
-                &queue,
-                &shared,
-                &mut at_plane_candidate,
-                at_plane_request,
-                &at_plane_hud,
-            )
-            .unwrap();
+        let mut probes = Vec::new();
+        for (probe_index, depth) in [at_start_z, at_mid_z, at_plane_z].into_iter().enumerate() {
+            let mut candidate = candidate_at(depth);
+            let hud = prepare_hud(&candidate, depth);
+            let blank = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test_at(
+                generation_key.resources,
+                depth,
+            );
+            let request = request_for(&candidate);
+            assert_eq!(
+                candidate.submitted_draw_count(depth > at_start_z),
+                if depth > at_start_z { 28 } else { 25 },
+            );
+            let normal = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &hud,
+                )
+                .unwrap();
+            let [width, height] = normal.physical_extent_pixels;
+            let hud_coverage = read_statistics_coverage(&device, &queue, &renderer, width, height);
+
+            renderer.inject_test_fault(SceneRenderTestFault::OmitHudInteractionOverlay);
+            let without_overlay = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &hud,
+                )
+                .unwrap();
+            let pet_without_hud = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &blank,
+                )
+                .unwrap();
+
+            let interaction_plan = candidate
+                .hud_interaction_plan
+                .as_mut()
+                .expect("production fixture has the exact pet interaction group");
+            let interaction_primitives = interaction_plan
+                .authored
+                .each_ref()
+                .map(|planned| planned.draw.primitive_index);
+            for planned in &mut interaction_plan.authored {
+                planned.draw.instance_range = 0..0;
+            }
+            for draw in &mut candidate.draw_plan.world_blended_unsorted {
+                if interaction_primitives.contains(&draw.primitive_index) {
+                    draw.instance_range = 0..0;
+                }
+            }
+            let without_pet = renderer
+                .render_offscreen(&device, &queue, &shared, &mut candidate, request, &blank)
+                .unwrap();
+
+            let mut contribution = 0_u64;
+            let mut intersection_pixels = 0_usize;
+            for (pixel_index, (((normal, control), pet), no_pet)) in normal
+                .rgba
+                .chunks_exact(4)
+                .zip(without_overlay.rgba.chunks_exact(4))
+                .zip(pet_without_hud.rgba.chunks_exact(4))
+                .zip(without_pet.rgba.chunks_exact(4))
+                .enumerate()
+            {
+                let inside_intersection = hud_coverage[pixel_index] != 0 && pet != no_pet;
+                if inside_intersection {
+                    intersection_pixels += 1;
+                    contribution = contribution.saturating_add(
+                        normal[..3]
+                            .iter()
+                            .zip(&control[..3])
+                            .map(|(normal, control)| u64::from(normal.abs_diff(*control)))
+                            .sum::<u64>(),
+                    );
+                } else {
+                    assert_eq!(
+                        normal, control,
+                        "same-depth overlay changed outside HUD/pet intersection: probe={probe_index}, pixel={pixel_index}",
+                    );
+                }
+            }
+            assert!(intersection_pixels > 0);
+            probes.push(OverlapProbe {
+                normal: normal.rgba,
+                pet_without_hud: pet_without_hud.rgba,
+                contribution,
+            });
+        }
+        assert!(probes[0].contribution < probes[1].contribution);
+        assert!(probes[1].contribution < probes[2].contribution);
+
+        let mut just_front_candidate = candidate_at(just_front_z);
+        let just_front_hud = prepare_hud(&just_front_candidate, just_front_z);
+        let just_front_request = request_for(&just_front_candidate);
         let just_front = renderer
             .render_offscreen(
                 &device,
@@ -14099,20 +14253,8 @@ mod tests {
                 &just_front_hud,
             )
             .unwrap();
-
-        let difference = |left: &[u8], right: &[u8]| {
-            left.iter()
-                .zip(right)
-                .map(|(left, right)| u64::from(left.abs_diff(*right)))
-                .sum::<u64>()
-        };
-        let mid_reveal = difference(&start.rgba, &mid.rgba);
-        let full_reveal = difference(&start.rgba, &plane.rgba);
-        assert!(mid_reveal > 0);
-        assert!(mid_reveal < full_reveal);
-
-        let mean_plane_front_rgb_difference = plane
-            .rgba
+        let mean_plane_front_rgb_difference = probes[2]
+            .normal
             .chunks_exact(4)
             .zip(just_front.rgba.chunks_exact(4))
             .map(|(plane, front)| {
@@ -14123,29 +14265,30 @@ mod tests {
                     .sum::<u64>()
             })
             .sum::<u64>() as f64
-            / f64::from(plane.physical_extent_pixels[0] * plane.physical_extent_pixels[1] * 3);
+            / f64::from(
+                just_front.physical_extent_pixels[0] * just_front.physical_extent_pixels[1] * 3,
+            );
         assert!(mean_plane_front_rgb_difference <= 1.0);
-
-        let [width, height] = plane.physical_extent_pixels;
-        for (pixel_index, (plane, front)) in plane
-            .rgba
-            .chunks_exact(4)
-            .zip(just_front.rgba.chunks_exact(4))
-            .enumerate()
-        {
-            let x = pixel_index as u32 % width;
-            let y_up = height - 1 - pixel_index as u32 / width;
-            let inside_statistics_band =
-                (40..=width - 40).contains(&x) && (height / 4..=height * 3 / 4).contains(&y_up);
-            if !inside_statistics_band {
-                assert_eq!(plane, front, "non-overlap pixel changed at ({x}, {y_up})");
-            }
-        }
 
         let blank_mid = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test_at(
             generation_key.resources,
             at_mid_z,
         );
+        let mut at_plane_candidate = candidate_at(at_plane_z);
+        let at_plane_hud = prepare_hud(&at_plane_candidate, at_plane_z);
+        let at_plane_request = request_for(&at_plane_candidate);
+        renderer
+            .render_offscreen(
+                &device,
+                &queue,
+                &shared,
+                &mut at_plane_candidate,
+                at_plane_request,
+                &at_plane_hud,
+            )
+            .unwrap();
+        let mut at_mid_candidate = candidate_at(at_mid_z);
+        let at_mid_request = request_for(&at_mid_candidate);
         let after_covered_frame = renderer
             .render_offscreen(
                 &device,
@@ -14171,32 +14314,16 @@ mod tests {
             .unwrap();
         assert_eq!(after_covered_frame.rgba, fresh_blank.rgba);
 
-        let blank_start = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test_at(
-            generation_key.resources,
-            at_start_z,
-        );
-        let mut fresh_start_candidate = candidate_at(at_start_z);
-        let fresh_start_request = request_for(&fresh_start_candidate);
-        let fresh_start_blank = fresh_renderer
-            .render_offscreen(
-                &device,
-                &queue,
-                &shared,
-                &mut fresh_start_candidate,
-                fresh_start_request,
-                &blank_start,
-            )
-            .unwrap();
-
-        let rear_echo_occluded_pixels = mid
-            .rgba
+        let [width, height] = just_front.physical_extent_pixels;
+        let rear_echo_occluded_pixels = probes[1]
+            .normal
             .chunks_exact(4)
-            .zip(after_covered_frame.rgba.chunks_exact(4))
+            .zip(probes[1].pet_without_hud.chunks_exact(4))
             .zip(
-                start
-                    .rgba
+                probes[0]
+                    .normal
                     .chunks_exact(4)
-                    .zip(fresh_start_blank.rgba.chunks_exact(4)),
+                    .zip(probes[0].pet_without_hud.chunks_exact(4)),
             )
             .enumerate()
             .filter(
