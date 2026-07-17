@@ -4,21 +4,24 @@
 
 **Goal:** Make the round companion travel visibly and continuously while choosing a new heading only about once every five seconds.
 
-**Architecture:** Keep deterministic route/facing ownership in `round::locomotion`, restore five-second route legs, and select substantial valid strides without tiny interpolation fallbacks. Keep within-leg pacing in `round::motion`, but measure the final aperture-safe path in physical points so visible speed is independent of heading cadence and cell aspect ratio.
+**Architecture:** Keep deterministic route/facing ownership in `round::locomotion`, restore five-second route legs, and select substantial valid strides without tiny interpolation fallbacks. In `round::motion`, measure the final aperture-safe path in physical points and map each leg through a deterministic C1 scalar screen-speed profile so visible pace remains gradual across waypoints without changing cadence or targets.
 
 **Tech Stack:** Rust, `time`, Glorp round motion/depth/placement modules, Preview Lab, Cargo test/Clippy/formatting.
 
 ## Global Constraints
 
 - Awake route legs last exactly five seconds with zero dwell.
-- Meaningful facing decisions happen at most once per route leg and no more than 20 times in any 120-second window.
-- Complete production-projected legs cover at least 40 points of rendered arc.
+- Meaningful facing decisions happen at most once per route leg and no more than 24 times in any 120-second window; five-second legs allow at most 24 boundary decisions.
+- Axis reversals remain at most 20 per axis in every 120-second window.
+- Complete production-projected legs cover 42 through 75 points of rendered arc.
 - Every sliding two-second awake window covers 16 through 48 rendered points.
 - No 250 ms awake sample advances more than 6 rendered points.
+- Awake speed is at least 7.5 points per second, and consecutive 250 ms sampled speeds differ by at most 3.0 points per second (12 points per second squared).
+- Visible-path inverse lookup uses at least 20 samples per five-second leg.
 - Distances use final centers from the `36x18`, `360x360` production viewport: 10 points per X cell and 20 points per Y cell.
 - Preserve deterministic identity-plus-wall-time routing, no-direct-reversal behavior, depth `±0.70`, zero dwell, sleep settling, wake blending, and Reduce Motion behavior.
 - Do not change lighting, shadows, props, HUD, activity energy, renderer selection, or persisted state.
-- Preserve prior committed work and the committed design. The current uncommitted one-second experiment in `src/round/locomotion.rs` and `src/round/motion.rs` belongs to this task; edit it deliberately rather than using destructive Git restoration.
+- Preserve the approved scope: do not tune `locomotion::swim_progress`, alter sleep/wake/Reduce Motion bypasses, add a renderer or artifact system, or broaden route generation for the facing-change cap.
 
 ---
 
@@ -34,7 +37,8 @@
 
 - [ ] **Step 1: Restore the cadence contracts in tests before changing the constant**
 
-Change the current one-second and 100-reversal expectations to:
+Change the current one-second and 100-reversal expectations while keeping the
+axis-reversal ceiling separate from the facing-change cap:
 
 ```rust
 #[test]
@@ -67,18 +71,23 @@ fn every_phase_aligned_two_minute_window_has_at_most_twenty_reversals_per_axis()
 }
 
 #[test]
-fn every_two_minute_window_has_at_most_twenty_facing_changes() {
+fn every_sliding_two_minute_window_has_at_most_twenty_four_facing_changes() {
+    let mut saw_legitimate_twenty_one_change_window = false;
     for seed in 0..16 {
         let identity = stable_companion_identity(&format!("facing-cadence-{seed}"));
-        let samples = (0..=120)
-            .map(|second| sample(identity, second))
-            .collect::<Vec<_>>();
-        let changes = samples
-            .windows(2)
-            .filter(|pair| pair[0].facing != pair[1].facing)
-            .count();
-        assert!(changes <= 20, "seed {seed} changed facing {changes} times");
+        for start in -600i64..=600 {
+            let samples = (start..=start + 120)
+                .map(|second| sample(identity, second))
+                .collect::<Vec<_>>();
+            let changes = samples
+                .windows(2)
+                .filter(|pair| pair[0].facing != pair[1].facing)
+                .count();
+            saw_legitimate_twenty_one_change_window |= changes == 21;
+            assert!(changes <= 24, "seed {seed}, start {start}: {changes} changes");
+        }
     }
+    assert!(saw_legitimate_twenty_one_change_window);
 }
 ```
 
@@ -89,9 +98,10 @@ Run:
 ```bash
 cargo test --lib round::locomotion::tests::each_segment_is_a_five_second_continuous_swim -- --exact
 cargo test --lib round::locomotion::tests::every_phase_aligned_two_minute_window_has_at_most_twenty_reversals_per_axis -- --exact
+cargo test --lib round::locomotion::tests::every_sliding_two_minute_window_has_at_most_twenty_four_facing_changes -- --exact
 ```
 
-Expected: the first test fails because the current constant is `1`; the reversal test fails because the current route can make decisions every second.
+Expected: the first test fails because the current constant is `1`; the reversal test fails because the current route can make decisions every second. The facing test is a broad representative negative/positive sliding-window guard: it proves the known legitimate 21-change window remains valid and rejects only values above 24; do not change route generation to satisfy it.
 
 - [ ] **Step 3: Restore the five-second production cadence without removing explicit phase sampling**
 
@@ -111,7 +121,7 @@ Run:
 cargo test --lib round::locomotion::tests
 ```
 
-Expected: all locomotion tests pass, including exact endpoints, five-second cadence, boundary continuity, and the 20-reversal ceiling.
+Expected: all locomotion tests pass, including exact endpoints, five-second cadence, boundary continuity, the 20-axis-reversal ceiling, and the separate 24-facing-change cap.
 
 - [ ] **Step 5: Commit the cadence restoration**
 
@@ -262,7 +272,7 @@ git add src/round/locomotion.rs
 git commit -m "fix(companion): choose substantial swim destinations"
 ```
 
-### Task 3: Pace each leg in physical screen space and enforce independent speed bounds
+### Task 3: Pace visible arcs with gradual C1 screen-speed changes
 
 **Files:**
 - Modify: `src/round/motion.rs:1-460`
@@ -270,18 +280,22 @@ git commit -m "fix(companion): choose substantial swim destinations"
 
 **Interfaces:**
 - Consumes: `sample_companion_locomotion_at_segment_phase(...)`, `resolve_smooth_depth(...)`, and `resolve_round_depth_placement(...)`.
-- Produces: `visible_distance_points(...) -> f32` and `pace_locomotion_for_visible_path(...)` that redistribute progress only within the current five-second leg.
+- Produces: `visible_distance_points(...) -> f32`, `screen_arc_profile(...) -> f32`, and `pace_locomotion_for_visible_path(...)`, which redistribute progress only inside the current five-second leg.
 
-- [ ] **Step 1: Replace the one-second endpoint-oriented regression with physical-point path metrics**
+- [ ] **Step 1: Add the shared-corpus production speed and waypoint regressions**
 
 Add test helpers:
 
 ```rust
 const PRODUCTION_SAMPLE_MS: i64 = 250;
-const MIN_LEG_ARC_POINTS: f32 = 40.0;
+const VISIBLE_PATH_SAMPLES_PER_LEG: usize = 20;
+const MIN_LEG_ARC_POINTS: f32 = 42.0;
+const MAX_LEG_ARC_POINTS: f32 = 75.0;
 const MIN_TWO_SECOND_ARC_POINTS: f32 = 16.0;
 const MAX_TWO_SECOND_ARC_POINTS: f32 = 48.0;
 const MAX_QUARTER_SECOND_STEP_POINTS: f32 = 6.0;
+const MIN_AWAKE_SPEED_POINTS_PER_SECOND: f32 = 7.5;
+const MAX_SPEED_DELTA_PER_SAMPLE: f32 = 3.0;
 
 fn visible_distance_points(
     from: MotionPoint,
@@ -294,30 +308,92 @@ fn visible_distance_points(
 }
 ```
 
-For the same `visible-production-*` identity corpus and segments `-16..16`, sample final centers every 250 ms across each five-second leg. Assert:
+Use the same `visible-production-*` identity and `-16..=16` segment corpus for
+all three tests. Sample final centers every 250 ms, with windows that continue
+across segment boundaries. The existing overall regression remains named
+`every_awake_swim_stays_within_production_speed_bounds`; add the named
+regressions `screen_speed_changes_gradually_across_production_waypoints` and
+`screen_arc_profile_never_stops_at_an_awake_waypoint`.
+
+The overall test asserts complete-leg, two-second, per-step, and awake-speed
+bounds:
 
 ```rust
-assert!(full_leg_arc >= MIN_LEG_ARC_POINTS);
-for window in step_lengths.windows(8) {
+assert!((MIN_LEG_ARC_POINTS..=MAX_LEG_ARC_POINTS).contains(&full_leg_arc));
+for window in all_awake_step_lengths.windows(8) {
     let two_second_arc: f32 = window.iter().sum();
     assert!((MIN_TWO_SECOND_ARC_POINTS..=MAX_TWO_SECOND_ARC_POINTS).contains(&two_second_arc));
 }
 assert!(step_lengths.iter().all(|distance| *distance <= MAX_QUARTER_SECOND_STEP_POINTS));
+assert!(step_lengths.iter().all(|distance| {
+    *distance / (PRODUCTION_SAMPLE_MS as f32 / 1000.0)
+        >= MIN_AWAKE_SPEED_POINTS_PER_SECOND
+}));
 ```
 
-- [ ] **Step 2: Run the physical speed contract and confirm the five-second baseline is too slow**
+The gradual-speed regression derives a points-per-second value for every 250 ms
+step and asserts every adjacent pair differs by at most `3.0`; it explicitly
+includes the last sample of one segment and first sample of the next:
+
+```rust
+let speeds = all_awake_step_lengths.iter().map(|distance| {
+    *distance / (PRODUCTION_SAMPLE_MS as f32 / 1000.0)
+}).collect::<Vec<_>>();
+assert!(speeds.windows(2).all(|pair| {
+    (pair[1] - pair[0]).abs() <= MAX_SPEED_DELTA_PER_SAMPLE
+}));
+```
+
+The no-stop regression asserts those same awake boundary-adjacent steps remain
+strictly positive, so a waypoint cannot become a stop-start. Keep all existing
+sleep, wake-blending, and Reduce Motion tests as their lifecycle proof.
+
+- [ ] **Step 2: Run the new production contracts before implementing the C1 profile**
 
 Run:
 
 ```bash
 cargo test --lib round::motion::tests::every_awake_swim_stays_within_production_speed_bounds -- --exact --nocapture
+cargo test --lib round::motion::tests::screen_speed_changes_gradually_across_production_waypoints -- --exact --nocapture
+cargo test --lib round::motion::tests::screen_arc_profile_never_stops_at_an_awake_waypoint -- --exact --nocapture
 ```
 
-Expected: FAIL on at least one physical-point bound because the current pacing accumulator measures cell-space distance and ignores the production viewport's 2:1 cell aspect ratio.
+Expected: FAIL on the speed-transition or waypoint-continuity assertion because
+linear per-leg arc pacing restarts at a potentially different rate at each
+waypoint. Do not tune `locomotion::swim_progress`; the fault is in visible-path
+pacing.
 
-- [ ] **Step 3: Measure visible-path pacing in physical points**
+- [ ] **Step 3: Implement physical-point inverse lookup with a C1 scalar speed profile**
 
-Keep `pace_locomotion_for_visible_path(...)`, but calculate its segment lengths with the same `visible_distance_points(...)` helper instead of cell-space `hypot`. Pass the viewport into that helper so the 2:1 production cell aspect ratio is respected.
+Keep `pace_locomotion_for_visible_path(...)`, calculating physical visible arc
+totals with `visible_distance_points(...)` and the production viewport's 2:1
+cell aspect ratio. Sample each five-second leg at least
+`VISIBLE_PATH_SAMPLES_PER_LEG` times before inverse lookup; do not introduce
+coarse quarter-second speed steps.
+
+It may read the previous, current, and next legs' complete physical visible arc
+totals, but must return a phase only in the current segment. For current arc
+`L`, `T = 5`, `V = L / T`, `V0 = min(Vprev, V)`, `V1 = min(V, Vnext)`, and
+`t = sample.segment_phase`, implement this profile or an algebraically
+equivalent monotone form:
+
+```rust
+let h = (1.0 - (std::f32::consts::PI * t).cos()) / 2.0;
+let g = (std::f32::consts::PI * t).sin().powi(2);
+let v = v0 + (v1 - v0) * h + (2.0 * v - v0 - v1) * g;
+let p = (v0 * t
+    + (v1 - v0) * (t / 2.0 - (std::f32::consts::PI * t).sin() / (2.0 * std::f32::consts::PI))
+    + (2.0 * v - v0 - v1)
+        * (t / 2.0 - (2.0 * std::f32::consts::PI * t).sin() / (4.0 * std::f32::consts::PI))) / v;
+let target_length = current_arc_length * p;
+```
+
+Use `target_length` in the existing inverse arc lookup, then re-sample only the
+current `sample.segment_index` at that phase. Adjacent legs share nonzero
+boundary speed (`V1`/`V0`), while derivatives of `h` and `g` are zero at the
+boundaries, giving zero scalar acceleration there. The function must remain
+monotone and must not change a target, facing, segment index, cadence, or route
+generation.
 
 The pacing function must:
 
@@ -339,7 +415,10 @@ cargo test --lib round::placement::tests
 cargo test --test round_scene
 ```
 
-Expected: physical speed bounds pass; sleeping settles to neutral, waking blends from neutral, depth placement remains aperture-safe, and round scene contracts remain green.
+Expected: all three production speed tests pass, including gradual boundary
+speed and no awake waypoint stop; sleeping settles to neutral, waking blends
+from neutral, depth placement remains aperture-safe, and round scene contracts
+remain green.
 
 - [ ] **Step 5: Commit physical screen-space pacing**
 
@@ -355,12 +434,17 @@ git commit -m "fix(companion): pace swims in visible screen space"
 - Test: `tests/dev_preview.rs:3093-3590`
 
 **Interfaces:**
-- Consumes: the restored five-second locomotion cadence and physical point-space pacing.
-- Produces: deterministic purposeful-locomotion artifacts that show one long swim before a waypoint turn.
+- Consumes: the restored five-second locomotion cadence and C1 physical point-space pacing.
+- Produces: the existing deterministic purposeful-locomotion artifacts, reviewed for one long swim before a waypoint turn without a speed reset.
 
 - [ ] **Step 1: Strengthen the purposeful-locomotion fixture contract**
 
-Keep the current public review timeline and privacy-safe artifacts. Add assertions that the waypoint, quarter, half, three-quarter, and end samples remain in one segment, and that `turn-boundary` is the next segment. Assert the facing change, when present, occurs only at that boundary.
+Keep the current public review timeline and privacy-safe artifacts; do not add a
+renderer or artifact system. Add assertions that the waypoint, quarter, half,
+three-quarter, and end samples remain in one segment, and that `turn-boundary`
+is the next segment. Assert the facing change, when present, occurs only at
+that boundary. The review acceptance must explicitly inspect gradual visible
+speed changes through the boundary and confirm no waypoint stop-start.
 
 ```rust
 assert_eq!(samples[0].locomotion.segment_index, samples[4].locomotion.segment_index);
@@ -386,7 +470,11 @@ Run:
 cargo run --features dev-preview -- dev-preview --scenario animation --out target/glorp-preview-motion
 ```
 
-Inspect `target/glorp-preview-motion/manifest.json` and the `round-purposeful-locomotion` sidecars. Confirm one five-second segment supplies the swim phases and the next segment supplies the turn boundary.
+Inspect `target/glorp-preview-motion/manifest.json` and the
+`round-purposeful-locomotion` sidecars. Confirm one five-second segment supplies
+the swim phases, the next segment supplies the turn boundary, screen speed
+changes gradually through that boundary, and no awake waypoint reads as a stop
+then restart.
 
 - [ ] **Step 4: Run final focused verification**
 

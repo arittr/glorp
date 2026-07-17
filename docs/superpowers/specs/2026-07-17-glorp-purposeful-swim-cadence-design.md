@@ -17,6 +17,12 @@ purposeful swims—but some production-projected legs covered only two cells ove
 five seconds. Circular-aperture clipping and depth taper could concentrate that
 small movement into part of the leg, making the pet appear nearly stationary.
 
+The current visible-path pacing also linearizes physical arc within each leg and
+restarts at a potentially different rate at every waypoint. That rate reset is
+the acceleration problem: it produces abrupt visible speed changes even when
+the route cadence and target selection are correct. It is not a reason to tune
+`locomotion::swim_progress`.
+
 ## Goal
 
 Restore infrequent, purposeful heading choices while keeping continuous awake
@@ -58,12 +64,28 @@ used for ordinary candidates. If the preferred smooth-turn candidate is
 unavailable, choose another deterministic valid candidate; do not silently
 emit a tiny nominal swim.
 
-### Visible-path pacing
+### Visible-path pacing and acceleration
 
 `src/round/motion.rs` remains the boundary that knows both the locomotion sample
-and the round production projection. Preserve within-leg screen-space pacing:
-sample the final aperture-safe center along the selected leg, measure its arc in
-physical points, and redistribute the existing leg phase across that arc.
+and the round production projection. `pace_locomotion_for_visible_path` samples
+the final aperture-safe center along the selected leg, measures arc in physical
+points, and uses the existing inverse lookup with at least 20 visible-path
+samples per five-second leg. It applies a deterministic C1 scalar screen-speed
+profile, reading only the previous/current/next physical visible arc totals.
+
+For current arc `L`, duration `T = 5`, `V = L/T`,
+`V0 = min(Vprev, V)`, `V1 = min(V, Vnext)`, segment phase `t`,
+`h(t) = (1 - cos(pi*t))/2`, and `g(t) = sin(pi*t)^2`:
+
+```
+v(t) = V0 + (V1 - V0) h(t) + (2V - V0 - V1) g(t)
+p(t) = [V0*t + (V1 - V0)*(t/2 - sin(pi*t)/(2pi))
+        + (2V - V0 - V1)*(t/2 - sin(2pi*t)/(4pi))] / V
+```
+
+Use `target_length = L * p(segment_phase)` in that inverse lookup. This shares
+nonzero boundary speed with adjacent legs and has zero scalar acceleration at
+boundaries, avoiding visible waypoint stop-starts while remaining monotone.
 
 This pacing changes only progress within one five-second leg. It does not select
 new targets, change facing, or increase decision frequency. Sleeping, waking,
@@ -81,12 +103,16 @@ distance.
 
 For deterministic awake route corpora:
 
-- Each complete five-second leg has at least `40` points of rendered arc length.
-- Every sliding two-second window within a leg covers `16..=48` points of
-  rendered arc length, or `8..=24` points per second.
-- No 250 ms sample advances more than `6` points.
-- Facing changes occur no more than once per five-second leg and no more than 20
-  times in any two-minute window.
+- Each complete five-second leg has `42..=75` points of rendered arc length.
+- Every sliding two-second awake window, including across segment boundaries,
+  covers `16..=48` points of rendered arc length.
+- No 250 ms sample advances more than `6` points; awake speed is at least `7.5`
+  points per second; consecutive 250 ms sampled speeds differ by at most `3.0`
+  points per second (at most `12` points per second squared).
+- Facing changes occur no more than once per five-second leg and no more than
+  `24` route boundaries in any 120-second window. Axis reversals retain their
+  separate `20` per-axis ceiling. A legitimate 21-change corpus window is
+  accepted, so the facing cap must not broaden route backtracking.
 - Unforced direct reversals remain rejected by the existing vector-dot-product
   rule.
 
@@ -108,13 +134,15 @@ Implementation verification must prove:
 2. Route candidates and all fallbacks satisfy normalized distance, depth-step,
    and direct-reversal contracts.
 3. Final production-projected motion satisfies the physical-point speed,
-   per-leg distance, and 250 ms lurch bounds above across a shared identity and
-   segment corpus.
-4. Facing changes only at five-second route boundaries.
+   per-leg distance, 250 ms lurch, and gradual-acceleration bounds above across
+   a shared identity and segment corpus, including segment boundaries.
+4. Facing changes only at five-second route boundaries and stay within the
+   separate 24-change cap; axis reversals retain their 20-change ceiling.
 5. Sleep settling, wake blending, depth placement, round scene, and Reduce
    Motion tests retain their current behavior.
 6. Preview Lab's purposeful-locomotion strip shows long continuous swims with
-   infrequent turns and no apparent pauses at front or rear depth.
+   infrequent turns, gradual visible speed changes, and no waypoint stop-start
+   or apparent pause at front or rear depth.
 7. The optimized companion is launched for Drew's visual acceptance after
    automated checks pass.
 
