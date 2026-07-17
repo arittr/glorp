@@ -6689,7 +6689,7 @@ mod tests {
         assert_eq!(PackedMirrorLayout::NODE_BYTES, 12_288);
         assert_eq!(PackedMirrorLayout::CONTENT_GLOBALS_BYTES, 160);
         assert_eq!(PackedMirrorLayout::SCENE_CONTENT_BYTES, 15_552);
-        assert_eq!(PackedMirrorLayout::FRAME_BYTES, 7_680);
+        assert_eq!(PackedMirrorLayout::FRAME_BYTES, 9_664);
         assert_eq!(PackedMirrorLayout::content_globals_offset(), 0);
         assert_eq!(
             [
@@ -6710,7 +6710,7 @@ mod tests {
         );
         assert_eq!(
             FrameMirrorFamily::ALL.map(PackedMirrorLayout::frame_offset),
-            [0, 192, 672, 1_440, 4_512, 4_608, 6_144]
+            [0, 192, 832, 1_856, 5_952, 6_080, 8_128]
         );
         assert_eq!(
             PackedMirrorLayout::translate_content_globals_span(ByteSpan { offset: 0, len: 160 }),
@@ -6754,7 +6754,7 @@ mod tests {
         assert_eq!(
             PackedMirrorLayout::translate_frame_span(
                 FrameMirrorFamily::Lights,
-                super::super::buffers::ByteSpan { offset: 96, len: 48 },
+                super::super::buffers::ByteSpan { offset: 128, len: 64 },
             ),
             Err(PackedMirrorLayoutError::SpanOutOfBounds)
         );
@@ -6784,18 +6784,18 @@ mod tests {
                 },
                 SceneMutableBufferLayout {
                     staging_offset: 12_448,
-                    len: 7_680,
+                    len: 9_664,
                     copy_alignment: 4,
                 },
                 SceneMutableBufferLayout {
-                    staging_offset: 20_128,
+                    staging_offset: 22_112,
                     len: 15_552,
                     copy_alignment: 4,
                 },
             ],
         );
-        assert_eq!(PackedMirrorLayout::MUTABLE_BUFFER_BYTES, 35_680);
-        assert_eq!(PackedMirrorLayout::FULL_FRAME_STAGING_BYTES, 36_512);
+        assert_eq!(PackedMirrorLayout::MUTABLE_BUFFER_BYTES, 37_664);
+        assert_eq!(PackedMirrorLayout::FULL_FRAME_STAGING_BYTES, 38_496);
         assert!(
             PackedMirrorLayout::FULL_FRAME_STAGING_BYTES
                 <= usize::try_from(SCENE_STAGING_BELT_CHUNK_BYTES).unwrap()
@@ -6866,36 +6866,36 @@ mod tests {
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::Frame,
                     offset: 192,
-                    len: 480,
-                    span_alignment: 48,
+                    len: 640,
+                    span_alignment: 64,
                 },
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::Frame,
-                    offset: 672,
-                    len: 768,
-                    span_alignment: 48,
+                    offset: 832,
+                    len: 1_024,
+                    span_alignment: 64,
                 },
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::Frame,
-                    offset: 1_440,
-                    len: 3_072,
-                    span_alignment: 48,
+                    offset: 1_856,
+                    len: 4_096,
+                    span_alignment: 64,
                 },
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::Frame,
-                    offset: 4_512,
-                    len: 96,
-                    span_alignment: 48,
+                    offset: 5_952,
+                    len: 128,
+                    span_alignment: 64,
                 },
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::Frame,
-                    offset: 4_608,
-                    len: 1_536,
-                    span_alignment: 48,
+                    offset: 6_080,
+                    len: 2_048,
+                    span_alignment: 64,
                 },
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::Frame,
-                    offset: 6_144,
+                    offset: 8_128,
                     len: 1_536,
                     span_alignment: 96,
                 },
@@ -6920,7 +6920,7 @@ mod tests {
             )
             .unwrap();
         dirty
-            .insert_frame(FrameMirrorFamily::Lights, ByteSpan { offset: 0, len: 48 })
+            .insert_frame(FrameMirrorFamily::Lights, ByteSpan { offset: 0, len: 64 })
             .unwrap();
 
         assert_eq!(dirty.nodes.as_slice(), &[ByteSpan { offset: 96, len: 96 }]);
@@ -6930,7 +6930,7 @@ mod tests {
         );
         assert_eq!(
             dirty.frame.as_slice(),
-            &[ByteSpan { offset: 4_512, len: 48 }]
+            &[ByteSpan { offset: 5_952, len: 64 }]
         );
         assert_eq!(
             dirty.scene_content.as_slice(),
@@ -8401,7 +8401,7 @@ mod tests {
             (0..6)
                 .map(scene_storage_min_binding_size)
                 .collect::<Vec<_>>(),
-            vec![12_288, 160, 7_680, 64, 15_552, 64],
+            vec![12_288, 160, 9_664, 64, 15_552, 64],
         );
     }
 
@@ -8714,7 +8714,7 @@ mod tests {
         ];
         assert_eq!(candidate_buffer_lengths.len(), 8);
         assert_eq!(candidate_buffer_lengths[3], 160);
-        assert_eq!(candidate_buffer_lengths[4], 7_680);
+        assert_eq!(candidate_buffer_lengths[4], 9_664);
         assert_eq!(
             candidate_buffer_lengths[5],
             candidate.primitive_count() * 64
@@ -10294,6 +10294,93 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn isolated_prop_shadow_field(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        snapshot: crate::presentation::companion_scene::CompanionSceneSnapshot,
+    ) -> [SceneRenderOutcome; 2] {
+        use crate::pet::generation::Species;
+        use crate::presentation::companion_scene::{
+            AppliedRevisions, DeviceEpoch, LayoutGeneration, ResourceGeneration, SceneGenerationKey,
+        };
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let generation_key = SceneGenerationKey {
+            device: DeviceEpoch(71),
+            layout: LayoutGeneration(72),
+            resources: ResourceGeneration(73),
+        };
+        let revisions = AppliedRevisions::new(10, 11);
+        let cpu = compile_retained_full_cast_snapshot(snapshot, generation_key, revisions);
+        let manifest = super::super::resources::GlyphRepertoireManifest::for_active_pet(
+            CompanionContentIdentity::for_pet(Species::Fuzz),
+            1.0,
+        );
+        let resources = super::super::resources::CompiledRetainedResources::compile(&manifest)
+            .expect("Fuzz repertoire compiles");
+        let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+            resources.atlas(),
+            generation_key.resources,
+        )
+        .expect("Fuzz atlas prepares");
+        let upload = prepare_scene_upload(&cpu, &atlas).expect("prop-shadow upload prepares");
+        let prop_shadow_primitive = upload
+            .primitives
+            .iter()
+            .position(|primitive| primitive.binding_index == 8)
+            .and_then(|index| u32::try_from(index).ok())
+            .expect("one prop-shadow analytic primitive");
+        let shared = SceneGpuShared::create(device, generation_key.device).unwrap();
+        let mut candidate =
+            materialize_gpu_candidate(device, queue, &shared, &upload, &atlas).unwrap();
+        for draw in candidate
+            .draw_plan
+            .world_blended_unsorted
+            .iter_mut()
+            .chain(candidate.draw_plan.chrome.prefix.iter_mut())
+            .chain(candidate.draw_plan.chrome.suffix.iter_mut())
+        {
+            if draw.primitive_index != prop_shadow_primitive {
+                draw.instance_range = 0..0;
+            }
+        }
+        let hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            generation_key.resources,
+        );
+        let request = render_request_fixture(
+            generation_key,
+            revisions,
+            cpu.logical_viewport_points(),
+            1.0,
+        );
+        let mut renderer = SceneRenderer::new(device, queue, &shared);
+        let with_field = renderer
+            .render_offscreen(
+                device,
+                queue,
+                &shared,
+                &mut candidate,
+                request.clone(),
+                &hud,
+            )
+            .expect("isolated prop-shadow field renders");
+        for draw in &mut candidate.draw_plan.world_blended_unsorted {
+            if draw.primitive_index == prop_shadow_primitive {
+                draw.instance_range = 0..0;
+            }
+        }
+        let without_field = renderer
+            .render_offscreen(device, queue, &shared, &mut candidate, request, &hud)
+            .expect("isolated room control renders");
+        [with_field, without_field]
+    }
+
+    #[cfg(target_os = "macos")]
+    fn cast_probe_roi(point_y_up: [f32; 2]) -> [f32; 4] {
+        [point_y_up[0] - 2.0, 360.0 - point_y_up[1] - 2.0, 4.0, 4.0]
+    }
+
+    #[cfg(target_os = "macos")]
     fn union_logical_rois(rois: impl IntoIterator<Item = [f32; 4]>) -> [f32; 4] {
         let mut rois = rois.into_iter();
         let first = rois.next().expect("at least one visible ROI");
@@ -11804,6 +11891,141 @@ mod tests {
             glyph_pixels[index * 4..index * 4 + 4],
             shadowed_glyph_pixels[index * 4..index * 4 + 4],
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prop_cast_shadow_projects_down_right_scales_unions_and_suppresses_noise() {
+        use crate::game::habitat::HabitatPropShadowProfile;
+
+        let base = retained_full_cast_snapshot();
+        let elevated_slots = base
+            .topology
+            .visible_props
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, prop)| {
+                matches!(
+                    prop.shadow_profile,
+                    HabitatPropShadowProfile::Elevated { .. }
+                )
+                .then_some(slot)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            elevated_slots.len() >= 2,
+            "full-cast fixture must retain two elevated authored slots"
+        );
+        let primary = elevated_slots[0];
+        let duplicate = elevated_slots[1];
+        let cell = base.topology.glyph_grid.cell_extent_points;
+
+        let clear_field =
+            |snapshot: &mut crate::presentation::companion_scene::CompanionSceneSnapshot| {
+                for frame in &mut snapshot.frame.prop_instances {
+                    frame.visible = false;
+                    frame.opacity = 0.0;
+                    frame.contact_shadow_strength = 0.0;
+                    frame.cast_shadow_vector_points = [0.0; 2];
+                    frame.cast_shadow_softness_points = 0.0;
+                    frame.cast_shadow_strength = 0.0;
+                    frame.transition = None;
+                }
+            };
+        let cast_frame = |frame: &mut crate::presentation::companion_scene::PropFrameSnapshot,
+                          vector: [f32; 2]| {
+            frame.visible = true;
+            frame.origin_points = [132.0, 215.0];
+            frame.motion_offset_points = [0.0; 2];
+            frame.opacity = 1.0;
+            frame.footprint_points = [cell[0] * 2.0, cell[1] * 3.0];
+            frame.contact_shadow_strength = 0.0;
+            frame.cast_shadow_vector_points = vector;
+            frame.cast_shadow_softness_points = cell[1] * 0.4;
+            frame.cast_shadow_strength = 0.42;
+            frame.transition = None;
+        };
+
+        let mut long = base.clone();
+        clear_field(&mut long);
+        cast_frame(&mut long.frame.prop_instances[primary], [12.0, -60.0]);
+        let mut short = long.clone();
+        cast_frame(&mut short.frame.prop_instances[primary], [6.0, -30.0]);
+        let mut duplicate_long = long.clone();
+        duplicate_long.frame.prop_instances[duplicate] =
+            duplicate_long.frame.prop_instances[primary];
+        duplicate_long.frame.prop_instances[duplicate].slot =
+            base.frame.prop_instances[duplicate].slot;
+
+        let mut invisible = long.clone();
+        clear_field(&mut invisible);
+        let mut ungrounded = long.clone();
+        clear_field(&mut ungrounded);
+        let ungrounded_slot = ungrounded
+            .topology
+            .visible_props
+            .iter()
+            .position(|prop| {
+                !matches!(
+                    prop.zone,
+                    crate::presentation::companion_scene::PropZoneSnapshot::FloorLeft
+                        | crate::presentation::companion_scene::PropZoneSnapshot::FloorMid
+                        | crate::presentation::companion_scene::PropZoneSnapshot::FloorRight
+                )
+            })
+            .expect("full-cast fixture includes an ungrounded prop");
+        ungrounded.frame.prop_instances[ungrounded_slot].visible = true;
+        ungrounded.frame.prop_instances[ungrounded_slot].opacity = 1.0;
+        let mut small = long.clone();
+        clear_field(&mut small);
+        small.frame.prop_instances[primary].visible = true;
+        small.frame.prop_instances[primary].opacity = 1.0;
+        small.frame.prop_instances[primary].footprint_points = [cell[0] * 0.75, cell[1] * 1.5];
+
+        let (device, queue) = native_device();
+        let [long_field, long_room] = isolated_prop_shadow_field(&device, &queue, long);
+        let [short_field, short_room] = isolated_prop_shadow_field(&device, &queue, short);
+        let [duplicate_field, duplicate_room] =
+            isolated_prop_shadow_field(&device, &queue, duplicate_long);
+        let [invisible_field, invisible_room] =
+            isolated_prop_shadow_field(&device, &queue, invisible);
+        let [ungrounded_field, ungrounded_room] =
+            isolated_prop_shadow_field(&device, &queue, ungrounded);
+        let [small_field, small_room] = isolated_prop_shadow_field(&device, &queue, small);
+
+        let compiled_origin_y_up = 360.0 - 215.0 - cell[1];
+        let start = [
+            132.0 + cell[0],
+            compiled_origin_y_up - cell[1] * 2.0 + cell[1] * 0.15,
+        ];
+        let down_right = [start[0] + 9.0, start[1] - 45.0];
+        let up_left = [start[0] - 9.0, start[1] + 45.0];
+        let down_right_drop =
+            mean_linear_luma_drop(&long_field, &long_room, cast_probe_roi(down_right), 1.0);
+        let up_left_drop =
+            mean_linear_luma_drop(&long_field, &long_room, cast_probe_roi(up_left), 1.0);
+        assert!(
+            down_right_drop > up_left_drop + 0.002,
+            "cast must follow the authored down-right vector: down-right={down_right_drop}, up-left={up_left_drop}"
+        );
+
+        let long_range = changed_pixel_y_range(&long_field, &long_room)
+            .expect("long cast changes receiving-surface pixels");
+        let short_range = changed_pixel_y_range(&short_field, &short_room)
+            .expect("short cast changes receiving-surface pixels");
+        assert!(
+            long_range.1 > short_range.1 + 15,
+            "taller profile must extend farther down the receiver: long={long_range:?}, short={short_range:?}"
+        );
+
+        assert_eq!(long_room.rgba, duplicate_room.rgba);
+        assert_eq!(
+            long_field.rgba, duplicate_field.rgba,
+            "duplicate shadows must max-union without additive darkening"
+        );
+        assert_eq!(invisible_field.rgba, invisible_room.rgba);
+        assert_eq!(ungrounded_field.rgba, ungrounded_room.rgba);
+        assert_eq!(small_field.rgba, small_room.rgba);
     }
 
     #[cfg(target_os = "macos")]

@@ -976,10 +976,13 @@ fn fs_prop_shadows(
             let visible = (frame.flags & 1u) != 0u;
             let footprint = vec2<f32>(frame.values[5], frame.values[6]);
             let strength = frame.values[7];
+            let cast_vector = vec2<f32>(frame.values[8], frame.values[9]);
+            let cast_softness = frame.values[10];
+            let cast_strength = frame.values[11];
             if (frame.kind == 1u
                 && visible
                 && min(footprint.x, footprint.y) > 0.0
-                && strength > 0.0) {
+                && (strength > 0.0 || cast_strength > 0.0)) {
                 let origin = vec2<f32>(frame.values[0], frame.values[1])
                     + vec2<f32>(frame.values[2], frame.values[3]);
                 let radii = vec2<f32>(
@@ -993,8 +996,27 @@ fn fs_prop_shadows(
                 let distance = length((input.point_position - center) / radii);
                 let edge = max(fwidth(distance), 0.0001);
                 let ellipse = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, distance);
-                let slot_coverage = ellipse
-                    * clamp(strength, 0.0, 1.0)
+                let contact_coverage = ellipse * clamp(strength, 0.0, 1.0);
+                let segment_length_squared = dot(cast_vector, cast_vector);
+                var cast_coverage = 0.0;
+                if (segment_length_squared > 0.0
+                    && cast_softness > 0.0
+                    && cast_strength > 0.0) {
+                    let relative = input.point_position - center;
+                    let along = clamp(
+                        dot(relative, cast_vector) / segment_length_squared,
+                        0.0,
+                        1.0,
+                    );
+                    let capsule_distance = length(relative - cast_vector * along);
+                    let core_radius = max(footprint.x * 0.25, cell_extent.x * 0.5);
+                    cast_coverage = (1.0 - smoothstep(
+                        core_radius,
+                        core_radius + cast_softness,
+                        capsule_distance,
+                    )) * clamp(cast_strength, 0.0, 1.0);
+                }
+                let slot_coverage = max(contact_coverage, cast_coverage)
                     * clamp(frame.values[4], 0.0, 1.0);
                 union_coverage = max(union_coverage, slot_coverage);
             }
