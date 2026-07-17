@@ -132,11 +132,13 @@ falls back to contact-only so tiny shadows do not create noise.
 
 ### Cast-shadow geometry
 
-Qualifying prop shadows project from the prop's grounded footprint away from
-the existing scene light direction. Shadow length is proportional to authored
-height and light elevation, with a conservative clamp so it remains inside the
-tank bed/receiving surface. Softness increases with projection distance and
-opacity decreases with distance.
+Qualifying prop shadows project from the prop's grounded footprint along the
+companion's fixed visual key-light projection, normalized in Y-up scene space
+as `[+0.20, -1.00]`. This is an authored presentation constant, not a new
+runtime scene light. Shadow length is proportional to authored height, with a
+conservative clamp so it remains inside the tank bed/receiving surface.
+Softness increases with projection distance and opacity decreases with
+distance.
 
 The cast shadow uses multiply blending with the existing biome-derived shadow
 tint. Multiple prop shadows union by maximum coverage rather than repeatedly
