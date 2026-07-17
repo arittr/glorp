@@ -223,7 +223,7 @@ pub fn smooth_strips(_ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
             id: PURPOSEFUL_LOCOMOTION_ID.to_string(),
             kind: PreviewStripKind::PurposefulLocomotion,
             title: "Purposeful Locomotion".to_string(),
-            intent: "Review paused, deterministic locomotion choices across dwell, turn, glide, and depth samples."
+            intent: "Review paused, deterministic locomotion choices across waypoint, turn, swim, and depth samples."
                 .to_string(),
             dimensions: PreviewDimensions {
                 width: GRID_COLS,
@@ -241,14 +241,14 @@ pub fn smooth_strips(_ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
                 ),
                 (
                     "review_facts".to_string(),
-                    json!(["dwell", "turn", "glide", "depth"]),
+                    json!(["waypoint", "turn", "swim", "depth"]),
                 ),
             ]),
             frames: manifest_frames,
             review_prompts: vec![
-                "Step through dwell, turn, glide, and depth samples; confirm the strip reads like an animal choosing a destination rather than an oscillator."
+                "Step through waypoint, turn, swim, and depth samples; confirm the strip reads like an animal choosing a destination rather than an oscillator."
                     .to_string(),
-                "Confirm facing changes at a boundary and depth changes only during the later glide."
+                "Confirm facing changes at a waypoint and depth changes only during a later swim."
                     .to_string(),
             ],
         },
@@ -272,25 +272,21 @@ fn purposeful_locomotion_samples(
         motion,
     )
     .expect("review fixture should include a later depth excursion");
-    let glide_start = first_glide_in_segment(identity, planar)
-        .expect("planar segment should transition from dwell to glide");
     let next_boundary = planar + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
-    let glide_duration = next_boundary - glide_start;
-    let dwell_end = glide_start - time::Duration::milliseconds(1);
+    let swim_duration = next_boundary - planar;
     let glide_end = next_boundary - time::Duration::milliseconds(1);
-    let depth_glide_start = first_glide_in_segment(identity, depth)
-        .expect("depth segment should transition from dwell to glide");
     let depth_glide_end = depth + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
-    let depth_midpoint = depth_glide_start + (depth_glide_end - depth_glide_start) / 2;
+    let depth_duration = depth_glide_end - depth;
+    let depth_midpoint = depth + depth_duration / 2;
 
     [
-        ("dwell-start", planar),
-        ("dwell-end", dwell_end),
-        ("glide-quarter", glide_start + glide_duration / 4),
-        ("glide-half", glide_start + glide_duration / 2),
-        ("glide-three-quarters", glide_start + glide_duration * 3 / 4),
-        ("glide-end", glide_end),
+        ("waypoint-start", planar),
+        ("swim-quarter", planar + swim_duration / 4),
+        ("swim-half", planar + swim_duration / 2),
+        ("swim-three-quarters", planar + swim_duration * 3 / 4),
+        ("swim-end", glide_end),
         ("turn-boundary", turn),
+        ("depth-quarter", depth + depth_duration / 4),
         ("depth-excursion", depth_midpoint),
     ]
     .into_iter()
@@ -321,20 +317,6 @@ fn segment_boundary_at_or_after(now: time::OffsetDateTime) -> time::OffsetDateTi
         .expect("review segment boundary should parse")
 }
 
-fn first_glide_in_segment(
-    identity: u64,
-    segment_start: time::OffsetDateTime,
-) -> Option<time::OffsetDateTime> {
-    (0..LOCOMOTION_SEGMENT_SECS)
-        .map(|second| segment_start + time::Duration::seconds(second))
-        .find(|now| {
-            matches!(
-                sample_companion_locomotion(identity, *now, 1).phase,
-                crate::round::locomotion::LocomotionPhase::Glide
-            )
-        })
-}
-
 fn find_planar_segment(
     identity: u64,
     start: time::OffsetDateTime,
@@ -344,21 +326,17 @@ fn find_planar_segment(
     (0..64)
         .map(|offset| start + time::Duration::seconds(offset * LOCOMOTION_SEGMENT_SECS))
         .find(|segment_start| {
-            let Some(glide_start) = first_glide_in_segment(identity, *segment_start) else {
-                return false;
-            };
             let glide_end = *segment_start + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS)
                 - time::Duration::milliseconds(1);
             let next_boundary = *segment_start + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
-            let start_sample = sample_companion_locomotion(identity, glide_start, 1);
+            let start_sample = sample_companion_locomotion(identity, *segment_start, 1);
             let end_sample = sample_companion_locomotion(identity, glide_end, 1);
-            let glide_duration = next_boundary - glide_start;
+            let glide_duration = next_boundary - *segment_start;
             let preview_times = [
                 *segment_start,
-                glide_start - time::Duration::milliseconds(1),
-                glide_start + glide_duration / 4,
-                glide_start + glide_duration / 2,
-                glide_start + glide_duration * 3 / 4,
+                *segment_start + glide_duration / 4,
+                *segment_start + glide_duration / 2,
+                *segment_start + glide_duration * 3 / 4,
                 glide_end,
             ];
             (start_sample.point.z - end_sample.point.z).abs() < 0.01
@@ -380,12 +358,9 @@ fn find_depth_excursion(
     (0..64)
         .map(|offset| start + time::Duration::seconds(offset * LOCOMOTION_SEGMENT_SECS))
         .find(|segment_start| {
-            let Some(glide_start) = first_glide_in_segment(identity, *segment_start) else {
-                return false;
-            };
             let end = *segment_start + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
-            let midpoint = glide_start + (end - glide_start) / 2;
-            let start_sample = sample_companion_locomotion(identity, glide_start, 1);
+            let midpoint = *segment_start + (end - *segment_start) / 2;
+            let start_sample = sample_companion_locomotion(identity, *segment_start, 1);
             let midpoint_sample = sample_companion_locomotion(identity, midpoint, 1);
             (start_sample.point.z - midpoint_sample.point.z).abs() >= 0.10
                 && preview_plan(vm, motion, midpoint).is_ok()
@@ -527,7 +502,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn purposeful_locomotion_fixture_covers_dwell_turn_glide_and_depth() {
+    fn purposeful_locomotion_fixture_covers_waypoint_turn_swim_and_depth() {
         let vm = WatchViewModel::fixture_with_habitat_props();
         let motion = crate::round::scene::companion_roam_motion();
         let samples = purposeful_locomotion_samples(&vm, &motion);
@@ -539,22 +514,18 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "dwell-start",
-                "dwell-end",
-                "glide-quarter",
-                "glide-half",
-                "glide-three-quarters",
-                "glide-end",
+                "waypoint-start",
+                "swim-quarter",
+                "swim-half",
+                "swim-three-quarters",
+                "swim-end",
                 "turn-boundary",
+                "depth-quarter",
                 "depth-excursion",
             ]
         );
         assert!(matches!(
             samples[0].locomotion.phase,
-            crate::round::locomotion::LocomotionPhase::Dwell
-        ));
-        assert!(matches!(
-            samples[2].locomotion.phase,
             crate::round::locomotion::LocomotionPhase::Glide
         ));
         assert!(

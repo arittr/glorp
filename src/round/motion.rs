@@ -440,9 +440,7 @@ fn normalize_facing(facing: i8) -> i8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::round::locomotion::{
-        sample_companion_locomotion, stable_companion_identity, LocomotionPhase,
-    };
+    use crate::round::locomotion::{sample_companion_locomotion, stable_companion_identity};
     use crate::tui::view_model::WatchViewModel;
     use time::macros::datetime;
 
@@ -644,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn facing_flips_during_dwell_and_never_mid_glide() {
+    fn facing_flips_only_at_swim_waypoints() {
         let identity = 0x5eed_5eed;
         let start = datetime!(2026-07-17 12:00:00 UTC);
         let mut previous = sample_companion_locomotion(identity, start, 1);
@@ -652,13 +650,17 @@ mod tests {
         for second in 1..=(60 * 32) {
             let current =
                 sample_companion_locomotion(identity, start + time::Duration::seconds(second), 1);
-            if current.phase == LocomotionPhase::Glide && previous.phase == LocomotionPhase::Glide {
+            if current.segment_index == previous.segment_index {
                 assert_eq!(current.facing, previous.facing, "second={second}");
             }
             if current.facing != previous.facing {
                 saw_flip = true;
-                assert_eq!(current.phase, LocomotionPhase::Dwell, "second={second}");
-                assert_eq!(previous.phase, LocomotionPhase::Glide, "second={second}");
+                assert_eq!(
+                    current.segment_index,
+                    previous.segment_index + 1,
+                    "second={second}"
+                );
+                assert_eq!(current.segment_phase, 0.0, "second={second}");
             }
             previous = current;
         }

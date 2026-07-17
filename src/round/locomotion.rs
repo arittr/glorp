@@ -1,9 +1,9 @@
 //! Deterministic locomotion shared by live companion motion and Preview Lab.
 
-pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 8;
+pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 5;
 pub(crate) const LOCOMOTION_BLOCK_SEGMENTS: usize = 8;
-pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 1;
-pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 1;
+pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 0;
+pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 0;
 pub(crate) const LOCOMOTION_MAX_PLANAR_STEP: f32 = 0.85;
 pub(crate) const LOCOMOTION_MAX_DEPTH_STEP: f32 = 0.67;
 const LOCOMOTION_CONTROL_OFFSET_FRACTION: f32 = 0.12;
@@ -90,7 +90,7 @@ pub(crate) fn sample_companion_locomotion(
             segment_index,
             start,
             end,
-            minimum_jerk(glide_phase as f32),
+            swim_progress(glide_phase as f32),
         ),
         facing,
         phase: LocomotionPhase::Glide,
@@ -448,21 +448,43 @@ fn control_axis_monotonic_limit(
     }
 }
 
-fn minimum_jerk(t: f32) -> f32 {
+/// Covers most of a leg at a steady pace, with only a short acceleration and
+/// brake at each end. This avoids the long low-velocity tails of a full-leg
+/// minimum-jerk curve while preserving a continuous turn at waypoints.
+fn swim_progress(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    t * t * t * (10.0 + t * (-15.0 + 6.0 * t))
+    const RAMP: f32 = 0.10;
+    let cruise_velocity = 1.0 / (1.0 - RAMP);
+
+    if t < RAMP {
+        return cruise_velocity
+            * 0.5
+            * (t - RAMP / std::f32::consts::PI * (std::f32::consts::PI * t / RAMP).sin());
+    }
+    if t <= 1.0 - RAMP {
+        return cruise_velocity * (0.5 * RAMP + t - RAMP);
+    }
+
+    let remaining = 1.0 - t;
+    1.0 - cruise_velocity
+        * 0.5
+        * (remaining
+            - RAMP / std::f32::consts::PI * (std::f32::consts::PI * remaining / RAMP).sin())
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // Used by the endpoint derivative contract test.
-fn minimum_jerk_velocity(t: f32) -> f32 {
+#[cfg_attr(not(test), allow(dead_code))] // Used by the swim-profile contract test.
+fn swim_velocity(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    30.0 * t * t * (1.0 - t) * (1.0 - t)
-}
+    const RAMP: f32 = 0.10;
+    let cruise_velocity = 1.0 / (1.0 - RAMP);
 
-#[cfg_attr(not(test), allow(dead_code))] // Used by the endpoint derivative contract test.
-fn minimum_jerk_acceleration(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    60.0 * t - 180.0 * t * t + 120.0 * t * t * t
+    if t < RAMP {
+        return cruise_velocity * 0.5 * (1.0 - (std::f32::consts::PI * t / RAMP).cos());
+    }
+    if t <= 1.0 - RAMP {
+        return cruise_velocity;
+    }
+    cruise_velocity * 0.5 * (1.0 - (std::f32::consts::PI * (1.0 - t) / RAMP).cos())
 }
 
 fn route_is_valid(route: &[NormalizedLocomotionPoint; ROUTE_POINTS]) -> bool {
@@ -619,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn each_segment_has_a_brief_turn_and_a_visibly_purposeful_glide() {
+    fn each_segment_is_a_five_second_continuous_swim() {
         let identity = stable_companion_identity("dwell-duration");
         for segment in -24..24 {
             let dwell = dwell_seconds(identity, segment);
@@ -629,23 +651,15 @@ mod tests {
             );
 
             let start = segment * LOCOMOTION_SEGMENT_SECS;
-            assert_eq!(sample(identity, start).phase, LocomotionPhase::Dwell);
-            assert_eq!(
-                sample(identity, start + dwell - 1).phase,
-                LocomotionPhase::Dwell
-            );
-            assert_eq!(
-                sample(identity, start + dwell).phase,
-                LocomotionPhase::Glide
-            );
+            assert_eq!(sample(identity, start).phase, LocomotionPhase::Glide);
             let glide = LOCOMOTION_SEGMENT_SECS - dwell;
-            assert!(glide == 7, "segment {segment} had a {glide}-second glide");
+            assert!(glide == 5, "segment {segment} had a {glide}-second glide");
         }
     }
 
     #[test]
-    fn dwell_is_stationary_and_glide_meets_both_endpoints_exactly() {
-        let identity = stable_companion_identity("dwell-and-endpoints");
+    fn continuous_swim_meets_both_route_endpoints_exactly() {
+        let identity = stable_companion_identity("continuous-swim-endpoints");
         let segment = 17;
         let start = segment * LOCOMOTION_SEGMENT_SECS;
         let target = route_target(identity, segment);
@@ -653,8 +667,7 @@ mod tests {
         let dwell = dwell_seconds(identity, segment);
 
         assert_same_point(sample(identity, start).point, target);
-        assert_same_point(sample(identity, start + dwell - 1).point, target);
-        assert_same_point(sample(identity, start + dwell).point, target);
+        assert_eq!(dwell, 0);
         assert_same_point(
             sample(identity, start + LOCOMOTION_SEGMENT_SECS).point,
             next,
@@ -662,13 +675,35 @@ mod tests {
     }
 
     #[test]
-    fn minimum_jerk_has_zero_velocity_and_acceleration_at_endpoints() {
-        for t in [0.0, 1.0] {
-            assert_close(minimum_jerk_velocity(t), 0.0, "endpoint velocity");
-            assert_close(minimum_jerk_acceleration(t), 0.0, "endpoint acceleration");
+    fn awake_swim_makes_meaningful_progress_each_second() {
+        let identity = stable_companion_identity("purposeful-swim-cadence");
+
+        for segment in -24..24 {
+            let start_second = segment * LOCOMOTION_SEGMENT_SECS;
+            let start = route_target(identity, segment);
+            let end = route_target(identity, segment + 1);
+            let route_distance = planar_distance(start, end);
+
+            for elapsed_second in 0..LOCOMOTION_SEGMENT_SECS {
+                let before = sample(identity, start_second + elapsed_second).point;
+                let after = sample(identity, start_second + elapsed_second + 1).point;
+                let distance = planar_distance(before, after);
+                assert!(
+                    distance >= route_distance * 0.15,
+                    "segment {segment}, second {elapsed_second} moved only {distance} across a {route_distance} route"
+                );
+            }
         }
-        assert_close(minimum_jerk(0.0), 0.0, "start position");
-        assert_close(minimum_jerk(1.0), 1.0, "end position");
+    }
+
+    #[test]
+    fn swim_profile_has_a_short_ramp_and_a_steady_middle() {
+        for t in [0.0, 1.0] {
+            assert_close(swim_velocity(t), 0.0, "endpoint velocity");
+        }
+        assert_close(swim_progress(0.0), 0.0, "start position");
+        assert_close(swim_progress(1.0), 1.0, "end position");
+        assert!(swim_velocity(0.5) > 1.0, "the middle should cruise");
     }
 
     #[test]
@@ -693,7 +728,7 @@ mod tests {
             let glide_seconds = LOCOMOTION_SEGMENT_SECS - dwell;
             let halfway = instant(segment * LOCOMOTION_SEGMENT_SECS + dwell)
                 + Duration::nanoseconds(glide_seconds * NANOS_PER_SECOND / 2);
-            let eased = minimum_jerk(0.5);
+            let eased = swim_progress(0.5);
             let sampled = sample_companion_locomotion(identity, halfway, 1);
             assert_close(
                 sampled.point.z,
@@ -839,18 +874,14 @@ mod tests {
     }
 
     #[test]
-    fn facing_changes_only_at_the_stationary_segment_start() {
+    fn facing_stays_fixed_between_waypoints() {
         let identity = stable_companion_identity("facing-boundary");
         for segment in -8..16 {
             let start = segment * LOCOMOTION_SEGMENT_SECS;
-            let dwell = dwell_seconds(identity, segment);
             let facing = sample(identity, start).facing;
-            assert_eq!(sample(identity, start + dwell - 1).facing, facing);
-            assert_eq!(sample(identity, start + dwell).facing, facing);
-            assert_eq!(
-                sample(identity, start + LOCOMOTION_SEGMENT_SECS - 1).facing,
-                facing
-            );
+            for elapsed_second in 1..LOCOMOTION_SEGMENT_SECS {
+                assert_eq!(sample(identity, start + elapsed_second).facing, facing);
+            }
         }
     }
 
@@ -911,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn every_phase_aligned_two_minute_window_has_at_most_fifteen_reversals_per_axis() {
+    fn every_phase_aligned_two_minute_window_has_at_most_twenty_reversals_per_axis() {
         for seed in 0..16 {
             let identity = stable_companion_identity(&format!("two-minute-window-{seed}"));
             for minute in [-9, -1, 0, 7, 15] {
@@ -923,11 +954,11 @@ mod tests {
                     let x_reversals = axis_reversal_count(&samples, |point| point.x);
                     let y_reversals = axis_reversal_count(&samples, |point| point.y);
                     assert!(
-                        x_reversals <= 15,
+                        x_reversals <= 20,
                         "seed {seed} at minute {minute}, phase {phase} had {x_reversals} X reversals"
                     );
                     assert!(
-                        y_reversals <= 15,
+                        y_reversals <= 20,
                         "seed {seed} at minute {minute}, phase {phase} had {y_reversals} Y reversals"
                     );
                 }

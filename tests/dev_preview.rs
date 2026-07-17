@@ -3520,20 +3520,20 @@ fn dev_preview_purposeful_locomotion_strip_exports_only_bucketed_route_facts() {
         .map(|frame| frame["phase"].as_str().unwrap())
         .collect();
     for phase in [
-        "dwell-start",
-        "dwell-end",
-        "glide-quarter",
-        "glide-half",
-        "glide-three-quarters",
-        "glide-end",
+        "waypoint-start",
+        "swim-quarter",
+        "swim-half",
+        "swim-three-quarters",
+        "swim-end",
         "turn-boundary",
+        "depth-quarter",
         "depth-excursion",
     ] {
         assert!(phases.contains(phase), "missing purposeful phase {phase}");
     }
 
-    let mut planar_dwell_depths = BTreeSet::new();
-    let mut dwell_start_segment = None;
+    let mut planar_swim_depths = BTreeSet::new();
+    let mut waypoint_start_segment = None;
     let mut turn_segment = None;
     let mut saw_depth_excursion = false;
     for frame in strip["frames"].as_array().unwrap() {
@@ -3552,11 +3552,13 @@ fn dev_preview_purposeful_locomotion_strip_exports_only_bucketed_route_facts() {
         assert!(artifact["depth_bucket"].is_string());
         assert!(matches!(artifact["facing"].as_i64(), Some(-1 | 1)));
         let expected_locomotion_phase = match frame["phase"].as_str().unwrap() {
-            "dwell-start" | "dwell-end" | "turn-boundary" => "dwell",
-            "glide-quarter"
-            | "glide-half"
-            | "glide-three-quarters"
-            | "glide-end"
+            "waypoint-start"
+            | "swim-quarter"
+            | "swim-half"
+            | "swim-three-quarters"
+            | "swim-end"
+            | "turn-boundary"
+            | "depth-quarter"
             | "depth-excursion" => "glide",
             phase => panic!("unexpected purposeful review phase {phase}"),
         };
@@ -3566,11 +3568,13 @@ fn dev_preview_purposeful_locomotion_strip_exports_only_bucketed_route_facts() {
             "{} should sample the matching production locomotion phase",
             frame["phase"].as_str().unwrap()
         );
-        if frame["phase"].as_str().unwrap().starts_with("dwell-") {
-            planar_dwell_depths.insert(artifact["depth_bucket"].as_str().unwrap().to_string());
+        if frame["phase"].as_str().unwrap().starts_with("swim-")
+            || frame["phase"] == "waypoint-start"
+        {
+            planar_swim_depths.insert(artifact["depth_bucket"].as_str().unwrap().to_string());
         }
         match frame["phase"].as_str().unwrap() {
-            "dwell-start" => dwell_start_segment = artifact["segment_index"].as_i64(),
+            "waypoint-start" => waypoint_start_segment = artifact["segment_index"].as_i64(),
             "turn-boundary" => turn_segment = artifact["segment_index"].as_i64(),
             _ => {}
         }
@@ -3597,9 +3601,9 @@ fn dev_preview_purposeful_locomotion_strip_exports_only_bucketed_route_facts() {
         }
     }
     assert_eq!(
-        planar_dwell_depths.len(),
+        planar_swim_depths.len(),
         1,
-        "the initial dwell samples should stay on one planar route segment"
+        "the initial swim samples should stay on one planar route segment"
     );
     assert!(
         saw_depth_excursion,
@@ -3607,7 +3611,7 @@ fn dev_preview_purposeful_locomotion_strip_exports_only_bucketed_route_facts() {
     );
     assert_eq!(
         turn_segment,
-        dwell_start_segment.map(|segment| segment + 1),
+        waypoint_start_segment.map(|segment| segment + 1),
         "turn sample should be the next production segment boundary"
     );
 
