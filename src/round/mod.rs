@@ -2,6 +2,7 @@ pub mod depth;
 pub mod draw;
 pub mod hud;
 pub mod layout;
+pub mod locomotion;
 pub mod model;
 pub mod motion;
 pub mod parallax;
