@@ -1003,9 +1003,22 @@ pub(crate) fn validate_snapshot(
         let frame = &snapshot.frame.prop_instances[index];
         let authored = crate::game::habitat::catalog_prop_by_str(topology.catalog_id);
         let has_cast = frame.cast_shadow_strength > 0.0;
-        let has_any_cast_value = frame.cast_shadow_vector_points != [0.0; 2]
-            || frame.cast_shadow_softness_points != 0.0
-            || frame.cast_shadow_strength != 0.0;
+        let cast_values_are_canonical =
+            crate::presentation::props::prop_shadow_cast_values_are_canonical(
+                crate::presentation::props::PropShadowResolveInput {
+                    profile: topology.shadow_profile,
+                    visible: frame.visible,
+                    grounded: true,
+                    opacity: frame.opacity,
+                    footprint_points: frame.footprint_points,
+                    cell_extent_points: grid.cell_extent_points,
+                    contact_strength: frame.contact_shadow_strength,
+                    origin_y_up_points: [0.0; 2],
+                },
+                frame.cast_shadow_vector_points,
+                frame.cast_shadow_softness_points,
+                frame.cast_shadow_strength,
+            );
         if frame.slot != topology.stable_order
             || authored.is_none_or(|spec| spec.shadow_profile != topology.shadow_profile)
             || !(0.0..=1.0).contains(&frame.opacity)
@@ -1016,14 +1029,7 @@ pub(crate) fn validate_snapshot(
             || !(0.0..=1.0).contains(&frame.contact_shadow_strength)
             || frame.cast_shadow_softness_points < 0.0
             || !(0.0..=1.0).contains(&frame.cast_shadow_strength)
-            || has_cast
-                != (frame.cast_shadow_vector_points != [0.0; 2]
-                    && frame.cast_shadow_softness_points > 0.0)
-            || (has_any_cast_value
-                && !matches!(
-                    topology.shadow_profile,
-                    crate::game::habitat::HabitatPropShadowProfile::Elevated { .. }
-                ))
+            || !cast_values_are_canonical
             || (!frame.visible
                 && (frame.contact_shadow_strength != 0.0 || frame.cast_shadow_strength != 0.0))
             || (frame.opacity == 0.0 && frame.cast_shadow_strength != 0.0)
@@ -3146,6 +3152,50 @@ mod tests {
         set_pet_depth(snapshot, snapshot.frame.pet_depth + delta);
     }
 
+    fn snapshot_with_cast(catalog_id: &'static str) -> CompanionSceneSnapshot {
+        let mut candidate = (*snapshot()).clone();
+        let profile = crate::game::habitat::catalog_prop_by_str(catalog_id)
+            .unwrap()
+            .shadow_profile;
+        candidate.topology.visible_props[0].catalog_id = catalog_id;
+        candidate.topology.visible_props[0].shadow_profile = profile;
+        candidate.content.prop_animation_states[0].catalog_id = catalog_id;
+        candidate.content.prop_animation_states[0].bloom_active = None;
+        let frame = &mut candidate.frame.prop_instances[0];
+        frame.visible = true;
+        frame.opacity = 1.0;
+        frame.footprint_points = [12.0, 24.0];
+        frame.contact_shadow_strength = 0.34;
+        if matches!(
+            profile,
+            crate::game::habitat::HabitatPropShadowProfile::Elevated { .. }
+        ) {
+            let resolved = crate::presentation::props::resolve_prop_shadow(
+                crate::presentation::props::PropShadowResolveInput {
+                    profile,
+                    visible: true,
+                    grounded: true,
+                    opacity: frame.opacity,
+                    footprint_points: frame.footprint_points,
+                    cell_extent_points: candidate.topology.glyph_grid.cell_extent_points,
+                    contact_strength: frame.contact_shadow_strength,
+                    origin_y_up_points: [0.0; 2],
+                },
+            )
+            .unwrap();
+            let cast = resolved.cast.unwrap();
+            frame.contact_shadow_strength = resolved.contact_strength;
+            frame.cast_shadow_vector_points = cast.vector_y_up_points;
+            frame.cast_shadow_softness_points = cast.softness_points;
+            frame.cast_shadow_strength = cast.strength;
+        } else {
+            frame.cast_shadow_vector_points = [2.0, -10.0];
+            frame.cast_shadow_softness_points = 2.0;
+            frame.cast_shadow_strength = 0.2;
+        }
+        candidate
+    }
+
     fn parallax_regression_clock() -> CompanionProjectionClock {
         CompanionProjectionClock::new(time::macros::datetime!(2026-07-11 12:00 UTC), 2_731)
     }
@@ -5100,22 +5150,6 @@ mod tests {
 
     #[test]
     fn snapshot_cast_lanes_require_matching_elevated_authored_profile() {
-        let cast_snapshot = |catalog_id, profile| {
-            let mut candidate = (*snapshot()).clone();
-            candidate.topology.visible_props[0].catalog_id = catalog_id;
-            candidate.topology.visible_props[0].shadow_profile = profile;
-            candidate.content.prop_animation_states[0].catalog_id = catalog_id;
-            candidate.content.prop_animation_states[0].bloom_active = None;
-            let frame = &mut candidate.frame.prop_instances[0];
-            frame.visible = true;
-            frame.opacity = 1.0;
-            frame.footprint_points = [12.0, 24.0];
-            frame.cast_shadow_vector_points = [2.0, -10.0];
-            frame.cast_shadow_softness_points = 2.0;
-            frame.cast_shadow_strength = 0.2;
-            candidate
-        };
-
         for catalog_id in [
             crate::game::habitat::TOKEN_LANTERN_10M,
             crate::game::habitat::TOKEN_PEBBLE_25K,
@@ -5123,7 +5157,7 @@ mod tests {
             let profile = crate::game::habitat::catalog_prop_by_str(catalog_id)
                 .unwrap()
                 .shadow_profile;
-            let forged = cast_snapshot(catalog_id, profile);
+            let forged = snapshot_with_cast(catalog_id);
             assert_eq!(
                 validate_snapshot(&forged),
                 Err(SnapshotRejection::InconsistentIdentity),
@@ -5132,13 +5166,51 @@ mod tests {
         }
 
         let catalog_id = crate::game::habitat::TOKEN_TREASURE_CHEST_2M;
-        let profile = crate::game::habitat::catalog_prop_by_str(catalog_id)
-            .unwrap()
-            .shadow_profile;
-        assert_eq!(
-            validate_snapshot(&cast_snapshot(catalog_id, profile)),
-            Ok(())
-        );
+        assert_eq!(validate_snapshot(&snapshot_with_cast(catalog_id)), Ok(()));
+    }
+
+    #[test]
+    fn snapshot_rejects_partial_and_noncanonical_elevated_cast_values() {
+        let canonical = snapshot_with_cast(crate::game::habitat::TOKEN_TREASURE_CHEST_2M);
+        assert_eq!(validate_snapshot(&canonical), Ok(()));
+
+        let mutations: Vec<SnapshotMutation> = vec![
+            (
+                "partial tail",
+                Box::new(|snapshot| {
+                    let frame = &mut snapshot.frame.prop_instances[0];
+                    frame.cast_shadow_softness_points = 0.0;
+                    frame.cast_shadow_strength = 0.0;
+                }),
+            ),
+            (
+                "forged direction",
+                Box::new(|snapshot| {
+                    snapshot.frame.prop_instances[0].cast_shadow_vector_points[0] += 1.0;
+                }),
+            ),
+            (
+                "forged softness",
+                Box::new(|snapshot| {
+                    snapshot.frame.prop_instances[0].cast_shadow_softness_points += 1.0;
+                }),
+            ),
+            (
+                "forged strength",
+                Box::new(|snapshot| {
+                    snapshot.frame.prop_instances[0].cast_shadow_strength *= 0.5;
+                }),
+            ),
+        ];
+        for (name, mutate) in mutations {
+            let mut invalid = canonical.clone();
+            mutate(&mut invalid);
+            assert_eq!(
+                validate_snapshot(&invalid),
+                Err(SnapshotRejection::InconsistentIdentity),
+                "{name}",
+            );
+        }
     }
 
     #[test]

@@ -166,6 +166,37 @@ pub(crate) fn resolve_prop_shadow(
     })
 }
 
+pub(crate) fn prop_shadow_cast_values_are_canonical(
+    mut input: PropShadowResolveInput,
+    vector_y_up_points: [f32; 2],
+    softness_points: f32,
+    strength: f32,
+) -> bool {
+    let all_zero = vector_y_up_points == [0.0; 2] && softness_points == 0.0 && strength == 0.0;
+    if all_zero {
+        return true;
+    }
+    let complete = vector_y_up_points != [0.0; 2] && softness_points > 0.0 && strength > 0.0;
+    if !complete {
+        return false;
+    }
+
+    // Grounding is not serialized. A present cast proves the source was grounded,
+    // while an absent cast remains valid for either grounded state.
+    input.grounded = true;
+    input.origin_y_up_points = [0.0; 2];
+    let Ok(resolved) = resolve_prop_shadow(input) else {
+        return false;
+    };
+    let Some(cast) = resolved.cast else {
+        return false;
+    };
+    resolved.contact_strength == input.contact_strength
+        && cast.vector_y_up_points == vector_y_up_points
+        && cast.softness_points == softness_points
+        && cast.strength == strength
+}
+
 fn prop_shadow_coverage_at(point_y_up: [f32; 2], shadow: ResolvedPropShadow) -> f32 {
     if point_y_up.into_iter().any(|value| !value.is_finite()) {
         return 0.0;

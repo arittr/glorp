@@ -2412,21 +2412,31 @@ fn validate_prop_frame_slot(
         return Err(SceneValidationError::NonFiniteFrameValue);
     }
     let has_cast = slot.cast_shadow_strength > 0.0;
-    let has_cast_shape =
-        slot.cast_shadow_vector_points != [0.0; 2] && slot.cast_shadow_softness_points > 0.0;
     let has_any_cast_value = slot.cast_shadow_vector_points != [0.0; 2]
         || slot.cast_shadow_softness_points != 0.0
         || slot.cast_shadow_strength != 0.0;
+    let cast_values_are_canonical = shadow_profile.is_some_and(|profile| {
+        crate::presentation::props::prop_shadow_cast_values_are_canonical(
+            crate::presentation::props::PropShadowResolveInput {
+                profile,
+                visible: slot.visible,
+                grounded: true,
+                opacity: slot.opacity,
+                footprint_points: slot.footprint_points,
+                cell_extent_points: glyph_cell_extent_points,
+                contact_strength: slot.contact_shadow_strength,
+                origin_y_up_points: [0.0; 2],
+            },
+            slot.cast_shadow_vector_points,
+            slot.cast_shadow_softness_points,
+            slot.cast_shadow_strength,
+        )
+    }) || (shadow_profile.is_none() && !has_any_cast_value);
     if slot.footprint_points.into_iter().any(|extent| extent < 0.0)
         || !(0.0..=1.0).contains(&slot.contact_shadow_strength)
         || slot.cast_shadow_softness_points < 0.0
         || !(0.0..=1.0).contains(&slot.cast_shadow_strength)
-        || has_cast != has_cast_shape
-        || (has_any_cast_value
-            && !matches!(
-                shadow_profile,
-                Some(crate::game::habitat::HabitatPropShadowProfile::Elevated { .. })
-            ))
+        || !cast_values_are_canonical
         || (!slot.visible && slot.contact_shadow_strength != 0.0)
         || (!slot.visible && has_cast)
         || (slot.opacity == 0.0 && has_cast)
@@ -2595,6 +2605,36 @@ fn validate_unit_interval(value: f32) -> Result<(), SceneValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canonical_elevated_cast(
+        mut slot: PropFrameSlot,
+        profile: crate::game::habitat::HabitatPropShadowProfile,
+        cell_extent_points: [f32; 2],
+    ) -> PropFrameSlot {
+        slot.visible = true;
+        slot.opacity = 1.0;
+        slot.footprint_points = [12.0, 24.0];
+        slot.contact_shadow_strength = 0.34;
+        let resolved = crate::presentation::props::resolve_prop_shadow(
+            crate::presentation::props::PropShadowResolveInput {
+                profile,
+                visible: slot.visible,
+                grounded: true,
+                opacity: slot.opacity,
+                footprint_points: slot.footprint_points,
+                cell_extent_points,
+                contact_strength: slot.contact_shadow_strength,
+                origin_y_up_points: [0.0; 2],
+            },
+        )
+        .unwrap();
+        let cast = resolved.cast.unwrap();
+        slot.contact_shadow_strength = resolved.contact_strength;
+        slot.cast_shadow_vector_points = cast.vector_y_up_points;
+        slot.cast_shadow_softness_points = cast.softness_points;
+        slot.cast_shadow_strength = cast.strength;
+        slot
+    }
 
     #[test]
     fn analytic_and_glyph_paint_contracts_reject_mismatches_and_nonfinite_geometry() {
@@ -3076,20 +3116,82 @@ mod tests {
         }
 
         let mut template = fixture.template.clone();
-        template.prop_shadow_topology_slots[0].profile =
-            Some(crate::game::habitat::HabitatPropShadowProfile::Elevated {
-                visual_height_cells: 2.25,
-                softness_cells: 0.45,
-            });
+        let elevated = crate::game::habitat::HabitatPropShadowProfile::Elevated {
+            visual_height_cells: 2.25,
+            softness_cells: 0.45,
+        };
+        template.prop_shadow_topology_slots[0].profile = Some(elevated);
         let accepted = validate_template(&template).unwrap();
         let mut frame = fixture.frame.clone();
-        frame.prop_slots[0] = cast;
+        frame.prop_slots[0] = canonical_elevated_cast(
+            fixture.frame.prop_slots[0],
+            elevated,
+            template.glyph_grid.cell_extent_points,
+        );
         assert!(validate_frame(&frame, &accepted).is_ok());
 
         let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
         let mut delta = FrameDelta::empty();
-        delta.prop_slots.push(cast);
+        delta.prop_slots.push(frame.prop_slots[0]);
         assert!(validate_frame_delta(&delta, &accepted, &mut current).is_ok());
+    }
+
+    #[test]
+    fn prop_cast_lanes_reject_partial_and_noncanonical_values_in_full_and_delta_paths() {
+        type CastMutation = (&'static str, fn(&mut PropFrameSlot));
+
+        let fixture = SceneFixture::valid();
+        let elevated = crate::game::habitat::HabitatPropShadowProfile::Elevated {
+            visual_height_cells: 2.25,
+            softness_cells: 0.45,
+        };
+        let mut template = fixture.template.clone();
+        template.prop_shadow_topology_slots[0].profile = Some(elevated);
+        let accepted = validate_template(&template).unwrap();
+        let canonical = canonical_elevated_cast(
+            fixture.frame.prop_slots[0],
+            elevated,
+            template.glyph_grid.cell_extent_points,
+        );
+        let mutations: [CastMutation; 4] = [
+            ("partial tail", |slot| {
+                slot.cast_shadow_softness_points = 0.0;
+                slot.cast_shadow_strength = 0.0;
+            }),
+            ("forged direction", |slot| {
+                slot.cast_shadow_vector_points[0] += 1.0;
+            }),
+            ("forged softness", |slot| {
+                slot.cast_shadow_softness_points += 1.0;
+            }),
+            ("forged strength", |slot| {
+                slot.cast_shadow_strength *= 0.5;
+            }),
+        ];
+
+        for (name, mutate) in mutations {
+            let mut invalid = canonical;
+            mutate(&mut invalid);
+
+            let mut frame = fixture.frame.clone();
+            frame.prop_slots[0] = invalid;
+            assert_eq!(
+                validate_frame(&frame, &accepted).map(|_| ()),
+                Err(SceneValidationError::InvalidFrameValue),
+                "full {name}",
+            );
+
+            let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
+            let before = current.frame().clone();
+            let mut delta = FrameDelta::empty();
+            delta.prop_slots.push(invalid);
+            assert_eq!(
+                validate_frame_delta(&delta, &accepted, &mut current),
+                Err(SceneValidationError::InvalidFrameValue),
+                "delta {name}",
+            );
+            assert_eq!(current.frame(), &before, "delta {name} must stay atomic");
+        }
     }
 
     #[test]
