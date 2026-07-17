@@ -196,6 +196,69 @@ fn round_scene_uses_night_calm_for_asleep_state() {
 }
 
 #[test]
+fn round_scene_contract_has_no_mood_aura_alias_or_serialized_json() {
+    use glorp::presentation::companion_scene::scene::build_scene_generation;
+    use glorp::presentation::companion_scene::{
+        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+        CompanionSceneSnapshot, DeviceEpoch, LayoutGeneration, ResourceGeneration,
+        SceneGenerationKey,
+    };
+
+    const COLUMNS: u16 = 44;
+    const ROWS: u16 = 18;
+    let now = datetime!(2026-07-08 18:00 UTC);
+    let mut vm = WatchViewModel::fixture_with_habitat_props();
+    let rendered = glorp::pet::render::render_pet(
+        &glorp::pet::generation::generate_pet(&vm.pet_render.seed)
+            .with_species(vm.pet_render.generated_species),
+        vm.pet_render.stage,
+        vm.pet_render.mood,
+        glorp::pet::render::AnimationFrame::default(),
+    );
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+    let snapshot = CompanionSceneSnapshot::project_with_input(
+        &vm,
+        CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(now, 0),
+            CompanionLogicalLayout::round(360.0, 360.0),
+            COLUMNS,
+            ROWS,
+            glorp::round::scene::current_round_motion_clearance(ROWS),
+        ),
+    )
+    .expect("fixture projects");
+    let generation = build_scene_generation(
+        &snapshot,
+        SceneGenerationKey {
+            device: DeviceEpoch(1),
+            layout: LayoutGeneration(1),
+            resources: ResourceGeneration(1),
+        },
+    )
+    .expect("fixture builds");
+    let aliases = generation
+        .template()
+        .primitives
+        .iter()
+        .map(|primitive| {
+            generation
+                .template()
+                .nodes
+                .iter()
+                .find(|node| node.id == primitive.node)
+                .expect("primitive owns a declared node")
+                .alias
+                .as_str()
+        })
+        .collect::<Vec<_>>();
+    let serialized = serde_json::to_string(&aliases).expect("primitive aliases serialize");
+
+    assert!(!aliases.contains(&"pet.aura.mood"));
+    assert!(!serialized.contains("pet.aura.mood"));
+}
+
+#[test]
 fn round_scene_tank_life_foreground_avoids_pet_face_and_bottom_hud() {
     let now = time::macros::datetime!(2026-07-08 18:00 UTC);
     let mut vm = WatchViewModel::fixture_with_tank_inhabitants_for_age(60, now.date());

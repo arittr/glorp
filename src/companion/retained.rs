@@ -104,10 +104,7 @@ const ARC_AA_MARGIN: f64 = 2.0;
 const RADIAL_GRADIENT_KIND: f32 = 6.0;
 
 pub(super) struct RetainedChrome<'a> {
-    pub(super) mood_aura: [f32; 4],
-    pub(super) pet_center_col: f64,
-    pub(super) pet_center_row: f64,
-    pub(super) pet_width_cells: f64,
+    pub(super) pet_rim_color: [f32; 4],
     pub(super) gauges: PreparedGaugeFrame,
     pub(super) overlays: &'a [RoundDrawCommand],
     pub(super) hud: &'a CompanionHudText,
@@ -177,24 +174,17 @@ impl PreparedGpuPrimitiveCollector {
     ) -> std::result::Result<u32, RetainedFailureCategory> {
         use crate::companion::paired_review::RendererIdentitySource;
 
-        let RendererIdentitySource::Smooth {
-            metrics,
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
-            plan,
-            draw_order,
-        } = frame.renderer_source()
+        let RendererIdentitySource::Smooth { metrics, plan, draw_order, .. } =
+            frame.renderer_source()
         else {
             return Err(RetainedFailureCategory::CaptureUnsupportedVariant);
         };
         let background = frame.review_background();
-        let mood_aura = frame.review_mood_aura();
         let chrome = RetainedChrome {
-            mood_aura: [mood_aura.0, mood_aura.1, mood_aura.2, mood_aura.3],
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
+            pet_rim_color: {
+                let color = frame.review_pet_rim_color();
+                [color.0, color.1, color.2, color.3]
+            },
             gauges: frame.review_gauges(),
             overlays: frame.review_overlays(),
             hud: frame.review_hud(),
@@ -1874,6 +1864,9 @@ fn prepare_gpu_frame(
     chrome: &RetainedChrome<'_>,
     atlas: &CompiledGlyphAtlas,
 ) -> std::result::Result<PreparedGpuFrame, RetainedFailureCategory> {
+    // Preserve the mood-derived tint for a later narrow rim without authoring
+    // a broad scene primitive in this renderer generation.
+    let _ = chrome.pet_rim_color;
     let mut primitives = Vec::new();
     let mut blends = Vec::new();
     let viewport_aperture = viewport_aperture(aperture);
@@ -1883,15 +1876,6 @@ fn prepare_gpu_frame(
         &mut blends,
         aperture,
         background,
-        viewport_aperture,
-        aperture_radius,
-    );
-    push_mood_aura(
-        &mut primitives,
-        &mut blends,
-        metrics,
-        aperture,
-        chrome,
         viewport_aperture,
         aperture_radius,
     );
@@ -2083,44 +2067,6 @@ fn push_tank_background(
         aperture_radius,
     });
     blends.push(SmoothBlendMode::Replace);
-}
-
-fn push_mood_aura(
-    primitives: &mut Vec<GpuPrimitive>,
-    blends: &mut Vec<SmoothBlendMode>,
-    metrics: CompanionGridMetrics,
-    aperture: RoundAperture,
-    chrome: &RetainedChrome<'_>,
-    viewport_aperture: [f32; 4],
-    aperture_radius: [f32; 4],
-) {
-    let center_x = metrics.origin_x + chrome.pet_center_col * metrics.cell_w;
-    let center_y = metrics.origin_y - (chrome.pet_center_row + 1.0) * metrics.cell_h;
-    let max_radius = chrome.pet_width_cells * metrics.cell_w * 0.95;
-    for index in 0..8 {
-        let t = index as f64 / 8.0;
-        let radius = max_radius * (1.0 - t);
-        push_solid_primitive(
-            primitives,
-            blends,
-            [
-                (center_x - radius) as f32,
-                (center_y - radius) as f32,
-                (radius * 2.0) as f32,
-                (radius * 2.0) as f32,
-            ],
-            display_rgba([
-                chrome.mood_aura[0],
-                chrome.mood_aura[1],
-                chrome.mood_aura[2],
-                0.05,
-            ]),
-            2.0,
-            viewport_aperture,
-            aperture_radius,
-        );
-    }
-    let _ = aperture;
 }
 
 fn push_gauges(

@@ -2119,15 +2119,6 @@ fn pack_analytic_content(value: AnalyticContentSlot) -> AnalyticContentGpuValue 
             payload[0] = pack_rgba8(active_srgba8);
             payload[1] = pack_rgba8(calm_srgba8);
         }
-        AnalyticPaint::MoodAuraRings {
-            color_srgb8,
-            ring_count,
-            per_ring_alpha_u8,
-        } => {
-            payload[0] = pack_rgb8(color_srgb8);
-            payload[1] = u32::from(ring_count);
-            payload[2] = u32::from(per_ring_alpha_u8);
-        }
         AnalyticPaint::PerimeterGaugeSet {
             xp,
             daily,
@@ -2207,18 +2198,6 @@ fn pack_analytic_frame(value: AnalyticFrameSlot) -> AnalyticFrameGpuValue {
             radius_points,
             thickness_points,
             status_beacon_tone_tag(tone) as f32,
-        ]),
-        AnalyticGeometry::PetAura {
-            center_points,
-            max_radius_points,
-            ring_count,
-            feather_points,
-        } => payload[..5].copy_from_slice(&[
-            center_points[0],
-            center_points[1],
-            max_radius_points,
-            f32::from(ring_count),
-            feather_points,
         ]),
         AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
             payload[..2].copy_from_slice(&center_points);
@@ -3358,6 +3337,7 @@ fn analytic_semantic_tag(value: AnalyticSemantic) -> u32 {
         AnalyticSemantic::WallShadow => 2,
         AnalyticSemantic::FloorProjection => 3,
         AnalyticSemantic::StatusHalo => 4,
+        // Slot four remains reserved so packed semantic tags do not shift.
         AnalyticSemantic::MoodAura => 5,
         AnalyticSemantic::GaugePace => 6,
         AnalyticSemantic::Trouble => 7,
@@ -3374,7 +3354,6 @@ fn analytic_shape_tag(value: AnalyticShape) -> u32 {
         AnalyticShape::PetSilhouette => 2,
         AnalyticShape::PetFloorProjection => 3,
         AnalyticShape::StatusBeacon => 4,
-        AnalyticShape::PetAura => 5,
         AnalyticShape::PerimeterGaugeSet => 6,
         AnalyticShape::TroubleBeacon => 7,
         AnalyticShape::SurfaceOverlay => 8,
@@ -3923,14 +3902,14 @@ mod tests {
         assert_eq!(frame.lights.capacity(), 2);
 
         let production = compile_projected_full_scene_for_render_test(0);
-        assert_eq!(production.primitive_count(), 22);
+        assert_eq!(production.primitive_count(), 21);
         assert_eq!(production.phases.opaque_cutout.len(), 1);
-        assert_eq!(production.phases.world_blended_unsorted.len(), 18);
+        assert_eq!(production.phases.world_blended_unsorted.len(), 17);
         assert_eq!(production.phases.chrome_authored.len(), 3);
     }
 
     #[test]
-    fn analytic_packers_preserve_all_eleven_closed_roles_exactly() {
+    fn analytic_packers_preserve_all_active_roles_exactly() {
         let lane = |base: u8| GaugeLanePaint {
             track_srgba8: [base, base + 1, base + 2, base + 3],
             fill_srgba8: [base + 4, base + 5, base + 6, base + 7],
@@ -3954,11 +3933,6 @@ mod tests {
             AnalyticPaint::StatusBeacon {
                 active_srgba8: [19, 20, 21, 22],
                 calm_srgba8: [23, 24, 25, 26],
-            },
-            AnalyticPaint::MoodAuraRings {
-                color_srgb8: [27, 28, 29],
-                ring_count: 30,
-                per_ring_alpha_u8: 31,
             },
             gauge_paint,
             AnalyticPaint::TroubleBeacon { color_srgba8: [60, 61, 62, 63] },
@@ -4000,7 +3974,6 @@ mod tests {
                 0,
                 0,
             ],
-            [packed_rgb([27, 28, 29]), 30, 31, 0, 0, 0, 0, 0],
             expected_gauge_paint,
             [packed_rgba([60, 61, 62, 63]), 0, 0, 0, 0, 0, 0, 0],
             [packed_rgb([64, 65, 66]), 0, 0, 0, 0, 0, 0, 0],
@@ -4015,11 +3988,18 @@ mod tests {
         {
             let packed = pack_analytic_content(AnalyticContentSlot {
                 id: semantic.id(),
-                value: Some(AnalyticContent { semantic, shape: semantic.shape(), paint }),
+                value: Some(AnalyticContent {
+                    semantic,
+                    shape: semantic.shape().expect("active semantic has a shape"),
+                    paint,
+                }),
             });
             assert_eq!(packed.id, u32::from(semantic.id().0));
             assert_eq!(packed.semantic, analytic_semantic_tag(semantic));
-            assert_eq!(packed.shape, analytic_shape_tag(semantic.shape()));
+            assert_eq!(
+                packed.shape,
+                analytic_shape_tag(semantic.shape().expect("active semantic has a shape"))
+            );
             assert_eq!(packed.flags, 1);
             assert_eq!(packed.payload, expected);
         }
@@ -4058,12 +4038,6 @@ mod tests {
                 thickness_points: 16.0,
                 tone: StatusBeaconTone::Active,
             },
-            AnalyticGeometry::PetAura {
-                center_points: [17.0, 18.0],
-                max_radius_points: 19.0,
-                ring_count: 20,
-                feather_points: 21.0,
-            },
             gauge_geometry,
             AnalyticGeometry::TroubleBeacon {
                 center_points: [36.0, 37.0],
@@ -4092,9 +4066,6 @@ mod tests {
             [
                 13.0, 14.0, 15.0, 16.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             ],
-            [
-                17.0, 18.0, 19.0, 20.0, 21.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            ],
             expected_gauge_geometry,
             [
                 36.0, 37.0, 38.0, 39.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -4115,14 +4086,17 @@ mod tests {
                 id: semantic.id(),
                 value: Some(AnalyticFrame {
                     semantic,
-                    shape: semantic.shape(),
+                    shape: semantic.shape().expect("active semantic has a shape"),
                     rect_points,
                     geometry,
                 }),
             });
             assert_eq!(packed.id, u32::from(semantic.id().0));
             assert_eq!(packed.semantic, analytic_semantic_tag(semantic));
-            assert_eq!(packed.shape, analytic_shape_tag(semantic.shape()));
+            assert_eq!(
+                packed.shape,
+                analytic_shape_tag(semantic.shape().expect("active semantic has a shape"))
+            );
             let expected_flags = if semantic.gauge_lane().is_some() {
                 0x1_1101
             } else {
@@ -5729,7 +5703,7 @@ mod tests {
         let mut saw_room_content = false;
         let mut saw_room_frame = false;
         let mut saw_prop_paint = false;
-        let mut saw_content_analytics = false;
+        let mut saw_content_globals = false;
         let mut saw_frame_analytics = false;
 
         for frame_index in 1..=300 {
@@ -5809,6 +5783,12 @@ mod tests {
                 assert!(!dirty.frame_globals.as_slice().is_empty());
                 saw_globals = true;
             }
+            if changes.semantic().contains(
+                crate::presentation::companion_scene::runtime::SemanticChangeMask::MOOD_WEATHER,
+            ) {
+                assert!(!dirty.content_globals.as_slice().is_empty());
+                saw_content_globals = true;
+            }
             if prop_content_changed && !dirty.prop_glyphs.as_slice().is_empty() {
                 saw_prop_content = true;
             }
@@ -5846,9 +5826,6 @@ mod tests {
                 assert!(!dirty.room_frame.as_slice().is_empty());
                 saw_room_frame = true;
             }
-            if !dirty.content_analytics.as_slice().is_empty() {
-                saw_content_analytics = true;
-            }
             if !dirty.frame_analytics.as_slice().is_empty() {
                 saw_frame_analytics = true;
             }
@@ -5862,7 +5839,7 @@ mod tests {
         assert!(saw_room_content);
         assert!(saw_room_frame);
         assert!(saw_prop_paint);
-        assert!(saw_content_analytics);
+        assert!(saw_content_globals);
         assert!(saw_frame_analytics);
     }
 

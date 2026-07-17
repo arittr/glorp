@@ -170,3 +170,73 @@ Final verdict:
 - `.superpowers/sdd/task-4-report.md`
 
 This report path was already tracked and is updated as part of the Task 4 commit.
+
+---
+
+## 2026-07-17 addendum: Broad aura retirement
+
+### Result
+
+- Removed the broad mood aura from Smooth, Classic/AppKit, Pixel, scene-v2,
+  retained rendering, capture identity, and HUD interaction routing.
+- Kept `AnalyticSemantic::MoodAura.id() == 4` as an explicit ABI reservation.
+  Template, content, and frame slot 4 are empty; validation and checksums
+  encode the reservation; no primitive binds it.
+- Mood remains in `ContentGlobalsGpuValue.mood` and the pet model. The private
+  `pet_rim_color` is retained only as the Task 5 tint seam, without a shaped
+  scene value or a renderer primitive.
+- HUD interaction is exactly `PetBody` plus `PetParticles`.
+
+### Test-first evidence
+
+The requested no-aura tests were added before the implementation and initially
+failed on the old Smooth role, scene alias/slot, Classic schedule, Pixel
+ellipses, and retained HUD source. Their final targeted reruns pass:
+
+- `cargo test --test smooth_companion mood_aura`
+- `cargo test --features retained-renderer --lib companion::retained::render::tests::retained_draw_plan_has_no_mood_aura_source`
+- `cargo test --lib presentation::pixel::animator::tests`
+- `cargo test --test round_scene aura`
+- `cargo test --lib companion::app::tests::classic_paint_schedule_never_calls_a_radial_pet_effect`
+
+### Verification
+
+Passing focused suites:
+
+- `cargo check --features retained-renderer`
+- `cargo test --lib presentation::smooth::tests` (11 passed)
+- `cargo test --lib presentation::pixel::animator::tests` (1 passed)
+- `cargo test --features retained-renderer --lib presentation::companion_scene` (253 passed)
+- `cargo test --features retained-renderer --lib companion::retained::compiler::tests` (35 passed)
+- Targeted native retained production scene test
+- `cargo test --test round_scene` (9 passed)
+
+Known unrelated failures retained as-is:
+
+- Four Smooth integration checks whose motion fixtures have zero bob offset or
+  reject their depth placement before any aura path is exercised.
+- The Dev Preview smooth-motion progression check for the same zero-bob
+  precondition.
+- The Dev Preview smooth-sidecar parity check: `prop-shadows` was already
+  emitted at the Task 4 baseline but absent from its canonical mapping. That
+  pre-existing mismatch remains intentionally uncorrected.
+- The retained full-cast prop-shadow test, whose all-catalog input is rejected
+  as `SnapshotRejected(InconsistentIdentity)` before retained rendering starts.
+
+### Review notes
+
+- Searched source and tests for old role, primitive, paint, alias, shader, and
+  HUD-pipeline identifiers. Remaining `MoodAura` references are only the
+  reserved semantic identifier, its rejection/checksum handling, and explicit
+  negative contract tests.
+- Task 3 route-selection integration was not changed.
+
+### Post-review correction: retained slot-4 controller
+
+- The retained source-over analytic classifier incorrectly accepted reserved
+  slot 4 alongside active slots 5, 9, and 10. Slot 4 remains an ABI hole and
+  now fails closed; the classifier admits only 5, 9, and 10.
+- A focused source-over test was changed before the classifier and failed as
+  expected with `Some(WorldSourceOverAnalytic)` for slot 4. After the minimal
+  controller correction, it passes while separately preserving the valid
+  source-over classifications for slots 5, 9, and 10.

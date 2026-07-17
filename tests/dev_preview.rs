@@ -83,7 +83,7 @@ const SMOOTH_DEPTH_ENDPOINTS: [(&str, &str, f64); 3] = [
     ("round-smooth-depth-neutral", "neutral", 0.0),
     ("round-smooth-depth-front", "front", 1.0),
 ];
-const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 20] = [
+const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 19] = [
     ("depth-rings", "fixed", None),
     ("biome-wash", "parallax", Some("far")),
     ("room-glyphs", "parallax", Some("far")),
@@ -102,7 +102,6 @@ const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 20] = [
     ("tank-life-foreground", "parallax", Some("foreground")),
     ("status-halo", "fixed", None),
     ("trouble-indicator", "fixed", None),
-    ("mood-aura", "pet-attached", None),
     ("dim-overlay", "fixed", None),
 ];
 
@@ -373,7 +372,7 @@ fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
 
     assert_eq!(
         actual, SMOOTH_CANONICAL_LAYER_BINDINGS,
-        "{surface} should serialize the canonical 20-role motion mapping"
+        "{surface} should serialize the canonical 19-role motion mapping"
     );
 
     for (layer, (_, expected_binding, _)) in layers.iter().zip(SMOOTH_CANONICAL_LAYER_BINDINGS) {
@@ -2574,7 +2573,7 @@ fn dev_preview_pixel_strips_meet_animation_contract() {
 }
 
 #[test]
-fn dev_preview_pixel_feed_pulse_strip_decays_accent_aura() {
+fn dev_preview_pixel_feed_pulse_strip_decays_accent() {
     let run = PreviewRun::new();
 
     run.run_success("pixel");
@@ -2587,7 +2586,7 @@ fn dev_preview_pixel_feed_pulse_strip_decays_accent_aura() {
     assert!(first_accent_alpha > 0);
     assert!(
         late_accent_alpha < first_accent_alpha,
-        "feed-pulse accent aura should decay across the exported strip: first={first_accent_alpha}, late={late_accent_alpha}"
+        "feed-pulse accent should decay across the exported strip: first={first_accent_alpha}, late={late_accent_alpha}"
     );
 }
 
@@ -2994,7 +2993,7 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
     );
     assert_eq!(parity["review_status"], "smooth-extension");
     assert_eq!(parity["missing_roles"], Value::Array(vec![]));
-    assert_eq!(parity["required_roles"].as_array().unwrap().len(), 19);
+    assert_eq!(parity["required_roles"].as_array().unwrap().len(), 18);
 
     for path in smooth_sidecars {
         let sidecar: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();

@@ -1827,14 +1827,16 @@ mod tests {
             assert_eq!(built.delta_storage_pointers(), storage_pointers);
             assert_eq!(built.content().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
             assert_eq!(built.frame().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
-            assert!(
-                built.content().analytic_slots[..AnalyticSemantic::ALL.len()]
-                    .iter()
-                    .all(|slot| slot.value.is_some())
-            );
-            assert!(built.frame().analytic_slots[..AnalyticSemantic::ALL.len()]
-                .iter()
-                .all(|slot| slot.value.is_some()));
+            assert!(AnalyticSemantic::ALL.into_iter().all(|semantic| {
+                built.content().analytic_slots[usize::from(semantic.id().0)]
+                    .value
+                    .is_some()
+                    && built.frame().analytic_slots[usize::from(semantic.id().0)]
+                        .value
+                        .is_some()
+            }));
+            assert!(built.content().analytic_slots[4].value.is_none());
+            assert!(built.frame().analytic_slots[4].value.is_none());
             for (content, paint) in built
                 .content()
                 .prop_slots

@@ -47,7 +47,6 @@ pub fn render_pixel_frame(tick: PixelRendererTick<'_>) -> PixelFrame {
         i16::try_from(tick.viewport.logical_width / 2).unwrap() + scene.wander_x.round() as i16;
     let cy =
         i16::try_from(tick.viewport.logical_height / 2).unwrap() + scene.breath_y.round() as i16;
-    draw_aura(&mut frame, tick.input, &scene, cx, cy);
     draw_shadow(&mut frame, cx, cy + scene.body_ry + 6, scene.body_rx);
     if tick.art_reference.occupied_cells.is_empty() {
         draw_fallback_body(&mut frame, tick.input, &scene, cx, cy);
@@ -61,27 +60,6 @@ pub fn render_pixel_frame(tick: PixelRendererTick<'_>) -> PixelFrame {
     }
     clear_outside_round_aperture(&mut frame);
     frame
-}
-
-fn draw_aura(
-    frame: &mut PixelFrame,
-    input: &PixelPetInput,
-    scene: &PixelPetScene,
-    cx: i16,
-    cy: i16,
-) {
-    let alpha = (28.0 + scene.pulse_alpha * 42.0).round() as u8;
-    let color = rgba_with_alpha(input.palette.accent, alpha);
-    for (dx, dy, rx_pad, ry_pad) in [(-6, -3, 10, 8), (5, 0, 7, 5), (0, 6, 12, 9)] {
-        blend_ellipse(
-            frame,
-            cx + dx,
-            cy + dy,
-            scene.body_rx + rx_pad,
-            scene.body_ry + ry_pad,
-            color,
-        );
-    }
 }
 
 fn draw_shadow(frame: &mut PixelFrame, cx: i16, cy: i16, body_rx: i16) {
@@ -382,5 +360,75 @@ fn asleep_eye_spans(species: Species) -> (i16, i16, i16) {
     match species {
         Species::Crystal => (-9, 5, 4),
         _ => (-10, 6, 4),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::presentation::pixel::art_reference::{
+        PixelArtPoseKey, PixelCellBounds, PixelFootContact, PixelReferenceChecksum,
+    };
+    use crate::tui::view_model::WatchViewModel;
+    use std::collections::BTreeMap;
+    use time::macros::datetime;
+
+    fn empty_reference(input: &PixelPetInput) -> PixelPetArtReference {
+        PixelPetArtReference {
+            species: input.identity.species,
+            stage: input.identity.stage,
+            mood: input.mood,
+            pose: PixelArtPoseKey {
+                tick: 0,
+                hold_eyes_closed: false,
+                blink_suppression_ticks: 0,
+                blink_slowdown: 0,
+                soft_eyes: false,
+                work_accent: "none",
+                feed_reaction: false,
+                glitch_patch_tier: None,
+                glitch_burst_level: None,
+                glitch_day_key: None,
+                glitch_calm_mode: false,
+                glitch_feed_reaction: false,
+            },
+            width_cells: 0,
+            height_cells: 0,
+            occupied_cells: Vec::new(),
+            body_bounds: PixelCellBounds { min_x: 0, min_y: 0, max_x: 0, max_y: 0 },
+            foot_contact: PixelFootContact { cells: Vec::new() },
+            protected_regions: Vec::new(),
+            cue_coverage: BTreeMap::new(),
+            reference_checksum: PixelReferenceChecksum(0),
+            role_counts: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn pixel_idle_frame_has_no_large_ellipse_outside_the_body_shadow_and_rim_band() {
+        let now = datetime!(2026-07-08 12:00 UTC);
+        let input = PixelPetInput::from_watch_view_model(&WatchViewModel::fixture(), now);
+        let reference = empty_reference(&input);
+        let mut state = PixelRendererState::new(&input, now);
+        let scene = PixelPetScene::from_input_and_reference(&input, &reference, &state, now);
+        let frame = render_pixel_frame(PixelRendererTick {
+            input: &input,
+            art_reference: &reference,
+            viewport: PixelViewport::companion_default(),
+            now,
+            state: &mut state,
+        });
+        let center_x = i16::try_from(frame.width / 2).unwrap() + scene.wander_x.round() as i16;
+        let center_y = i16::try_from(frame.height / 2).unwrap() + scene.breath_y.round() as i16;
+        let probe_x = center_x + scene.body_rx + 8;
+        let probe_y = center_y;
+        let probe = frame.pixels
+            [usize::from(probe_y as u16) * usize::from(frame.width) + usize::from(probe_x as u16)];
+
+        assert_eq!(
+            probe,
+            Rgba8::TRANSPARENT,
+            "a broad idle ellipse leaked outside the body, shadow, and future narrow rim band"
+        );
     }
 }

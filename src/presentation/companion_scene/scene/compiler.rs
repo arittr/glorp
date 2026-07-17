@@ -679,21 +679,6 @@ fn project_depth_effect_node_deltas(
     current_frame: &SceneFrame,
     output: &mut Vec<NodeFrameState>,
 ) -> Result<(), SceneGenerationError> {
-    let aura_id = template
-        .nodes
-        .iter()
-        .find(|node| node.alias.as_str() == "pet.aura.mood")
-        .map(|node| node.id)
-        .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
-    let mut aura = current_frame
-        .nodes
-        .iter()
-        .find(|node| node.node == aura_id)
-        .copied()
-        .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
-    aura.local_transform = Transform3::translated([0.0, 0.0, resolved_effective_depth(snapshot)]);
-    output.push(aura);
-
     let wall_opacity = crate::presentation::companion_effects::wall_shadow_depth_cue(
         resolved_effective_depth(snapshot),
     )
@@ -1127,9 +1112,6 @@ fn build_template(
         ("world.tank.behind", Some("world.behind"), 0.0),
         ("pet.shadow.wall", Some("world.behind"), -1.30),
         ("pet", Some("scene.root"), 0.0),
-        // Aura geometry is already resolved into absolute world point-space.
-        // Keeping it under the pet would apply the pet transform twice.
-        ("pet.aura.mood", Some("scene.root"), 0.0),
         ("pet.body", Some("pet"), 0.0),
         ("pet.particles", Some("pet"), 0.0),
         ("world.foreground", Some("scene.root"), 0.0),
@@ -1409,16 +1391,6 @@ fn build_template(
         WorldBlend::PremultipliedAlpha,
         DepthBehavior::WorldReadOnly,
         PrimitiveBinding::Analytic(AnalyticSemantic::WallShadow.id()),
-        PrimitiveSpace::World,
-    )?;
-    push(
-        "pet.aura.mood",
-        PrimitiveKind::AnalyticShape,
-        "material.unlit-analytic",
-        "resource.analytic-geometry",
-        WorldBlend::PremultipliedAlpha,
-        DepthBehavior::WorldReadOnly,
-        PrimitiveBinding::Analytic(AnalyticSemantic::MoodAura.id()),
         PrimitiveSpace::World,
     )?;
     let pet_resource = format!(
@@ -1715,7 +1687,9 @@ pub(super) fn build_analytic_templates(bounds: Bounds3) -> Vec<AnalyticTemplateS
         let id = semantic.id();
         slots[usize::from(id.0)].value = Some(AnalyticTemplate {
             semantic,
-            shape: semantic.shape(),
+            shape: semantic
+                .shape()
+                .expect("active analytic semantics have a shape"),
             normalized_local_bounds: bounds,
         });
     }
@@ -1724,7 +1698,6 @@ pub(super) fn build_analytic_templates(bounds: Bounds3) -> Vec<AnalyticTemplateS
 
 fn analytic_paint(
     semantic: AnalyticSemantic,
-    mood: MoodContentKind,
     day_phase: super::super::CompanionDayPhase,
     biome: &str,
 ) -> AnalyticPaint {
@@ -1765,34 +1738,7 @@ fn analytic_paint(
                 crate::presentation::companion_effects::STATUS_CALM_SRGBA,
             ),
         },
-        AnalyticSemantic::MoodAura => {
-            let color = match mood {
-                MoodContentKind::Content => {
-                    crate::presentation::companion_effects::MOOD_CONTENT_SRGBA
-                }
-                MoodContentKind::Happy => crate::presentation::companion_effects::MOOD_HAPPY_SRGBA,
-                MoodContentKind::Ecstatic => {
-                    crate::presentation::companion_effects::MOOD_ECSTATIC_SRGBA
-                }
-                MoodContentKind::Hungry => {
-                    crate::presentation::companion_effects::MOOD_HUNGRY_SRGBA
-                }
-                MoodContentKind::Sad => crate::presentation::companion_effects::MOOD_SAD_SRGBA,
-                MoodContentKind::Sleepy => {
-                    crate::presentation::companion_effects::MOOD_SLEEPY_SRGBA
-                }
-                MoodContentKind::Wilted => {
-                    crate::presentation::companion_effects::MOOD_WILTED_SRGBA
-                }
-            };
-            AnalyticPaint::MoodAuraRings {
-                color_srgb8: crate::presentation::companion_effects::srgb8([
-                    color[0], color[1], color[2],
-                ]),
-                ring_count: 8,
-                per_ring_alpha_u8: crate::presentation::companion_effects::MOOD_AURA_RING_ALPHA_U8,
-            }
-        }
+        AnalyticSemantic::MoodAura => unreachable!("reserved analytic slot has no paint"),
         AnalyticSemantic::Trouble => AnalyticPaint::TroubleBeacon {
             color_srgba8: crate::presentation::companion_effects::srgba8(
                 crate::presentation::companion_effects::TROUBLE_SRGBA,
@@ -1811,7 +1757,7 @@ fn analytic_paint(
 #[cfg(test)]
 pub(super) fn build_analytic_content(content: &SceneContent) -> Vec<AnalyticContentSlot> {
     let mut slots = Vec::with_capacity(MAX_ANALYTIC_PARAMS);
-    project_analytic_content_with_biome(content.mood, content.day_phase, "starter", &mut slots);
+    project_analytic_content_with_biome(content.day_phase, "starter", &mut slots);
     slots
 }
 
@@ -1820,7 +1766,6 @@ fn project_analytic_content_for_snapshot(
     output: &mut Vec<AnalyticContentSlot>,
 ) {
     project_analytic_content_with_biome(
-        mood_content(snapshot.content.mood),
         snapshot.content.day_phase,
         snapshot.topology.room.primary_biome,
         output,
@@ -1828,7 +1773,6 @@ fn project_analytic_content_for_snapshot(
 }
 
 fn project_analytic_content_with_biome(
-    mood: MoodContentKind,
     day_phase: super::super::CompanionDayPhase,
     biome: &str,
     slots: &mut Vec<AnalyticContentSlot>,
@@ -1872,11 +1816,16 @@ fn project_analytic_content_with_biome(
                     crate::presentation::companion_effects::daily_rollover_contract_unorm8(),
             }
         } else {
-            analytic_paint(semantic, mood, day_phase, biome)
+            analytic_paint(semantic, day_phase, biome)
         };
         let id = semantic.id();
-        slots[usize::from(id.0)].value =
-            Some(AnalyticContent { semantic, shape: semantic.shape(), paint });
+        slots[usize::from(id.0)].value = Some(AnalyticContent {
+            semantic,
+            shape: semantic
+                .shape()
+                .expect("active analytic semantics have a shape"),
+            paint,
+        });
     }
 }
 
@@ -2018,9 +1967,6 @@ fn project_analytic_frame_slots_for_geometry(
         floor.radius_x * 2.0,
         floor.radius_y * 2.0,
     ];
-    let aura_radius = crate::presentation::companion_effects::mood_aura_radius(f64::from(
-        pet.body_radii[0] * 2.0,
-    )) as f32;
     let gauge_layout = crate::presentation::companion_effects::perimeter_gauge_layout(
         f64::from(radius),
         crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
@@ -2084,22 +2030,6 @@ fn project_analytic_frame_slots_for_geometry(
                 radius_points: 1.0,
                 thickness_points: 1.0,
                 tone: status_tone,
-            },
-        },
-        AnalyticFrame {
-            semantic: AnalyticSemantic::MoodAura,
-            shape: AnalyticShape::PetAura,
-            rect_points: [
-                pet.body_center[0] - aura_radius,
-                pet.body_center[1] - aura_radius,
-                aura_radius * 2.0,
-                aura_radius * 2.0,
-            ],
-            geometry: AnalyticGeometry::PetAura {
-                center_points: pet.body_center,
-                max_radius_points: aura_radius,
-                ring_count: 8,
-                feather_points: 4.0,
             },
         },
         gauge_frame(AnalyticSemantic::GaugePace),
@@ -2415,13 +2345,6 @@ fn build_frame(
         Some(snapshot.frame.pet_depth_cue.opacity),
     )?;
     let effective_depth = resolved_effective_depth(snapshot);
-    set_node(
-        &mut frame,
-        "pet.aura.mood",
-        Some(Transform3::translated([0.0, 0.0, effective_depth])),
-        None,
-        None,
-    )?;
     set_node(
         &mut frame,
         "pet.shadow.wall",

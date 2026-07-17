@@ -597,7 +597,6 @@ fn smooth_plan_assigns_every_current_role_its_approved_binding() {
         (TankLifeForeground, Parallax(Foreground)),
         (StatusHalo, Fixed),
         (TroubleIndicator, Fixed),
-        (MoodAura, PetAttached),
         (DimOverlay, Fixed),
     ];
 
@@ -880,7 +879,7 @@ fn anchored_bounds(
 }
 
 #[test]
-fn smooth_round_plan_includes_classic_and_round_only_roles() {
+fn smooth_plan_has_no_mood_aura_layer_or_required_role() {
     let vm = parity_fixture();
     let plan = glorp::round::smooth::build_round_smooth_scene_plan(
         &vm,
@@ -914,9 +913,14 @@ fn smooth_round_plan_includes_classic_and_round_only_roles() {
             SmoothLayerRole::TankLifeForeground,
             SmoothLayerRole::StatusHalo,
             SmoothLayerRole::TroubleIndicator,
-            SmoothLayerRole::MoodAura,
             SmoothLayerRole::DimOverlay,
         ]
+    );
+    assert!(
+        plan.layers
+            .iter()
+            .all(|layer| layer.role.as_str() != "mood-aura"),
+        "the Smooth plan must not reserve an aura layer"
     );
 }
 
@@ -1151,7 +1155,7 @@ fn classic_breath_does_not_change_parallax_focus() {
 }
 
 #[test]
-fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata_and_aura() {
+fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata() {
     let mut vm = parity_fixture();
     vm.day_context.asleep = true;
     let motion = glorp::round::scene::companion_roam_motion();
@@ -1165,7 +1169,6 @@ fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata_and_aura() {
         elapsed_ms,
     );
     let pet_body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
-    let mood_aura = plan.layer_by_role(SmoothLayerRole::MoodAura).unwrap();
     let snapped_bounds = anchored_bounds(pet_body.anchor, pet_body.local_bounds);
     let fractional_anchor = glorp::presentation::smooth::SmoothPoint {
         x: pet_body.anchor.x + pet_body.transform.translation.x,
@@ -1193,19 +1196,15 @@ fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata_and_aura() {
     assert_eq!(plan.pet.final_anchor, fractional_anchor);
     assert_eq!(plan.pet.fractional_bounds, fractional_bounds);
 
-    // The aura tracks the composed pet transform. Even an asleep pet's attenuated
-    // depth scales the body, so an aura pinned to the unscaled art would drift off
-    // the creature as it swims.
     let transformed_bounds = transformed_smooth_bounds(pet_body).unwrap();
     let transformed_center = SmoothPoint {
         x: (transformed_bounds.min.x + transformed_bounds.max.x) / 2.0,
         y: (transformed_bounds.min.y + transformed_bounds.max.y) / 2.0,
     };
     assert_eq!(plan.pet.transformed_bounds, transformed_bounds);
-    assert_eq!(mood_aura.transform_origin, transformed_center);
     assert_ne!(
         transformed_center, fractional_center,
-        "this fixture must carry a nonneutral depth or the aura contract is untested"
+        "this fixture must carry a nonneutral depth or transformed-bound metadata is untested"
     );
 }
 
@@ -1680,7 +1679,7 @@ fn depth_transform_keeps_idle_bob_on_the_pet_body_alone() {
 }
 
 #[test]
-fn depth_transform_publishes_transformed_bounds_and_drives_the_mood_aura() {
+fn depth_transform_publishes_transformed_bounds() {
     let vm = normal_lifecycle_fixture();
 
     for depth in [-1.0, 0.0, 1.0] {
@@ -1691,15 +1690,6 @@ fn depth_transform_publishes_transformed_bounds_and_drives_the_mood_aura() {
             transformed_smooth_bounds(pet_body).unwrap(),
             "published pet bounds must equal the pet body's transformed bounds"
         );
-
-        // The aura is prepared from the transformed bounds, not the unscaled art.
-        let aura = plan.layer_by_role(SmoothLayerRole::MoodAura).unwrap();
-        let aura_center = match aura.clip {
-            SmoothClip::Circle { center, .. } => center,
-            other => panic!("mood aura must keep a circular clip, got {other:?}"),
-        };
-        assert!((aura_center.x - center_x(plan.pet.transformed_bounds)).abs() < 1e-4);
-        assert!((aura_center.y - center_y(plan.pet.transformed_bounds)).abs() < 1e-4);
     }
 
     let far = plan_at_depth(&vm, 250, -1.0);

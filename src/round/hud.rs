@@ -1,5 +1,5 @@
 //! Pure, cross-platform geometry and color helpers for the round companion HUD
-//! (growth ring, stat gap, mood aura color). No AppKit; golden-testable.
+//! (growth ring, stat gap, mood rim color). No AppKit; golden-testable.
 
 use crate::game::metabolism::Mood;
 use crate::round::depth::CompanionGaugeLane;
@@ -332,10 +332,10 @@ pub fn prepare_hud_layout(
     PreparedHudLayout { lines, stack_size }
 }
 
-/// Soft-glow aura hue for the pet's mood. Opaque (alpha 1.0); the renderer
-/// applies its own translucency. Sad and Sleepy are deliberately distinct hues
-/// (different needs: happiness<35 vs energy<20). Starting palette — tuned on device.
-pub fn mood_aura_color(mood: Mood) -> RoundColor {
+/// Future narrow-rim hue for the pet's mood. Opaque (alpha 1.0); the renderer
+/// will apply coverage-aware translucency. Sad and Sleepy are deliberately
+/// distinct hues (different needs: happiness<35 vs energy<20).
+pub fn mood_rim_color(mood: Mood) -> RoundColor {
     let color = match mood {
         Mood::Content => crate::presentation::companion_effects::MOOD_CONTENT_SRGBA,
         Mood::Happy => crate::presentation::companion_effects::MOOD_HAPPY_SRGBA,
@@ -346,12 +346,6 @@ pub fn mood_aura_color(mood: Mood) -> RoundColor {
         Mood::Wilted => crate::presentation::companion_effects::MOOD_WILTED_SRGBA,
     };
     RoundColor(color[0], color[1], color[2], color[3])
-}
-
-/// Outer radius of the companion's eight-ring mood aura. The radius follows
-/// transformed pet width, so depth changes scale the aura exactly once.
-pub fn mood_aura_radius(transformed_pet_width: f64) -> f64 {
-    crate::presentation::companion_effects::mood_aura_radius(transformed_pet_width)
 }
 
 pub fn rate_direction_color(direction: crate::tui::view_model::RateDirection) -> RoundColor {
@@ -1101,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn every_mood_has_a_distinct_aura_color() {
+    fn every_mood_has_a_distinct_rim_color() {
         let moods = [
             Mood::Content,
             Mood::Happy,
@@ -1111,12 +1105,12 @@ mod tests {
             Mood::Sleepy,
             Mood::Wilted,
         ];
-        let colors: Vec<RoundColor> = moods.iter().map(|m| mood_aura_color(*m)).collect();
+        let colors: Vec<RoundColor> = moods.iter().map(|m| mood_rim_color(*m)).collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
                 assert_ne!(
                     colors[i], colors[j],
-                    "moods {:?} and {:?} must have distinct aura colors",
+                    "moods {:?} and {:?} must have distinct rim colors",
                     moods[i], moods[j]
                 );
             }
@@ -1125,7 +1119,7 @@ mod tests {
 
     #[test]
     fn sad_and_sleepy_are_distinct() {
-        assert_ne!(mood_aura_color(Mood::Sad), mood_aura_color(Mood::Sleepy));
+        assert_ne!(mood_rim_color(Mood::Sad), mood_rim_color(Mood::Sleepy));
     }
 
     #[test]

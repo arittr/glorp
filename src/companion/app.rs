@@ -40,10 +40,10 @@ use crate::round::depth::PetStatisticsOrder;
 use crate::round::depth::{CompanionDepthComposition, CompanionGaugeLane};
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
-    daily_overage_marker_fraction, mood_aura_radius, perimeter_gauge_colors,
-    perimeter_gauge_layout, prepare_hud_layout, prepared_perimeter_gauge_arcs,
-    tank_background_sample, tank_core_color, CompanionHudText, GaugeFractions, HudLineMetrics,
-    LineCap, PreparedGaugeArc, COMPANION_GAUGE_GAP_DEG,
+    daily_overage_marker_fraction, perimeter_gauge_colors, perimeter_gauge_layout,
+    prepare_hud_layout, prepared_perimeter_gauge_arcs, tank_background_sample, tank_core_color,
+    CompanionHudText, GaugeFractions, HudLineMetrics, LineCap, PreparedGaugeArc,
+    COMPANION_GAUGE_GAP_DEG,
 };
 use crate::round::layout::{layout_round_scene, RoundAperture, RoundRenderCapabilities};
 use crate::round::model::{derive_round_scene_model, RoundSceneModel};
@@ -148,7 +148,7 @@ pub(super) struct PreparedCompanionFrame {
     bounds: PreparedBounds,
     aperture: RoundAperture,
     background: RoundColor,
-    mood_aura_color: RoundColor,
+    pet_rim_color: RoundColor,
     dim_overlay: bool,
     renderer: PreparedRendererFrame,
     gauges: PreparedGaugeFrame,
@@ -331,15 +331,11 @@ pub fn smooth_appkit_paint_schedule(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SmoothPetFrontPaintStep {
-    MoodAura,
     Layers,
 }
 
-const fn smooth_appkit_pet_front_paint_schedule() -> [SmoothPetFrontPaintStep; 2] {
-    [
-        SmoothPetFrontPaintStep::MoodAura,
-        SmoothPetFrontPaintStep::Layers,
-    ]
+const fn smooth_appkit_pet_front_paint_schedule() -> [SmoothPetFrontPaintStep; 1] {
+    [SmoothPetFrontPaintStep::Layers]
 }
 
 #[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
@@ -365,8 +361,8 @@ impl PreparedCompanionFrame {
         self.background
     }
 
-    pub(super) fn review_mood_aura(&self) -> RoundColor {
-        self.mood_aura_color
+    pub(super) fn review_pet_rim_color(&self) -> RoundColor {
+        self.pet_rim_color
     }
 
     pub(super) fn review_dim_overlay(&self) -> bool {
@@ -467,7 +463,7 @@ impl PreparedCompanionFrame {
             },
             aperture,
             background: RoundColor(0.05, 0.06, 0.10, 1.0),
-            mood_aura_color: RoundColor(0.30, 0.40, 0.55, 0.80),
+            pet_rim_color: RoundColor(0.30, 0.40, 0.55, 0.80),
             dim_overlay: false,
             renderer: PreparedRendererFrame::Pixel {
                 frame: PixelFrame::transparent(PixelViewport::companion_default()),
@@ -783,8 +779,7 @@ fn prepare_companion_frame_at(
             } else {
                 None
             };
-            // The aura follows the pet's composed depth transform, so it grows and
-            // sinks with the creature instead of staying pinned to the unscaled art.
+            // Preserve transformed pet bounds for renderer-private coverage work.
             let transformed = plan.pet.transformed_bounds;
             let pet_center_col =
                 f64::from(transformed.min.x + (transformed.max.x - transformed.min.x) / 2.0);
@@ -889,7 +884,7 @@ fn prepare_companion_frame_at(
         bounds: prepared_bounds,
         aperture,
         background,
-        mood_aura_color: crate::round::hud::mood_aura_color(scene.pet.mood),
+        pet_rim_color: crate::round::hud::mood_rim_color(scene.pet.mood),
         dim_overlay,
         renderer,
         gauges,
@@ -2692,15 +2687,7 @@ fn present_retained_frame_with(present_identity: RetainedPresentIdentity) {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
         let frame = state.last_good_frame.as_ref()?;
-        let PreparedRendererFrame::Smooth {
-            metrics,
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
-            plan,
-            draw_order,
-            ..
-        } = &frame.renderer
+        let PreparedRendererFrame::Smooth { metrics, plan, draw_order, .. } = &frame.renderer
         else {
             return None;
         };
@@ -2733,15 +2720,12 @@ fn present_retained_frame_with(present_identity: RetainedPresentIdentity) {
             frame.aperture,
             background,
             crate::companion::retained::RetainedChrome {
-                mood_aura: [
-                    frame.mood_aura_color.0,
-                    frame.mood_aura_color.1,
-                    frame.mood_aura_color.2,
-                    frame.mood_aura_color.3,
+                pet_rim_color: [
+                    frame.pet_rim_color.0,
+                    frame.pet_rim_color.1,
+                    frame.pet_rim_color.2,
+                    frame.pet_rim_color.3,
                 ],
-                pet_center_col: *pet_center_col,
-                pet_center_row: *pet_center_row,
-                pet_width_cells: *pet_width_cells,
                 gauges: frame.gauges,
                 overlays: &frame.overlay_commands,
                 hud: &frame.hud,
@@ -3534,7 +3518,7 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                             appkit_prop_shadow_field.as_deref(),
                         ),
                         SmoothAppKitPaintStep::PetFront => {
-                            paint_smooth_pet_front(frame, plan, passes, metrics, &aperture)
+                            paint_smooth_pet_front(plan, passes, metrics, &aperture)
                         }
                         SmoothAppKitPaintStep::StatisticsEcho => {
                             if let Some(volume) = appkit_hud_volume {
@@ -3552,7 +3536,6 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                             if composition.pet_effective_z <= composition.statistics_z {
                                 if let Some(volume) = appkit_hud_volume {
                                     paint_smooth_statistics_interaction(
-                                        frame,
                                         plan,
                                         passes,
                                         metrics,
@@ -3581,7 +3564,6 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                 }
             }
             PreparedRendererFrame::Classic { metrics, draw_list, .. } => {
-                draw_mood_aura(frame, metrics);
                 appkit_blit_draw_list(
                     draw_list,
                     metrics.font_size,
@@ -3597,7 +3579,6 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
 }
 
 fn paint_smooth_pet_front(
-    frame: &PreparedCompanionFrame,
     plan: &SmoothCompanionScenePlan,
     passes: &PreparedSmoothDepthPasses,
     metrics: &CompanionGridMetrics,
@@ -3605,7 +3586,6 @@ fn paint_smooth_pet_front(
 ) {
     for step in smooth_appkit_pet_front_paint_schedule() {
         match step {
-            SmoothPetFrontPaintStep::MoodAura => draw_mood_aura(frame, metrics),
             SmoothPetFrontPaintStep::Layers => {
                 appkit_blit_smooth_plan(plan, &passes.pet_front, metrics, aperture, None)
             }
@@ -3614,7 +3594,6 @@ fn paint_smooth_pet_front(
 }
 
 fn paint_smooth_statistics_interaction(
-    frame: &PreparedCompanionFrame,
     plan: &SmoothCompanionScenePlan,
     passes: &PreparedSmoothDepthPasses,
     metrics: &CompanionGridMetrics,
@@ -3625,8 +3604,7 @@ fn paint_smooth_statistics_interaction(
     if !(0.0..=1.0).contains(&reveal_mix) || reveal_mix == 0.0 {
         return;
     }
-    let Some(overlay) =
-        render_masked_pet_front_image(frame, plan, passes, metrics, aperture, hud_volume)
+    let Some(overlay) = render_masked_pet_front_image(plan, passes, metrics, aperture, hud_volume)
     else {
         return;
     };
@@ -3638,7 +3616,6 @@ fn paint_smooth_statistics_interaction(
 }
 
 fn render_masked_pet_front_image(
-    frame: &PreparedCompanionFrame,
     plan: &SmoothCompanionScenePlan,
     passes: &PreparedSmoothDepthPasses,
     metrics: &CompanionGridMetrics,
@@ -3651,7 +3628,7 @@ fn render_masked_pet_front_image(
         let rep = allocate_srgb_bitmap_rep(bitmap_target)?;
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
         let restore = CurrentGraphicsContextRestore::install(&context);
-        paint_smooth_pet_front(frame, plan, passes, metrics, aperture);
+        paint_smooth_pet_front(plan, passes, metrics, aperture);
         hud_volume
             .primary_coverage
             .drawInRect_fromRect_operation_fraction(
@@ -3820,47 +3797,6 @@ pub(super) fn render_prepared_frame_to_rgba(
             rgba[row * packed_stride..(row + 1) * packed_stride].copy_from_slice(source);
         }
         Ok(rgba)
-    }
-}
-
-fn draw_mood_aura(frame: &PreparedCompanionFrame, metrics: &CompanionGridMetrics) {
-    let (pet_center_col, pet_center_row, pet_width_cells) = match &frame.renderer {
-        PreparedRendererFrame::Classic {
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
-            ..
-        }
-        | PreparedRendererFrame::Smooth {
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
-            ..
-        } => (*pet_center_col, *pet_center_row, *pet_width_cells),
-        PreparedRendererFrame::Pixel { .. } => return,
-    };
-
-    let cxp = metrics.origin_x + pet_center_col * metrics.cell_w;
-    let cyp = metrics.origin_y - (pet_center_row + 1.0) * metrics.cell_h;
-    let max_r = mood_aura_radius(pet_width_cells * metrics.cell_w);
-    const AURA_RINGS: usize = 8;
-    unsafe {
-        for i in 0..AURA_RINGS {
-            let t = i as f64 / AURA_RINGS as f64; // 0 = outer, 1 = inner
-            let rr = max_r * (1.0 - t);
-            let glow = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(cxp - rr, cyp - rr),
-                NSSize::new(rr * 2.0, rr * 2.0),
-            ));
-            ns_color(&RoundColor(
-                frame.mood_aura_color.0,
-                frame.mood_aura_color.1,
-                frame.mood_aura_color.2,
-                0.05,
-            ))
-            .setFill();
-            glow.fill();
-        }
     }
 }
 
@@ -4416,7 +4352,6 @@ fn smooth_depth_bucket(role: SmoothLayerRole) -> SmoothDepthBucket {
         }
         SmoothLayerRole::StatusHalo
         | SmoothLayerRole::TroubleIndicator
-        | SmoothLayerRole::MoodAura
         | SmoothLayerRole::DimOverlay => SmoothDepthBucket::ScreenReservation,
         SmoothLayerRole::DepthRings
         | SmoothLayerRole::BiomeWash
@@ -5126,7 +5061,6 @@ mod tests {
             SmoothLayerRole::TankLifeForeground,
             SmoothLayerRole::StatusHalo,
             SmoothLayerRole::TroubleIndicator,
-            SmoothLayerRole::MoodAura,
             SmoothLayerRole::DimOverlay,
         ];
         let layers = roles
@@ -5525,15 +5459,12 @@ mod tests {
     }
 
     #[test]
-    fn smooth_appkit_pass_plan_places_external_mood_aura_with_crossing_pet() {
+    fn classic_paint_schedule_never_calls_a_radial_pet_effect() {
         use crate::round::depth::{CompanionDepthComposition, PetStatisticsOrder};
 
         assert_eq!(
-            smooth_appkit_pet_front_paint_schedule(),
-            [
-                SmoothPetFrontPaintStep::MoodAura,
-                SmoothPetFrontPaintStep::Layers
-            ]
+            smooth_appkit_pet_front_paint_schedule().as_slice(),
+            &[SmoothPetFrontPaintStep::Layers]
         );
 
         let just_in_front = f32::from_bits(0.72_f32.to_bits() + 1);
@@ -6451,7 +6382,7 @@ mod tests {
         let late_accent_alpha = accent_alpha_sum(&late_frame, &late_input);
         assert!(
             late_accent_alpha < first_accent_alpha,
-            "live Pixel tick should decay feed-pulse aura without waiting for the next poll: first={first_accent_alpha}, late={late_accent_alpha}"
+            "live Pixel tick should decay the feed-pulse accent without waiting for the next poll: first={first_accent_alpha}, late={late_accent_alpha}"
         );
     }
 

@@ -1054,17 +1054,16 @@ fn validate_analytic_templates(slots: &[AnalyticTemplateSlot]) -> Result<(), Sce
         if usize::from(slot.id.0) != index {
             return Err(SceneValidationError::DuplicateSlot);
         }
-        match (index, slot.value) {
-            (index, Some(value))
-                if index < AnalyticSemantic::ALL.len()
-                    && value.semantic == AnalyticSemantic::ALL[index]
+        match (AnalyticSemantic::active_for_slot(slot.id), slot.value) {
+            (Some(semantic), Some(value))
+                if value.semantic == semantic
                     && value.semantic.id() == slot.id
-                    && value.shape == value.semantic.shape()
+                    && Some(value.shape) == value.semantic.shape()
                     && value.normalized_local_bounds == unit_bounds =>
             {
                 validate_bounds(value.normalized_local_bounds)?;
             }
-            (index, None) if index >= AnalyticSemantic::ALL.len() => {}
+            (None, None) => {}
             _ => return Err(SceneValidationError::NonCanonicalEmptySlot),
         }
     }
@@ -1315,12 +1314,7 @@ fn analytic_binding_semantics_match(
             DepthBehavior::WorldReadOnly,
             PrimitiveSpace::World,
         ),
-        AnalyticSemantic::MoodAura => (
-            MaterialKind::UnlitAnalytic,
-            WorldBlend::PremultipliedAlpha,
-            DepthBehavior::WorldReadOnly,
-            PrimitiveSpace::World,
-        ),
+        AnalyticSemantic::MoodAura => return false,
         AnalyticSemantic::GaugePace | AnalyticSemantic::GaugeDaily | AnalyticSemantic::GaugeXp => (
             MaterialKind::UnlitAnalytic,
             WorldBlend::PremultipliedAlpha,
@@ -1399,7 +1393,6 @@ fn validate_companion_instance_sources(
         ("pet.projection.floor", AnalyticSemantic::FloorProjection),
         ("world.prop.shadows", AnalyticSemantic::PropShadows),
         ("chrome.status", AnalyticSemantic::StatusHalo),
-        ("pet.aura.mood", AnalyticSemantic::MoodAura),
         ("world.gauge.pace", AnalyticSemantic::GaugePace),
         ("world.gauge.daily", AnalyticSemantic::GaugeDaily),
         ("world.gauge.xp", AnalyticSemantic::GaugeXp),
@@ -1716,16 +1709,13 @@ fn validate_analytic_content_slots(
         SceneValidationError::InvalidContentValue,
     )?;
     for slot in slots {
-        let index = usize::from(slot.id.0);
-        match (index, slot.value) {
-            (index, Some(value))
-                if index < AnalyticSemantic::ALL.len()
-                    && value.semantic == AnalyticSemantic::ALL[index]
-                    && value.shape == value.semantic.shape() =>
+        match (AnalyticSemantic::active_for_slot(slot.id), slot.value) {
+            (Some(semantic), Some(value))
+                if value.semantic == semantic && Some(value.shape) == value.semantic.shape() =>
             {
                 validate_analytic_paint(value.semantic, value.paint)?;
             }
-            (index, None) if index >= AnalyticSemantic::ALL.len() => {}
+            (None, None) => {}
             _ => return Err(SceneValidationError::InvalidContentValue),
         }
     }
@@ -1773,17 +1763,7 @@ fn validate_analytic_paint(
             AnalyticSemantic::StatusHalo,
             AnalyticPaint::StatusBeacon { active_srgba8, calm_srgba8 },
         ) => rgba(active_srgba8) && rgba(calm_srgba8),
-        (
-            AnalyticSemantic::MoodAura,
-            AnalyticPaint::MoodAuraRings {
-                color_srgb8,
-                ring_count: 8,
-                per_ring_alpha_u8,
-            },
-        ) => {
-            let _ = color_srgb8;
-            per_ring_alpha_u8 > 0
-        }
+        (AnalyticSemantic::MoodAura, _) => false,
         (
             AnalyticSemantic::GaugePace | AnalyticSemantic::GaugeDaily | AnalyticSemantic::GaugeXp,
             AnalyticPaint::PerimeterGaugeSet {
@@ -1928,16 +1908,13 @@ fn validate_analytic_frame_slots(
         SceneValidationError::InvalidFrameValue,
     )?;
     for slot in slots {
-        let index = usize::from(slot.id.0);
-        match (index, slot.value) {
-            (index, Some(value))
-                if index < AnalyticSemantic::ALL.len()
-                    && value.semantic == AnalyticSemantic::ALL[index]
-                    && value.shape == value.semantic.shape() =>
+        match (AnalyticSemantic::active_for_slot(slot.id), slot.value) {
+            (Some(semantic), Some(value))
+                if value.semantic == semantic && Some(value.shape) == value.semantic.shape() =>
             {
                 validate_analytic_frame(value, camera)?;
             }
-            (index, None) if index >= AnalyticSemantic::ALL.len() => {}
+            (None, None) => {}
             _ => return Err(SceneValidationError::InvalidFrameValue),
         }
     }
@@ -1992,12 +1969,6 @@ fn validate_analytic_frame(
             finite2(offset_points) && softness_points.is_finite()
         }
         AnalyticGeometry::PetFloorProjection { .. } => true,
-        AnalyticGeometry::PetAura {
-            center_points,
-            max_radius_points,
-            feather_points,
-            ..
-        } => finite2(center_points) && max_radius_points.is_finite() && feather_points.is_finite(),
         AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
             finite2(center_points)
                 && [xp, daily, pace].into_iter().all(|lane| {
@@ -2042,16 +2013,6 @@ fn validate_analytic_frame(
             bounded2(offset_points) && softness_points.abs() <= spatial_limit
         }
         AnalyticGeometry::PetFloorProjection { .. } => true,
-        AnalyticGeometry::PetAura {
-            center_points,
-            max_radius_points,
-            feather_points,
-            ..
-        } => {
-            bounded2(center_points)
-                && max_radius_points.abs() <= spatial_limit
-                && feather_points.abs() <= spatial_limit
-        }
         AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
             bounded2(center_points)
                 && [xp, daily, pace].into_iter().all(|lane| {
@@ -2143,22 +2104,7 @@ fn validate_analytic_frame(
                 && value.rect_points
                     == centered_rect(center_points, [radius_points + thickness_points; 2])
         }
-        (
-            AnalyticSemantic::MoodAura,
-            AnalyticGeometry::PetAura {
-                center_points,
-                max_radius_points,
-                ring_count: 8,
-                feather_points,
-            },
-        ) => {
-            finite2(center_points)
-                && max_radius_points.is_finite()
-                && max_radius_points > 0.0
-                && value.rect_points == centered_rect(center_points, [max_radius_points; 2])
-                && feather_points.is_finite()
-                && feather_points >= 0.0
-        }
+        (AnalyticSemantic::MoodAura, _) => false,
         (
             AnalyticSemantic::GaugePace | AnalyticSemantic::GaugeDaily | AnalyticSemantic::GaugeXp,
             AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace },
@@ -2750,18 +2696,6 @@ mod tests {
                 }
                 _ => unreachable!(),
             }),
-            (4, |value, extreme| match &mut value.geometry {
-                AnalyticGeometry::PetAura { center_points, .. } => center_points[1] = extreme,
-                _ => unreachable!(),
-            }),
-            (4, |value, extreme| match &mut value.geometry {
-                AnalyticGeometry::PetAura { max_radius_points, .. } => *max_radius_points = extreme,
-                _ => unreachable!(),
-            }),
-            (4, |value, extreme| match &mut value.geometry {
-                AnalyticGeometry::PetAura { feather_points, .. } => *feather_points = extreme,
-                _ => unreachable!(),
-            }),
             (5, |value, extreme| match &mut value.geometry {
                 AnalyticGeometry::PerimeterGaugeSet { center_points, .. } => {
                     center_points[0] = extreme
@@ -2935,7 +2869,7 @@ mod tests {
         let accepted = validate_template(&fixture.template).unwrap();
         // Floor projection geometry carries only its mask and facing; the compiler owns
         // its projected rectangle, which is still checked for positive bounded extent.
-        for slot in [0_usize, 3, 4, 5, 6, 7] {
+        for slot in [0_usize, 3, 5, 6, 7] {
             let mut changed = fixture.frame.analytic_slots[slot];
             changed.value.as_mut().unwrap().rect_points[2] *= 0.5;
 
@@ -3463,10 +3397,7 @@ mod tests {
                 primitive.space = PrimitiveSpace::World;
             }
             AnalyticSemantic::MoodAura => {
-                template.materials[0].kind = MaterialKind::UnlitAnalytic;
-                primitive.blend = WorldBlend::PremultipliedAlpha;
-                primitive.depth = DepthBehavior::WorldReadOnly;
-                primitive.space = PrimitiveSpace::World;
+                unreachable!("reserved analytic slot has no primitive binding")
             }
             AnalyticSemantic::GaugePace
             | AnalyticSemantic::GaugeDaily
@@ -3571,9 +3502,11 @@ mod tests {
                 AnalyticSemantic::RoomBackground => AnalyticSemantic::WallShadow,
                 AnalyticSemantic::WallShadow => AnalyticSemantic::FloorProjection,
                 AnalyticSemantic::FloorProjection | AnalyticSemantic::PropShadows => {
-                    AnalyticSemantic::MoodAura
+                    AnalyticSemantic::GaugePace
                 }
-                AnalyticSemantic::MoodAura => AnalyticSemantic::FloorProjection,
+                AnalyticSemantic::MoodAura => {
+                    unreachable!("reserved analytic slot is not an active test fixture")
+                }
                 AnalyticSemantic::GaugePace
                 | AnalyticSemantic::GaugeDaily
                 | AnalyticSemantic::GaugeXp => AnalyticSemantic::StatusHalo,

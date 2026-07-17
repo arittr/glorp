@@ -116,7 +116,7 @@ pub(crate) fn pet_rim_style(activity_opacity: f32, reduce_motion: bool) -> PetRi
 }
 
 /// Returns an alpha-only rim mask, with source coverage subtracted so callers
-/// can paint the pet above it without leaving an interior aura.
+/// can paint the pet above it without leaving an interior glow.
 #[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
 pub(crate) fn exterior_dilated_alpha(
     source: &[u8],
@@ -519,7 +519,6 @@ pub(crate) const TROUBLE_SRGBA: [f32; 4] = [0.92, 0.30, 0.25, 0.95];
 pub(crate) const RETAINED_WALL_SHADOW_TINT_SRGB8: [u8; 3] = [10, 12, 18];
 pub(crate) const SMOOTH_WALL_SHADOW_MULTIPLY_SRGB8: [u8; 3] = [118, 114, 142];
 pub(crate) const RETAINED_WALL_SHADOW_TINT_ALPHA_U8: u8 = 78;
-pub(crate) const MOOD_AURA_RING_ALPHA_U8: u8 = 13;
 pub(crate) const MOOD_CONTENT_SRGBA: [f32; 4] = [0.25, 0.71, 0.60, 1.0];
 pub(crate) const MOOD_HAPPY_SRGBA: [f32; 4] = [0.82, 0.45, 0.62, 1.0];
 pub(crate) const MOOD_ECSTATIC_SRGBA: [f32; 4] = [0.95, 0.40, 0.70, 1.0];
@@ -554,10 +553,6 @@ pub(crate) fn srgba8(color: [f32; 4]) -> [u8; 4] {
 
 pub(crate) fn srgb8(color: [f32; 3]) -> [u8; 3] {
     color.map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8)
-}
-
-pub(crate) fn mood_aura_radius(transformed_pet_width: f64) -> f64 {
-    transformed_pet_width.max(0.0) * 0.95
 }
 
 fn lerp(from: f32, to: f32, t: f32) -> f32 {
@@ -875,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_rim_inputs_disable_the_rim_without_restoring_an_aura() {
+    fn invalid_rim_inputs_disable_the_rim_without_restoring_a_glow() {
         let invalid = pet_rim_style(f32::NAN, false);
         assert!(!invalid.enabled);
         assert_eq!(invalid.alpha, 0.0);

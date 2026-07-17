@@ -688,12 +688,13 @@ pub enum AnalyticSemantic {
 }
 
 impl AnalyticSemantic {
-    pub const ALL: [Self; 11] = [
+    /// Active semantic slots. Slot four is deliberately omitted: it remains a
+    /// stable ABI reservation for the retired broad mood effect.
+    pub const ALL: [Self; 10] = [
         Self::RoomBackground,
         Self::WallShadow,
         Self::FloorProjection,
         Self::StatusHalo,
-        Self::MoodAura,
         Self::GaugePace,
         Self::Trouble,
         Self::Dim,
@@ -718,17 +719,40 @@ impl AnalyticSemantic {
         })
     }
 
-    pub const fn shape(self) -> AnalyticShape {
+    pub const fn is_reserved_slot(id: AnalyticParamId) -> bool {
+        id.0 == Self::MoodAura.id().0
+    }
+
+    pub const fn active_for_slot(id: AnalyticParamId) -> Option<Self> {
+        match id.0 {
+            0 => Some(Self::RoomBackground),
+            1 => Some(Self::WallShadow),
+            2 => Some(Self::FloorProjection),
+            3 => Some(Self::StatusHalo),
+            4 => None,
+            5 => Some(Self::GaugePace),
+            6 => Some(Self::Trouble),
+            7 => Some(Self::Dim),
+            8 => Some(Self::PropShadows),
+            9 => Some(Self::GaugeDaily),
+            10 => Some(Self::GaugeXp),
+            _ => None,
+        }
+    }
+
+    pub const fn shape(self) -> Option<AnalyticShape> {
         match self {
-            Self::RoomBackground => AnalyticShape::ApertureRadial,
-            Self::WallShadow => AnalyticShape::PetSilhouette,
-            Self::FloorProjection => AnalyticShape::PetFloorProjection,
-            Self::StatusHalo => AnalyticShape::StatusBeacon,
-            Self::MoodAura => AnalyticShape::PetAura,
-            Self::GaugePace | Self::GaugeDaily | Self::GaugeXp => AnalyticShape::PerimeterGaugeSet,
-            Self::Trouble => AnalyticShape::TroubleBeacon,
-            Self::Dim => AnalyticShape::SurfaceOverlay,
-            Self::PropShadows => AnalyticShape::PropShadowField,
+            Self::RoomBackground => Some(AnalyticShape::ApertureRadial),
+            Self::WallShadow => Some(AnalyticShape::PetSilhouette),
+            Self::FloorProjection => Some(AnalyticShape::PetFloorProjection),
+            Self::StatusHalo => Some(AnalyticShape::StatusBeacon),
+            Self::MoodAura => None,
+            Self::GaugePace | Self::GaugeDaily | Self::GaugeXp => {
+                Some(AnalyticShape::PerimeterGaugeSet)
+            }
+            Self::Trouble => Some(AnalyticShape::TroubleBeacon),
+            Self::Dim => Some(AnalyticShape::SurfaceOverlay),
+            Self::PropShadows => Some(AnalyticShape::PropShadowField),
         }
     }
 
@@ -756,7 +780,6 @@ pub enum AnalyticShape {
     PetSilhouette,
     PetFloorProjection,
     StatusBeacon,
-    PetAura,
     PerimeterGaugeSet,
     TroubleBeacon,
     SurfaceOverlay,
@@ -1016,11 +1039,6 @@ pub enum AnalyticPaint {
         active_srgba8: [u8; 4],
         calm_srgba8: [u8; 4],
     },
-    MoodAuraRings {
-        color_srgb8: [u8; 3],
-        ring_count: u8,
-        per_ring_alpha_u8: u8,
-    },
     PerimeterGaugeSet {
         xp: GaugeLanePaint,
         daily: GaugeLanePaint,
@@ -1102,12 +1120,6 @@ pub enum AnalyticGeometry {
         radius_points: f32,
         thickness_points: f32,
         tone: StatusBeaconTone,
-    },
-    PetAura {
-        center_points: [f32; 2],
-        max_radius_points: f32,
-        ring_count: u8,
-        feather_points: f32,
     },
     PerimeterGaugeSet {
         center_points: [f32; 2],
@@ -2154,6 +2166,36 @@ mod tests {
     }
 
     #[test]
+    fn scene_v2_reserves_analytic_slot_four_without_a_primitive_or_paint() {
+        let built =
+            build_scene_generation(&snapshot_for(Species::Fuzz, Stage::S3), generation_key(1))
+                .expect("fixture builds");
+        let mood_aura_slot = usize::from(AnalyticSemantic::MoodAura.id().0);
+
+        assert_eq!(mood_aura_slot, 4, "slot four remains an ABI reservation");
+        assert!(
+            built.template.analytic_templates[mood_aura_slot]
+                .value
+                .is_none(),
+            "the reserved analytic template slot must stay empty"
+        );
+        assert!(
+            built.content.analytic_slots[mood_aura_slot].value.is_none(),
+            "the reserved analytic content slot must not carry paint"
+        );
+        assert!(
+            built.frame.analytic_slots[mood_aura_slot].value.is_none(),
+            "the reserved analytic frame slot must not carry geometry"
+        );
+        assert!(
+            !built.template.primitives.iter().any(|primitive| {
+                primitive.binding == PrimitiveBinding::Analytic(AnalyticSemantic::MoodAura.id())
+            }),
+            "the reserved slot must not produce a draw primitive"
+        );
+    }
+
+    #[test]
     fn non_pet_glyphs_are_finite_and_instance_bindings_are_explicit() {
         assert_eq!(AuthoredGlyph::new('◆').unwrap().as_char(), '◆');
         assert_eq!(
@@ -2319,33 +2361,10 @@ mod tests {
                     .iter()
                     .enumerate()
                     .all(|(index, slot)| usize::from(slot.slot) == index));
-                let pet_node = built
-                    .template
-                    .nodes
-                    .iter()
-                    .find(|node| node.alias.as_str() == "pet")
-                    .unwrap();
-                let pet_transform = built
-                    .frame
-                    .nodes
-                    .iter()
-                    .find(|node| node.node == pet_node.id)
-                    .unwrap()
-                    .local_transform;
-                let (body_center, body_radii) =
-                    super::compiler::pet_body_world_geometry(&snapshot, pet_transform).unwrap();
-                let aura = built.frame.analytic_slots[4].value.unwrap();
                 assert!(
-                    aura.geometry
-                        == AnalyticGeometry::PetAura {
-                            center_points: body_center,
-                            max_radius_points:
-                                crate::presentation::companion_effects::mood_aura_radius(f64::from(
-                                    body_radii[0] * 2.0
-                                ),) as f32,
-                            ring_count: 8,
-                            feather_points: 4.0,
-                        },
+                    built.template.analytic_templates[4].value.is_none()
+                        && built.content.analytic_slots[4].value.is_none()
+                        && built.frame.analytic_slots[4].value.is_none(),
                     "{species:?} {stage:?}"
                 );
             }
@@ -3018,15 +3037,16 @@ mod tests {
         let frame_checksum = checksum::checksum_frame(&fixture.template, &fixture.frame).unwrap();
 
         let mut changed_content = fixture.content.clone();
-        changed_content.analytic_slots[4]
-            .value
-            .as_mut()
-            .unwrap()
-            .paint = AnalyticPaint::MoodAuraRings {
-            color_srgb8: [1, 2, 3],
-            ring_count: 8,
-            per_ring_alpha_u8: 13,
+        let AnalyticPaint::StatusBeacon { active_srgba8, .. } = &mut changed_content.analytic_slots
+            [3]
+        .value
+        .as_mut()
+        .unwrap()
+        .paint
+        else {
+            panic!("status fixture uses status-beacon paint");
         };
+        active_srgba8[0] ^= 1;
         assert_ne!(
             checksum::checksum_content(&changed_content).unwrap(),
             content_checksum
@@ -3635,7 +3655,6 @@ mod tests {
                 let pet = node_frame("pet");
                 let body = node_frame("pet.body");
                 let particles = node_frame("pet.particles");
-                let aura = node_frame("pet.aura.mood");
                 let wall = node_frame("pet.shadow.wall");
                 let floor = node_frame("pet.projection.floor");
                 let cell = snapshot.topology.glyph_grid.cell_extent_points;
@@ -3658,11 +3677,6 @@ mod tests {
                         resolved.effective_z
                     ],
                     "{lifecycle} at depth {raw_depth}"
-                );
-                assert_eq!(
-                    aura.local_transform.translation,
-                    [0.0, 0.0, resolved.effective_z],
-                    "the absolute-point-space aura follows only effective pet Z"
                 );
                 assert_eq!(
                     pet.local_transform.scale,
@@ -3745,36 +3759,7 @@ mod tests {
                         }
                 );
 
-                let (body_center, body_radii) =
-                    super::compiler::pet_body_world_geometry(&snapshot, pet.local_transform)
-                        .unwrap();
-                assert!(body_radii[0] < extent[0] * resolved.scale * 0.5);
-                let aura_radius = crate::presentation::companion_effects::mood_aura_radius(
-                    f64::from(body_radii[0] * 2.0),
-                ) as f32;
-                assert!(
-                    generation.frame.analytic_slots[4].value.unwrap().geometry
-                        == AnalyticGeometry::PetAura {
-                            center_points: body_center,
-                            max_radius_points: aura_radius,
-                            ring_count: 8,
-                            feather_points: 4.0,
-                        }
-                );
-
-                let aura_node = generation
-                    .template
-                    .nodes
-                    .iter()
-                    .find(|node| node.alias.as_str() == "pet.aura.mood")
-                    .unwrap();
-                let root = generation
-                    .template
-                    .nodes
-                    .iter()
-                    .find(|node| node.alias.as_str() == "scene.root")
-                    .unwrap();
-                assert_eq!(aura_node.parent, Some(root.id));
+                assert!(generation.frame.analytic_slots[4].value.is_none());
                 let receiver_z = |alias: &str| {
                     generation
                         .template
@@ -3813,7 +3798,8 @@ mod tests {
         let baseline = build_scene_generation(&baseline, generation_key(1)).unwrap();
         let moved = build_scene_generation(&moved, generation_key(1)).unwrap();
         assert!(baseline.frame.analytic_slots[2] == moved.frame.analytic_slots[2]);
-        assert!(baseline.frame.analytic_slots[4] != moved.frame.analytic_slots[4]);
+        assert!(baseline.frame.analytic_slots[4].value.is_none());
+        assert!(moved.frame.analytic_slots[4].value.is_none());
     }
 
     #[test]
@@ -3844,7 +3830,7 @@ mod tests {
     }
 
     #[test]
-    fn aura_uses_tight_asymmetric_body_bounds_not_particle_lattice_bounds() {
+    fn asymmetric_pet_body_keeps_reserved_analytic_slot_empty() {
         let mut snapshot = snapshot_for(Species::Fuzz, Stage::S3);
         snapshot.content.pet_lines =
             vec!["             ".to_owned(); usize::from(super::super::PET_LATTICE_HEIGHT)];
@@ -3856,38 +3842,9 @@ mod tests {
             role: "body",
         }];
         let built = build_scene_generation(&snapshot, generation_key(49)).unwrap();
-        let pet_node = built
-            .template
-            .nodes
-            .iter()
-            .find(|node| node.alias.as_str() == "pet")
-            .unwrap();
-        let transform = built
-            .frame
-            .nodes
-            .iter()
-            .find(|node| node.node == pet_node.id)
-            .unwrap()
-            .local_transform;
-        let cell = snapshot.topology.glyph_grid.cell_extent_points;
-        let local_center = [
-            2.5 * cell[0],
-            (f32::from(super::super::PET_LATTICE_HEIGHT) - 3.5) * cell[1],
-            0.0,
-        ];
-        let expected = transform.matrix().unwrap().transform_point3(local_center);
-        let expected_radius = crate::presentation::companion_effects::mood_aura_radius(f64::from(
-            cell[0] * transform.scale[0].abs(),
-        )) as f32;
-        assert!(
-            built.frame.analytic_slots[4].value.unwrap().geometry
-                == AnalyticGeometry::PetAura {
-                    center_points: [expected[0], expected[1]],
-                    max_radius_points: expected_radius,
-                    ring_count: 8,
-                    feather_points: 4.0,
-                }
-        );
+        assert!(built.template.analytic_templates[4].value.is_none());
+        assert!(built.content.analytic_slots[4].value.is_none());
+        assert!(built.frame.analytic_slots[4].value.is_none());
     }
 
     #[test]
@@ -4409,7 +4366,8 @@ mod tests {
 
         assert_eq!(MAX_STATIC_ATLAS_RECIPES, 8);
         assert_eq!(MAX_ANALYTIC_PARAMS, 16);
-        assert_eq!(AnalyticSemantic::ALL.len(), 11);
+        assert_eq!(AnalyticSemantic::ALL.len(), 10);
+        assert_eq!(AnalyticSemantic::MoodAura.id(), AnalyticParamId(4));
         assert_eq!(AnalyticSemantic::GaugePace.id(), AnalyticParamId(5));
         assert_eq!(AnalyticSemantic::GaugeDaily.id(), AnalyticParamId(9));
         assert_eq!(AnalyticSemantic::GaugeXp.id(), AnalyticParamId(10));
@@ -4428,7 +4386,6 @@ mod tests {
             AnalyticSemantic::WallShadow,
             AnalyticSemantic::FloorProjection,
             AnalyticSemantic::StatusHalo,
-            AnalyticSemantic::MoodAura,
             AnalyticSemantic::GaugePace,
             AnalyticSemantic::Trouble,
             AnalyticSemantic::Dim,
@@ -4437,22 +4394,21 @@ mod tests {
             AnalyticSemantic::GaugeXp,
         ];
         assert_eq!(built.template.analytic_templates.len(), MAX_ANALYTIC_PARAMS);
-        for (slot, semantic) in expected.into_iter().enumerate() {
-            let id = AnalyticParamId(slot as u8);
-            assert_eq!(built.template.analytic_templates[slot].id, id);
+        for semantic in expected {
+            let index = usize::from(semantic.id().0);
+            assert_eq!(built.template.analytic_templates[index].id, semantic.id());
             assert_eq!(
-                built.template.analytic_templates[slot]
+                built.template.analytic_templates[index]
                     .value
                     .as_ref()
                     .map(|value| value.semantic),
                 Some(semantic)
             );
         }
-        assert!(
-            built.template.analytic_templates[AnalyticSemantic::ALL.len()..]
-                .iter()
-                .all(|slot| slot.value.is_none())
-        );
+        assert!(built.template.analytic_templates[4].value.is_none());
+        assert!(built.template.analytic_templates[11..]
+            .iter()
+            .all(|slot| slot.value.is_none()));
 
         let primitive = |alias: &str| {
             let node = NodeId::from_alias(&CanonicalAlias::new(alias).unwrap());
@@ -4554,21 +4510,6 @@ mod tests {
             ))
         );
 
-        let mood = primitive("pet.aura.mood");
-        assert_eq!(mood.blend, WorldBlend::PremultipliedAlpha);
-        assert_eq!(mood.depth, DepthBehavior::WorldReadOnly);
-        assert_eq!(mood.space, PrimitiveSpace::World);
-        assert_eq!(
-            built
-                .template
-                .materials
-                .iter()
-                .find(|material| material.id == mood.material)
-                .unwrap()
-                .kind,
-            MaterialKind::UnlitAnalytic
-        );
-
         let wall_shadow = primitive("pet.shadow.wall");
         assert_eq!(wall_shadow.blend, WorldBlend::PremultipliedAlpha);
         assert_eq!(wall_shadow.depth, DepthBehavior::WorldReadOnly);
@@ -4646,30 +4587,37 @@ mod tests {
     }
 
     #[test]
-    fn production_projection_closes_all_eleven_analytic_roles_with_y_up_geometry() {
+    fn production_projection_closes_all_active_analytic_roles_with_y_up_geometry() {
         let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
         let built = build_scene_generation(&snapshot, generation_key(41)).unwrap();
 
         assert_eq!(built.content().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
         assert_eq!(built.frame().analytic_slots.len(), MAX_ANALYTIC_PARAMS);
-        for (index, semantic) in AnalyticSemantic::ALL.into_iter().enumerate() {
+        for semantic in AnalyticSemantic::ALL {
+            let index = usize::from(semantic.id().0);
             let content = built.content().analytic_slots[index].value.unwrap();
             let frame = built.frame().analytic_slots[index].value.unwrap();
             assert_eq!(content.semantic, semantic);
-            assert_eq!(content.shape, semantic.shape());
+            assert_eq!(
+                content.shape,
+                semantic.shape().expect("active semantic has a shape")
+            );
             assert_eq!(frame.semantic, semantic);
-            assert_eq!(frame.shape, semantic.shape());
+            assert_eq!(
+                frame.shape,
+                semantic.shape().expect("active semantic has a shape")
+            );
             assert!(frame.rect_points.into_iter().all(f32::is_finite));
             assert!(frame.rect_points[2] > 0.0 && frame.rect_points[3] > 0.0);
         }
-        assert!(
-            built.content().analytic_slots[AnalyticSemantic::ALL.len()..]
-                .iter()
-                .all(|slot| slot.value.is_none())
-        );
-        assert!(built.frame().analytic_slots[AnalyticSemantic::ALL.len()..]
+        assert!(built.content().analytic_slots[11..]
             .iter()
             .all(|slot| slot.value.is_none()));
+        assert!(built.frame().analytic_slots[11..]
+            .iter()
+            .all(|slot| slot.value.is_none()));
+        assert!(built.content().analytic_slots[4].value.is_none());
+        assert!(built.frame().analytic_slots[4].value.is_none());
 
         let room = built.frame().analytic_slots[0].value.unwrap();
         assert_eq!(room.rect_points, [0.0, 0.0, 360.0, 360.0]);
@@ -4790,7 +4738,7 @@ mod tests {
         assert_eq!(AnalyticSemantic::PropShadows.id(), AnalyticParamId(8));
         assert_eq!(
             AnalyticSemantic::PropShadows.shape(),
-            AnalyticShape::PropShadowField
+            Some(AnalyticShape::PropShadowField)
         );
         let content = AnalyticContent {
             semantic: AnalyticSemantic::PropShadows,
@@ -4803,8 +4751,8 @@ mod tests {
             rect_points: [0.0, 0.0, 360.0, 360.0],
             geometry: AnalyticGeometry::PropShadowField,
         };
-        assert_eq!(content.semantic.shape(), content.shape);
-        assert_eq!(frame.semantic.shape(), frame.shape);
+        assert_eq!(content.semantic.shape(), Some(content.shape));
+        assert_eq!(frame.semantic.shape(), Some(frame.shape));
         assert!(matches!(
             content.paint,
             AnalyticPaint::PropShadowMultiply { .. }

@@ -118,7 +118,6 @@ pub enum SmoothLayerRole {
     TankLifeForeground,
     StatusHalo,
     TroubleIndicator,
-    MoodAura,
     DimOverlay,
 }
 
@@ -144,7 +143,6 @@ impl SmoothLayerRole {
             Self::TankLifeForeground => "tank-life-foreground",
             Self::StatusHalo => "status-halo",
             Self::TroubleIndicator => "trouble-indicator",
-            Self::MoodAura => "mood-aura",
             Self::DimOverlay => "dim-overlay",
         }
     }
@@ -157,7 +155,7 @@ impl SmoothLayerRole {
             Self::BiomeWash | Self::RoomGlyphs => Parallax(Far),
             Self::Ambient | Self::Motes | Self::ActivityGlyphs => Parallax(Mid),
             Self::PropsBehind | Self::TankLifeBehind | Self::ChestBubble => Parallax(Behind),
-            Self::WallShadow | Self::PetBody | Self::PerformanceCue | Self::MoodAura => PetAttached,
+            Self::WallShadow | Self::PetBody | Self::PerformanceCue => PetAttached,
             Self::FloorProjection => FloorProjected,
             Self::PropsForeground | Self::TankLifeForeground => Parallax(Foreground),
             _ => Fixed,
@@ -983,7 +981,6 @@ mod tests {
             (SmoothLayerRole::TankLifeForeground, "tank-life-foreground"),
             (SmoothLayerRole::StatusHalo, "status-halo"),
             (SmoothLayerRole::TroubleIndicator, "trouble-indicator"),
-            (SmoothLayerRole::MoodAura, "mood-aura"),
             (SmoothLayerRole::DimOverlay, "dim-overlay"),
         ];
 
@@ -1016,7 +1013,6 @@ mod tests {
             (TankLifeForeground, Parallax(Foreground)),
             (StatusHalo, Fixed),
             (TroubleIndicator, Fixed),
-            (MoodAura, PetAttached),
             (DimOverlay, Fixed),
         ];
 

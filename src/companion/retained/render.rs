@@ -189,7 +189,7 @@ fn scene_pipeline_class(
         && primitive.blend == 3
         && primitive.depth == 2
         && primitive.space == 1
-        && matches!(primitive.binding_index, 4 | 5 | 9 | 10)
+        && matches!(primitive.binding_index, 5 | 9 | 10)
         && draw.source == PrimitiveSource::Analytic
     {
         return Some(WorldSourceOverAnalytic);
@@ -459,7 +459,6 @@ pub(super) struct SceneDrawPlan {
 pub(super) enum HudInteractionSource {
     PetBody,
     PetParticles,
-    MoodAura,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,19 +467,18 @@ struct HudInteractionPlannedDraw {
     draw: ScenePlannedDraw,
 }
 
-/// Closed, generation-owned selection of the only three scene draws allowed to
+/// Closed, generation-owned selection of the only two scene draws allowed to
 /// cross the statistics coverage mask.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HudInteractionDrawPlan {
-    authored: [HudInteractionPlannedDraw; 3],
+    authored: [HudInteractionPlannedDraw; 2],
 }
 
 impl HudInteractionDrawPlan {
-    pub(super) fn sources(&self) -> [HudInteractionSource; 3] {
+    pub(super) fn sources(&self) -> [HudInteractionSource; 2] {
         [
             HudInteractionSource::PetBody,
             HudInteractionSource::PetParticles,
-            HudInteractionSource::MoodAura,
         ]
     }
 
@@ -822,12 +820,7 @@ pub(super) fn prepare_hud_interaction_draw_plan(
     draw_plan: &SceneDrawPlan,
     primitives: &[PrimitiveGpuValue],
 ) -> Result<HudInteractionDrawPlan, SceneDrawPlanError> {
-    let mood_aura_binding = u32::from(
-        crate::presentation::companion_scene::scene::AnalyticSemantic::MoodAura
-            .id()
-            .0,
-    );
-    let mut selected: [Option<HudInteractionPlannedDraw>; 3] = [None, None, None];
+    let mut selected: [Option<HudInteractionPlannedDraw>; 2] = [None, None];
     for draw in &draw_plan.world_blended_unsorted {
         let primitive = *primitives
             .get(draw.primitive_index as usize)
@@ -844,18 +837,12 @@ pub(super) fn prepare_hud_interaction_draw_plan(
                 ScenePipelineClass::WorldAdditiveGlyph,
                 Some(PrimitiveSource::Instances(InstanceSource::PetParticles)),
             ) => Some(HudInteractionSource::PetParticles),
-            (ScenePipelineClass::WorldSourceOverAnalytic, Some(PrimitiveSource::Analytic))
-                if primitive.binding_index == mood_aura_binding =>
-            {
-                Some(HudInteractionSource::MoodAura)
-            }
             _ => None,
         };
         if let Some(source) = source {
             let slot = match source {
                 HudInteractionSource::PetBody => 0,
                 HudInteractionSource::PetParticles => 1,
-                HudInteractionSource::MoodAura => 2,
             };
             if selected[slot].is_some() {
                 return Err(SceneDrawPlanError::InvalidHudInteractionPlan);
@@ -2403,7 +2390,6 @@ pub(super) struct SceneBasePipelines {
     pub(super) world_hud: wgpu::RenderPipeline,
     pub(super) hud_interaction_body: wgpu::RenderPipeline,
     pub(super) hud_interaction_particles: wgpu::RenderPipeline,
-    pub(super) hud_interaction_aura: wgpu::RenderPipeline,
     pub(super) aperture_composite: wgpu::RenderPipeline,
     pub(super) aperture_surface: wgpu::RenderPipeline,
     pub(super) final_surface: wgpu::RenderPipeline,
@@ -2842,12 +2828,6 @@ fn create_scene_base_pipelines(
         "fs_hud_interaction_glyph",
         SceneBlendContract::Additive,
     );
-    let hud_interaction_aura = hud_interaction_pipeline(
-        "glorp-scene-hud-interaction-aura",
-        "vs_world_analytic",
-        "fs_hud_interaction_aura",
-        SceneBlendContract::SourceOver,
-    );
     let aperture_contract = APERTURE_COMPOSITE_PIPELINE_CONTRACT.pipeline;
     let aperture_composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("glorp-scene-aperture-composite"),
@@ -2938,7 +2918,6 @@ fn create_scene_base_pipelines(
         world_hud,
         hud_interaction_body,
         hud_interaction_particles,
-        hud_interaction_aura,
         aperture_composite,
         aperture_surface,
         final_surface,
@@ -5932,7 +5911,6 @@ fn encode_hud_interaction_overlay(
         let pipeline = match planned.source {
             HudInteractionSource::PetBody => &shared.pipelines.hud_interaction_body,
             HudInteractionSource::PetParticles => &shared.pipelines.hud_interaction_particles,
-            HudInteractionSource::MoodAura => &shared.pipelines.hud_interaction_aura,
         };
         pass.set_pipeline(pipeline);
         pass.draw_indexed(
@@ -6302,7 +6280,7 @@ mod tests {
                 resource: Some(analytic_resource),
                 blend: WorldBlend::PremultipliedAlpha,
                 depth: DepthBehavior::WorldReadOnly,
-                binding: PrimitiveBinding::Analytic(AnalyticParamId(4)),
+                binding: PrimitiveBinding::Analytic(AnalyticParamId(5)),
                 authored_order: 9,
                 local_geometry: bounds,
                 space: PrimitiveSpace::World,
@@ -7119,11 +7097,6 @@ mod tests {
                 WorldSourceOverGlyphMask,
             ),
             (
-                pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 4),
-                pipeline_draw(PrimitiveSource::Analytic),
-                WorldSourceOverAnalytic,
-            ),
-            (
                 pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 5),
                 pipeline_draw(PrimitiveSource::Analytic),
                 WorldSourceOverAnalytic,
@@ -7175,6 +7148,25 @@ mod tests {
         assert!(!cases
             .iter()
             .any(|(_, _, expected)| { *expected == WorldAdditiveAnalyticReserved }));
+    }
+
+    #[test]
+    fn source_over_analytic_reserves_slot_four_without_affecting_active_slots() {
+        let draw = pipeline_draw(PrimitiveSource::Analytic);
+        let source_over_analytic = |slot| pipeline_primitive(2, 2, 3, 3, 2, 1, 0, slot);
+
+        assert_eq!(
+            scene_pipeline_class(source_over_analytic(4), &draw),
+            None,
+            "reserved analytic slot 4 must not select a source-over pipeline",
+        );
+        for slot in [5, 9, 10] {
+            assert_eq!(
+                scene_pipeline_class(source_over_analytic(slot), &draw),
+                Some(ScenePipelineClass::WorldSourceOverAnalytic),
+                "active analytic slot {slot} must retain its source-over pipeline",
+            );
+        }
     }
 
     fn canonical_draw_plan_fixture() -> (
@@ -7266,7 +7258,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn retained_hud_interaction_plan_is_exact_and_excludes_shadows() {
+    fn retained_draw_plan_has_no_mood_aura_source() {
         use crate::pet::generation::Species;
         use crate::round::smooth::CompanionContentIdentity;
 
@@ -7288,15 +7280,13 @@ mod tests {
             validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases).unwrap();
         let plan = prepare_hud_interaction_draw_plan(&draw_plan, &upload.primitives).unwrap();
 
-        assert_eq!(
-            plan.sources(),
-            [
-                HudInteractionSource::PetBody,
-                HudInteractionSource::PetParticles,
-                HudInteractionSource::MoodAura,
-            ]
-        );
-        assert_eq!(plan.authored.len(), 3);
+        assert!(plan.sources().iter().all(|source| {
+            matches!(
+                source,
+                HudInteractionSource::PetBody | HudInteractionSource::PetParticles
+            )
+        }));
+        assert_eq!(plan.authored.len(), 2);
         assert!(plan
             .authored
             .windows(2)
@@ -7747,7 +7737,6 @@ mod tests {
             "fn valid_analytic_role(",
             "fn fs_room_aperture(",
             "fn fs_status_tone(",
-            "fn fs_mood_rings(",
             "fn fs_gauges(",
             "fn fs_trouble(",
             "fn fs_dim(",
@@ -7801,16 +7790,7 @@ mod tests {
         assert!(dim.contains("1.0,"));
         assert!(!dim.contains("aperture"));
 
-        let mood = SCENE_SHADER_SOURCE
-            .split("fn fs_mood_rings(")
-            .nth(1)
-            .unwrap()
-            .split("fn normalized_degrees(")
-            .next()
-            .unwrap();
-        assert!(mood.contains("ring < 8u"));
-        assert!(mood.contains("smoothstep(radius - edge, radius + edge, distance)"));
-        assert!(!mood.contains("ceil("));
+        assert!(!SCENE_SHADER_SOURCE.contains("fs_mood_rings"));
     }
 
     #[test]
@@ -13553,10 +13533,10 @@ mod tests {
         let upload = prepare_scene_upload(&cpu, &atlas).expect("production scene upload prepares");
 
         assert_eq!(cpu.logical_viewport_points(), [360.0, 360.0]);
-        assert_eq!(upload.primitives.len(), 22);
-        assert_eq!(upload.draws.len(), 22);
+        assert_eq!(upload.primitives.len(), 21);
+        assert_eq!(upload.draws.len(), 21);
         assert_eq!(upload.phases.opaque_cutout.len(), 1);
-        assert_eq!(upload.phases.world_blended_unsorted.len(), 18);
+        assert_eq!(upload.phases.world_blended_unsorted.len(), 17);
         assert_eq!(upload.phases.chrome_authored.len(), 3);
         assert_eq!(
             upload
@@ -13564,7 +13544,7 @@ mod tests {
                 .iter()
                 .map(|draw| draw.authored_order)
                 .collect::<Vec<_>>(),
-            (0..22).collect::<Vec<_>>(),
+            (0..21).collect::<Vec<_>>(),
         );
 
         let classified = upload
@@ -13608,202 +13588,217 @@ mod tests {
             })
             .collect::<Vec<_>>();
         use crate::presentation::companion_scene::scene::InstanceLayer;
-        assert_eq!(
-            ordered_schedule,
-            vec![
-                (
-                    0,
-                    SceneDrawPhase::Opaque,
-                    ScenePipelineClass::WorldOpaqueAnalytic,
-                    PrimitiveSource::Analytic,
-                    0,
-                    0
-                ),
-                (
-                    1,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::RoomGlyphs),
-                    0,
-                    1
-                ),
-                (
-                    2,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldMultiplyGlyphMask,
-                    PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask),
-                    2,
-                    2
-                ),
-                (
-                    3,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldMultiplyAnalytic,
-                    PrimitiveSource::Analytic,
-                    8,
-                    3
-                ),
-                (
-                    4,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldAdditiveGlyph,
-                    PrimitiveSource::Instances(InstanceSource::Ambient),
-                    0,
-                    4
-                ),
-                (
-                    5,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 0 }),
-                    0,
-                    5
-                ),
-                (
-                    6,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 1 }),
-                    1,
-                    6
-                ),
-                (
-                    7,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::TankCells {
-                        slot: 0,
-                        layer: InstanceLayer::Behind
-                    }),
-                    0,
-                    7
-                ),
-                (
-                    8,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::TankCells {
-                        slot: 1,
-                        layer: InstanceLayer::Behind
-                    }),
-                    1,
-                    8
-                ),
-                (
-                    9,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyphMask,
-                    PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
-                    1,
-                    9
-                ),
-                (
-                    10,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverAnalytic,
-                    PrimitiveSource::Analytic,
-                    4,
-                    10
-                ),
-                (
-                    11,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::PetBody),
-                    0,
-                    11
-                ),
-                (
-                    12,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldAdditiveGlyph,
-                    PrimitiveSource::Instances(InstanceSource::PetParticles),
-                    0,
-                    12
-                ),
-                (
-                    13,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::TankCells {
-                        slot: 0,
-                        layer: InstanceLayer::Foreground
-                    }),
-                    0,
-                    13
-                ),
-                (
-                    14,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverGlyph,
-                    PrimitiveSource::Instances(InstanceSource::TankCells {
-                        slot: 1,
-                        layer: InstanceLayer::Foreground
-                    }),
-                    1,
-                    14
-                ),
-                (
-                    15,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverAnalytic,
-                    PrimitiveSource::Analytic,
-                    5,
-                    15
-                ),
-                (
-                    16,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverAnalytic,
-                    PrimitiveSource::Analytic,
-                    9,
-                    16
-                ),
-                (
-                    17,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldSourceOverAnalytic,
-                    PrimitiveSource::Analytic,
-                    10,
-                    17
-                ),
-                (
-                    18,
-                    SceneDrawPhase::Chrome,
-                    ScenePipelineClass::ChromeAnalytic,
-                    PrimitiveSource::Analytic,
-                    3,
-                    18
-                ),
-                (
-                    19,
-                    SceneDrawPhase::Chrome,
-                    ScenePipelineClass::ChromeAnalytic,
-                    PrimitiveSource::Analytic,
-                    6,
-                    19
-                ),
-                (
-                    20,
-                    SceneDrawPhase::WorldBlended,
-                    ScenePipelineClass::WorldHud,
-                    PrimitiveSource::Instances(InstanceSource::Hud),
-                    0,
-                    20
-                ),
-                (
-                    21,
-                    SceneDrawPhase::Chrome,
-                    ScenePipelineClass::ChromeAnalytic,
-                    PrimitiveSource::Analytic,
-                    7,
-                    21
-                ),
-            ],
-        );
+        let expected_schedule = vec![
+            (
+                0,
+                SceneDrawPhase::Opaque,
+                ScenePipelineClass::WorldOpaqueAnalytic,
+                PrimitiveSource::Analytic,
+                0,
+                0,
+            ),
+            (
+                1,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::RoomGlyphs),
+                0,
+                1,
+            ),
+            (
+                2,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldMultiplyGlyphMask,
+                PrimitiveSource::Instances(InstanceSource::FloorShadowGlyphMask),
+                2,
+                2,
+            ),
+            (
+                3,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldMultiplyAnalytic,
+                PrimitiveSource::Analytic,
+                8,
+                3,
+            ),
+            (
+                4,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldAdditiveGlyph,
+                PrimitiveSource::Instances(InstanceSource::Ambient),
+                0,
+                4,
+            ),
+            (
+                5,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 0 }),
+                0,
+                5,
+            ),
+            (
+                6,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::PropGlyphs { slot: 1 }),
+                1,
+                6,
+            ),
+            (
+                7,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::TankCells {
+                    slot: 0,
+                    layer: InstanceLayer::Behind,
+                }),
+                0,
+                7,
+            ),
+            (
+                8,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::TankCells {
+                    slot: 1,
+                    layer: InstanceLayer::Behind,
+                }),
+                1,
+                8,
+            ),
+            (
+                9,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyphMask,
+                PrimitiveSource::Instances(InstanceSource::WallShadowGlyphMask),
+                1,
+                9,
+            ),
+            (
+                11,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::PetBody),
+                0,
+                11,
+            ),
+            (
+                12,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldAdditiveGlyph,
+                PrimitiveSource::Instances(InstanceSource::PetParticles),
+                0,
+                12,
+            ),
+            (
+                13,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::TankCells {
+                    slot: 0,
+                    layer: InstanceLayer::Foreground,
+                }),
+                0,
+                13,
+            ),
+            (
+                14,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverGlyph,
+                PrimitiveSource::Instances(InstanceSource::TankCells {
+                    slot: 1,
+                    layer: InstanceLayer::Foreground,
+                }),
+                1,
+                14,
+            ),
+            (
+                15,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverAnalytic,
+                PrimitiveSource::Analytic,
+                5,
+                15,
+            ),
+            (
+                16,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverAnalytic,
+                PrimitiveSource::Analytic,
+                9,
+                16,
+            ),
+            (
+                17,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldSourceOverAnalytic,
+                PrimitiveSource::Analytic,
+                10,
+                17,
+            ),
+            (
+                18,
+                SceneDrawPhase::Chrome,
+                ScenePipelineClass::ChromeAnalytic,
+                PrimitiveSource::Analytic,
+                3,
+                18,
+            ),
+            (
+                19,
+                SceneDrawPhase::Chrome,
+                ScenePipelineClass::ChromeAnalytic,
+                PrimitiveSource::Analytic,
+                6,
+                19,
+            ),
+            (
+                20,
+                SceneDrawPhase::WorldBlended,
+                ScenePipelineClass::WorldHud,
+                PrimitiveSource::Instances(InstanceSource::Hud),
+                0,
+                20,
+            ),
+            (
+                21,
+                SceneDrawPhase::Chrome,
+                ScenePipelineClass::ChromeAnalytic,
+                PrimitiveSource::Analytic,
+                7,
+                21,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(index, phase, pipeline, source, binding_index, authored_order)| {
+                if index > 10 {
+                    (
+                        index - 1,
+                        phase,
+                        pipeline,
+                        source,
+                        binding_index,
+                        authored_order - 1,
+                    )
+                } else {
+                    (
+                        index,
+                        phase,
+                        pipeline,
+                        source,
+                        binding_index,
+                        authored_order,
+                    )
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(ordered_schedule, expected_schedule);
         let class_count = |class| classified.iter().filter(|actual| **actual == class).count();
         assert_eq!(class_count(ScenePipelineClass::WorldOpaqueAnalytic), 1);
-        assert_eq!(class_count(ScenePipelineClass::WorldSourceOverAnalytic), 4);
+        assert_eq!(class_count(ScenePipelineClass::WorldSourceOverAnalytic), 3);
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyph), 8);
         assert_eq!(class_count(ScenePipelineClass::WorldMultiplyAnalytic), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldMultiplyGlyphMask), 1);
@@ -13828,7 +13823,7 @@ mod tests {
         assert_eq!(bindings_for(ScenePipelineClass::WorldOpaqueAnalytic), [0],);
         assert_eq!(
             bindings_for(ScenePipelineClass::WorldSourceOverAnalytic),
-            [4, 5, 9, 10],
+            [5, 9, 10],
         );
         assert_eq!(bindings_for(ScenePipelineClass::WorldMultiplyAnalytic), [8],);
         assert_eq!(
@@ -13850,7 +13845,7 @@ mod tests {
                 .filter(|draw| draw.source == source)
                 .count()
         };
-        assert_eq!(source_count(PrimitiveSource::Analytic), 9);
+        assert_eq!(source_count(PrimitiveSource::Analytic), 8);
         assert_eq!(
             source_count(PrimitiveSource::Instances(InstanceSource::RoomGlyphs)),
             1,
@@ -14003,7 +13998,7 @@ mod tests {
                 .iter()
                 .map(|draw| draw.primitive_index)
                 .collect::<Vec<_>>(),
-            (1..=17).chain([20]).collect::<Vec<_>>(),
+            (1..=16).chain([19]).collect::<Vec<_>>(),
         );
         assert_eq!(
             candidate
@@ -14013,10 +14008,10 @@ mod tests {
                 .iter()
                 .map(|draw| draw.primitive_index)
                 .collect::<Vec<_>>(),
-            [18, 19],
+            [17, 18],
         );
-        assert_eq!(candidate.draw_plan.hud.primitive_index, 20);
-        assert_eq!(candidate.draw_plan.chrome.suffix[0].primitive_index, 21);
+        assert_eq!(candidate.draw_plan.hud.primitive_index, 19);
+        assert_eq!(candidate.draw_plan.chrome.suffix[0].primitive_index, 20);
 
         let prepared_hud = candidate
             .hud
@@ -14079,11 +14074,7 @@ mod tests {
             assert_dark_cool_wall(room_probe, actual);
         }
         let pet_center = pixel(360, 360);
-        assert_eq!(pet_center[3], 255);
-        assert!(
-            pet_center[..3].iter().any(|channel| *channel >= 64),
-            "pet center must remain visibly outside the dark-wall envelope: actual={pet_center:?}"
-        );
+        assert_dark_cool_wall((360, 360), pet_center);
         let nontransparent = outcome
             .rgba
             .chunks_exact(4)
@@ -14115,15 +14106,14 @@ mod tests {
             ("room glyphs", &[1]),
             ("floor multiply", &[2]),
             ("wall shadow", &[9]),
-            ("aura", &[10]),
-            ("tank inhabitant 0", &[7, 13]),
-            ("tank inhabitant 1", &[8, 14]),
-            ("pet body", &[11]),
+            ("tank inhabitant 0", &[7, 12]),
+            ("tank inhabitant 1", &[8, 13]),
+            ("pet body", &[10]),
             ("prop 0", &[5]),
             ("prop 1", &[6]),
-            ("pet particles", &[12]),
-            ("gauges", &[15, 16, 17]),
-            ("status", &[18]),
+            ("pet particles", &[11]),
+            ("gauges", &[14, 15, 16]),
+            ("status", &[17]),
         ];
         for (label, primitive_indices) in active_layer_omissions {
             candidate.draw_plan = baseline_plan.clone();
@@ -14156,12 +14146,12 @@ mod tests {
         assert!(without_hud.rgba != outcome.rgba, "redacted HUD was inert");
         let final_staging = candidate.hud.staging_facts_for_test();
         assert_eq!(final_staging.sensitive_copies, 0);
-        assert_eq!(final_staging.redacted_copies, 15);
+        assert_eq!(final_staging.redacted_copies, 14);
         assert_eq!(
             final_staging.copied_bytes,
-            15 * super::super::hud::HUD_GPU_BUFFER_BYTES,
+            14 * super::super::hud::HUD_GPU_BUFFER_BYTES,
         );
-        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 15));
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 14));
 
         // The normal production frame intentionally has no trouble or dim
         // contribution. A second unmodified production projection activates
@@ -14190,7 +14180,7 @@ mod tests {
             )
             .expect("dimmed production frame renders");
         let dimmed_plan = dimmed_candidate.draw_plan.clone();
-        for (label, primitive_index) in [("trouble", 19), ("dim", 21)] {
+        for (label, primitive_index) in [("trouble", 18), ("dim", 20)] {
             dimmed_candidate.draw_plan = dimmed_plan.clone();
             suppress(&mut dimmed_candidate.draw_plan, primitive_index);
             let without_layer = renderer
@@ -14216,7 +14206,7 @@ mod tests {
             dimmed_staging.copied_bytes,
             3 * super::super::hud::HUD_GPU_BUFFER_BYTES,
         );
-        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 18));
+        assert_eq!(renderer.cache_and_submission_events_for_test(), (1, 1, 17));
     }
 
     #[cfg(target_os = "macos")]
@@ -14368,7 +14358,7 @@ mod tests {
             let request = request_for(&candidate);
             assert_eq!(
                 candidate.submitted_draw_count(depth > at_start_z),
-                if depth > at_start_z { 28 } else { 25 },
+                if depth > at_start_z { 27 } else { 24 },
             );
             let normal = renderer
                 .render_offscreen(

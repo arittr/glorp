@@ -582,7 +582,6 @@ fn expected_analytic_shape(analytic_id: u32) -> u32 {
         case 1u: { return 2u; }
         case 2u: { return 3u; }
         case 3u: { return 4u; }
-        case 4u: { return 5u; }
         case 5u: { return 6u; }
         case 6u: { return 7u; }
         case 7u: { return 8u; }
@@ -1054,45 +1053,6 @@ fn fs_status_tone(
     );
 }
 
-fn fs_mood_rings(
-    input: SceneVertexOutput,
-    content: AnalyticContentGpuValue,
-    analytic: AnalyticFrameGpuValue,
-) -> vec4<f32> {
-    let center = analytic.payload[0].xy;
-    let max_radius = analytic.payload[0].z;
-    let frame_ring_count = analytic.payload[0].w;
-    let feather = analytic.payload[1].x;
-    let content_ring_count = f32(content.payload[0].y);
-    if (max_radius <= 0.0
-        || feather < 0.0
-        || frame_ring_count < 1.0
-        || frame_ring_count != content_ring_count) {
-        return vec4<f32>(0.0);
-    }
-    let distance = length(input.point_position - center);
-    let per_ring_alpha = f32(content.payload[0].z) / 255.0;
-    let linear_rgb = apply_saturation(
-        packed_rgb8_linear(content.payload[0].x),
-        input.saturation,
-    );
-    var composed = vec4<f32>(0.0);
-    // The content contract caps this role at eight nested discs. Compose each
-    // disc separately so every internal boundary receives authored feathering
-    // and derivative AA instead of a hard integer-alpha step.
-    for (var ring = 0u; ring < 8u; ring = ring + 1u) {
-        if (f32(ring) < frame_ring_count) {
-            let radius = max_radius * f32(ring + 1u) / frame_ring_count;
-            let edge = max(feather, fwidth(distance));
-            let coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance);
-            let alpha = per_ring_alpha * coverage * input.opacity;
-            let layer = vec4<f32>(linear_rgb * alpha, alpha);
-            composed = over_premultiplied(layer, composed);
-        }
-    }
-    return composed;
-}
-
 fn normalized_degrees(value: f32) -> f32 {
     return value - floor(value / 360.0) * 360.0;
 }
@@ -1348,7 +1308,6 @@ fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     switch input.analytic_id {
         case 0u: { output = fs_room_aperture(input, content, analytic); }
         case 3u: { output = fs_status_tone(input, content, analytic); }
-        case 4u: { output = fs_mood_rings(input, content, analytic); }
         case 5u: { output = fs_gauges(input, content, analytic); }
         case 6u: { output = fs_trouble(input, content, analytic); }
         case 7u: { output = fs_dim(input, content, analytic); }
@@ -1435,24 +1394,6 @@ fn hud_interaction_reveal(position: vec4<f32>) -> f32 {
 @fragment
 fn fs_hud_interaction_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     let output = glyph_fragment_color(input) * hud_interaction_reveal(input.position);
-    if (output.a <= 0.0) {
-        discard;
-    }
-    return output;
-}
-
-@fragment
-fn fs_hud_interaction_aura(input: SceneVertexOutput) -> @location(0) vec4<f32> {
-    if (input.analytic_id != 4u) {
-        discard;
-    }
-    let analytic = frame_buffer.analytics[input.analytic_id];
-    let content = scene_content_buffer.analytics[input.analytic_id];
-    if (!valid_analytic_role(input.analytic_id, analytic, content)) {
-        discard;
-    }
-    let output = fs_mood_rings(input, content, analytic)
-        * hud_interaction_reveal(input.position);
     if (output.a <= 0.0) {
         discard;
     }

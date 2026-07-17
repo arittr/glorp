@@ -357,11 +357,10 @@ pub(crate) fn try_build_round_smooth_scene_plan_with_grid_points(
     };
     let pet_bounds = anchored_bounds(pet_body.anchor, pet_body.local_bounds);
     let fractional_pet_bounds = anchored_bounds(final_anchor, pet_body.local_bounds);
-    // The aura tracks the creature as it grows and sinks with depth, so it is
-    // derived from the composed pet transform rather than the unscaled art.
+    // Publish the composed pet bounds for renderer-private coverage work without
+    // adding a shaped effect to the shared scene plan.
     let transformed_pet_bounds =
         transformed_smooth_bounds(pet_body).map_err(SmoothScenePlanError::InvalidLayerGeometry)?;
-    let transformed_pet_center = bounds_center(transformed_pet_bounds);
 
     let round_layout = layout_round_scene(
         &round_scene,
@@ -399,24 +398,9 @@ pub(crate) fn try_build_round_smooth_scene_plan_with_grid_points(
         if has_trouble { 1.0 } else { 0.0 },
     ));
     layers.push(reservation_layer(
-        "round-mood-aura",
-        SmoothLayerRole::MoodAura,
-        22,
-        expand_bounds(transformed_pet_bounds, 2.0, 2.0),
-        transformed_pet_center,
-        SmoothClip::Circle {
-            center: transformed_pet_center,
-            radius: ((transformed_pet_bounds.max.x - transformed_pet_bounds.min.x)
-                .max(transformed_pet_bounds.max.y - transformed_pet_bounds.min.y))
-                / 2.0
-                + 2.0,
-        },
-        1.0,
-    ));
-    layers.push(reservation_layer(
         "round-dim-overlay",
         SmoothLayerRole::DimOverlay,
-        23,
+        22,
         viewport_bounds,
         aperture_center,
         SmoothClip::Ellipse {
@@ -744,26 +728,6 @@ fn anchored_bounds(anchor: SmoothPoint, local_bounds: SmoothBounds) -> SmoothBou
         max: SmoothPoint {
             x: anchor.x + local_bounds.max.x,
             y: anchor.y + local_bounds.max.y,
-        },
-    }
-}
-
-fn bounds_center(bounds: SmoothBounds) -> SmoothPoint {
-    SmoothPoint {
-        x: bounds.min.x + (bounds.max.x - bounds.min.x) / 2.0,
-        y: bounds.min.y + (bounds.max.y - bounds.min.y) / 2.0,
-    }
-}
-
-fn expand_bounds(bounds: SmoothBounds, pad_x: f32, pad_y: f32) -> SmoothBounds {
-    SmoothBounds {
-        min: SmoothPoint {
-            x: bounds.min.x - pad_x,
-            y: bounds.min.y - pad_y,
-        },
-        max: SmoothPoint {
-            x: bounds.max.x + pad_x,
-            y: bounds.max.y + pad_y,
         },
     }
 }

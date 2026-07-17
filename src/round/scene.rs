@@ -18,7 +18,7 @@ use crate::tui::style::ColorCapability;
 use crate::tui::view_model::WatchViewModel;
 
 /// The companion's rendered scene: the draw list plus the pet's drift rect (in
-/// grid cells), which the AppKit layer turns into a pixel center for the aura.
+/// grid cells), which renderer-private code may use for pet placement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompanionScene {
     pub draw_list: SceneDrawList,

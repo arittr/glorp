@@ -554,14 +554,8 @@ impl<'host> RetainedCaptureTarget<'host> {
         frame: &PairedReviewFrame,
     ) -> Result<CanonicalRgbaFrame, RetainedFailureCategory> {
         let prepared = frame.prepared();
-        let RendererIdentitySource::Smooth {
-            metrics,
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
-            plan,
-            draw_order,
-        } = prepared.renderer_source()
+        let RendererIdentitySource::Smooth { metrics, plan, draw_order, .. } =
+            prepared.renderer_source()
         else {
             return Err(RetainedFailureCategory::CaptureUnsupportedVariant);
         };
@@ -570,10 +564,7 @@ impl<'host> RetainedCaptureTarget<'host> {
         let aperture = prepared.review_aperture();
         let hud = prepared.review_hud();
         let chrome = RetainedChrome {
-            mood_aura: round_color_to_rgba(prepared.review_mood_aura()),
-            pet_center_col,
-            pet_center_row,
-            pet_width_cells,
+            pet_rim_color: round_color_to_rgba(prepared.review_pet_rim_color()),
             gauges: prepared.review_gauges(),
             overlays: prepared.review_overlays(),
             hud,

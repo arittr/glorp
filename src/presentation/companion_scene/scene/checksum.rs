@@ -319,6 +319,7 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
     hash.usize(template.analytic_templates.len());
     for slot in &template.analytic_templates {
         hash.u8(slot.id.0);
+        encode_analytic_slot_reservation(&mut hash, slot.id);
         match slot.value {
             Some(value) => {
                 hash.u8(1);
@@ -454,6 +455,7 @@ pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGener
     }
     for slot in &content.analytic_slots {
         hash.u8(slot.id.0);
+        encode_analytic_slot_reservation(&mut hash, slot.id);
         match slot.value {
             Some(value) => {
                 hash.u8(1);
@@ -587,6 +589,7 @@ fn checksum_frame_with_projection(
     }
     for slot in &frame.analytic_slots {
         hash.u8(slot.id.0);
+        encode_analytic_slot_reservation(&mut hash, slot.id);
         match slot.value {
             Some(value) => {
                 hash.u8(1);
@@ -732,16 +735,6 @@ fn encode_analytic_paint(hash: &mut Fnv1a64, paint: AnalyticPaint) {
             encode_rgba(hash, active_srgba8);
             encode_rgba(hash, calm_srgba8);
         }
-        AnalyticPaint::MoodAuraRings {
-            color_srgb8,
-            ring_count,
-            per_ring_alpha_u8,
-        } => {
-            hash.u8(5);
-            encode_rgb(hash, color_srgb8);
-            hash.u8(ring_count);
-            hash.u8(per_ring_alpha_u8);
-        }
         AnalyticPaint::PerimeterGaugeSet {
             xp,
             daily,
@@ -824,20 +817,6 @@ fn encode_analytic_geometry(
                 StatusBeaconTone::Calm => 2,
             });
         }
-        AnalyticGeometry::PetAura {
-            center_points,
-            max_radius_points,
-            ring_count,
-            feather_points,
-        } => {
-            hash.u8(5);
-            encode_points(hash, center_points)?;
-            hash.f32(max_radius_points)
-                .map_err(|_| SceneGenerationError::NonFinite)?;
-            hash.u8(ring_count);
-            hash.f32(feather_points)
-                .map_err(|_| SceneGenerationError::NonFinite)?;
-        }
         AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace } => {
             hash.u8(6);
             encode_points(hash, center_points)?;
@@ -883,6 +862,7 @@ fn analytic_semantic_tag(value: AnalyticSemantic) -> u8 {
         AnalyticSemantic::WallShadow => 2,
         AnalyticSemantic::FloorProjection => 3,
         AnalyticSemantic::StatusHalo => 4,
+        // Slot four remains reserved so historical semantic tags do not shift.
         AnalyticSemantic::MoodAura => 5,
         AnalyticSemantic::GaugePace => 6,
         AnalyticSemantic::Trouble => 7,
@@ -898,12 +878,15 @@ fn analytic_shape_tag(value: AnalyticShape) -> u8 {
         AnalyticShape::PetSilhouette => 2,
         AnalyticShape::PetFloorProjection => 3,
         AnalyticShape::StatusBeacon => 4,
-        AnalyticShape::PetAura => 5,
         AnalyticShape::PerimeterGaugeSet => 6,
         AnalyticShape::TroubleBeacon => 7,
         AnalyticShape::SurfaceOverlay => 8,
         AnalyticShape::PropShadowField => 9,
     }
+}
+fn encode_analytic_slot_reservation(hash: &mut Fnv1a64, id: AnalyticParamId) {
+    // Make the intentionally empty ABI slot part of every scene checksum.
+    hash.bool(AnalyticSemantic::is_reserved_slot(id));
 }
 fn encode_primitive_binding(hash: &mut Fnv1a64, binding: PrimitiveBinding) {
     match binding {
