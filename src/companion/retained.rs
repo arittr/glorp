@@ -363,6 +363,21 @@ struct RetainedSceneGenerationState {
     gpu_materializations: u64,
 }
 
+fn snapshot_depth_composition(
+    snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+) -> Result<crate::round::depth::CompanionDepthComposition, hud::HudPreparationError> {
+    let lifecycle_scale = crate::presentation::companion_effects::depth_lifecycle_scale(
+        snapshot.frame.asleep,
+        snapshot.frame.calm,
+    );
+    let effective_depth = crate::presentation::companion_effects::effective_depth(
+        snapshot.frame.pet_depth,
+        lifecycle_scale,
+    );
+    crate::round::depth::CompanionDepthComposition::resolve(effective_depth)
+        .map_err(|_| hud::HudPreparationError::InvalidGeometry)
+}
+
 #[allow(dead_code)] // Held only by the dormant Task 12 host coordinator until Task 14 routing.
 struct CpuReadySceneCandidate {
     identity: crate::presentation::companion_scene::runtime::RequestIdentity,
@@ -384,6 +399,25 @@ struct RetainedSceneGpuState {
 
 #[allow(dead_code)] // Exercised by Task 12 tests; production calls begin with Task 14 routing.
 impl RetainedSceneGenerationState {
+    fn ready_hud_depth_composition(
+        &self,
+    ) -> Result<crate::round::depth::CompanionDepthComposition, hud::HudPreparationError> {
+        let snapshot = self
+            .runtime
+            .pending_desired_snapshot()
+            .ok_or(hud::HudPreparationError::InvalidGeometry)?;
+        snapshot_depth_composition(snapshot)
+    }
+
+    fn active_hud_depth_composition(
+        &self,
+    ) -> Result<crate::round::depth::CompanionDepthComposition, hud::HudPreparationError> {
+        let lease = self
+            .runtime
+            .capture_lease()
+            .map_err(|_| hud::HudPreparationError::InvalidGeometry)?;
+        snapshot_depth_composition(lease.source_snapshot())
+    }
     fn new(
         runtime: crate::presentation::companion_scene::runtime::CompanionSceneRuntimeState,
     ) -> Self {

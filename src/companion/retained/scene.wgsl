@@ -8,6 +8,7 @@ const PROP_FRAME_GPU_BASE: u32 = 0u;
 const PROP_FRAME_GPU_STRIDE: u32 = 1u;
 const PROP_FRAME_GPU_COUNT: u32 = 10u;
 const FRAME_GPU_VALUE_COUNT: u32 = 124u;
+const COMPANION_STATISTICS_ECHO_Z: f32 = 0.64;
 
 struct PrimitiveGpuValue {
     node_index: u32,
@@ -141,6 +142,16 @@ struct HudGlyphBuffer {
     values: array<HudGlyphGpuValue>,
 }
 
+struct HudInteractionGpuValue {
+    reveal_mix: f32,
+    enabled: u32,
+    padding: vec2<u32>,
+}
+
+struct HudInteractionBuffer {
+    value: HudInteractionGpuValue,
+}
+
 @group(0) @binding(0) var<storage, read> node_buffer: NodeBuffer;
 @group(0) @binding(1) var<storage, read> content_globals_buffer: ContentGlobalsBuffer;
 @group(0) @binding(2) var<storage, read> frame_buffer: FrameBuffer;
@@ -155,6 +166,7 @@ struct HudGlyphBuffer {
 @group(2) @binding(0) var scene_sampled_texture: texture_2d<f32>;
 
 @group(3) @binding(0) var<storage, read> hud_glyph_buffer: HudGlyphBuffer;
+@group(3) @binding(1) var<storage, read> hud_interaction_buffer: HudInteractionBuffer;
 
 struct SceneVertexInput {
     @location(0) local_position: vec3<f32>,
@@ -1329,26 +1341,25 @@ fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     return output;
 }
 
-@fragment
-fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
+fn glyph_fragment_color(input: SceneVertexOutput) -> vec4<f32> {
     if (input.content_index == NONE_U32 || input.content_index >= 462u) {
-        discard;
+        return vec4<f32>(0.0);
     }
     let content = scene_content_buffer.values[input.content_index];
     if (content.glyph_entry_index == NONE_U32
         || content.glyph_entry_index >= arrayLength(&glyph_entry_buffer.values)) {
-        discard;
+        return vec4<f32>(0.0);
     }
     let entry = glyph_entry_for(input);
     if ((entry.flags & GLYPH_FLAG_VISIBLE) == 0u) {
-        discard;
+        return vec4<f32>(0.0);
     }
     var output: vec4<f32>;
     if ((entry.flags & GLYPH_FLAG_COLOR) != 0u) {
         // Rgba8UnormSrgb sampling returns linear RGB and straight alpha.
         let straight_linear = textureSampleLevel(color_texture, atlas_sampler, glyph_uv(input, entry), 0.0);
         if (straight_linear.a <= 0.0) {
-            discard;
+            return vec4<f32>(0.0);
         }
         output = premultiply_scene_color(
             straight_linear,
@@ -1359,7 +1370,7 @@ fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     } else {
         let coverage = textureSampleLevel(coverage_texture, atlas_sampler, glyph_uv(input, entry), 0.0).r;
         if (coverage <= 0.0) {
-            discard;
+            return vec4<f32>(0.0);
         }
         output = premultiply_scene_color(
             glyph_paint_linear(input),
@@ -1368,6 +1379,58 @@ fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
             input.saturation,
         );
     }
+    return output;
+}
+
+@fragment
+fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
+    let output = glyph_fragment_color(input);
+    if (output.a <= 0.0) {
+        discard;
+    }
+    return output;
+}
+
+fn hud_interaction_reveal(position: vec4<f32>) -> f32 {
+    if (hud_interaction_buffer.value.enabled != 1u
+        || hud_interaction_buffer.value.reveal_mix < 0.0
+        || hud_interaction_buffer.value.reveal_mix > 1.0) {
+        return 0.0;
+    }
+    let pixel = vec2<i32>(position.xy);
+    let extent = vec2<i32>(textureDimensions(scene_sampled_texture));
+    if (any(pixel < vec2<i32>(0)) || any(pixel >= extent)) {
+        return 0.0;
+    }
+    let statistics_coverage = textureLoad(scene_sampled_texture, pixel, 0).r;
+    return clamp(
+        statistics_coverage * hud_interaction_buffer.value.reveal_mix,
+        0.0,
+        1.0,
+    );
+}
+
+@fragment
+fn fs_hud_interaction_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
+    let output = glyph_fragment_color(input) * hud_interaction_reveal(input.position);
+    if (output.a <= 0.0) {
+        discard;
+    }
+    return output;
+}
+
+@fragment
+fn fs_hud_interaction_aura(input: SceneVertexOutput) -> @location(0) vec4<f32> {
+    if (input.analytic_id != 4u) {
+        discard;
+    }
+    let analytic = frame_buffer.analytics[input.analytic_id];
+    let content = scene_content_buffer.analytics[input.analytic_id];
+    if (!valid_analytic_role(input.analytic_id, analytic, content)) {
+        discard;
+    }
+    let output = fs_mood_rings(input, content, analytic)
+        * hud_interaction_reveal(input.position);
     if (output.a <= 0.0) {
         discard;
     }
@@ -1461,6 +1524,7 @@ struct HudVertexOutput {
     @location(1) @interpolate(flat) glyph_entry_index: u32,
     @location(2) @interpolate(flat) role: u32,
     @location(3) @interpolate(flat) visible: u32,
+    @location(4) @interpolate(flat) is_echo: u32,
 }
 
 fn hud_quad_corner(vertex_index: u32) -> vec2<f32> {
@@ -1485,21 +1549,33 @@ fn vs_hud(
     output.glyph_entry_index = instance.glyph_entry_index;
     output.role = instance.role;
     output.visible = instance.visible;
+    output.is_echo = select(0u, 1u, vertex_index < 6u);
     if (instance.visible == 0u || instance.rect_points.z <= 0.0 || instance.rect_points.w <= 0.0) {
         output.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
         return output;
     }
 
-    let corner = hud_quad_corner(vertex_index);
-    let point_position = instance.rect_points.xy + corner * instance.rect_points.zw;
-    let world = vec4<f32>(point_position, instance.scene_z, 1.0);
+    let corner = hud_quad_corner(vertex_index % 6u);
+    let echo_offset = select(
+        vec2<f32>(0.0),
+        vec2<f32>(0.60, -0.60),
+        output.is_echo != 0u,
+    );
+    let point_position = instance.rect_points.xy + corner * instance.rect_points.zw + echo_offset;
+    let scene_z = select(instance.scene_z, COMPANION_STATISTICS_ECHO_Z, output.is_echo != 0u);
+    let world = vec4<f32>(point_position, scene_z, 1.0);
     output.position = frame_buffer.globals.projection * frame_buffer.globals.view * world;
     output.uv = corner;
     return output;
 }
 
+struct HudFragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) coverage: f32,
+}
+
 @fragment
-fn fs_hud(input: HudVertexOutput) -> @location(0) vec4<f32> {
+fn fs_hud(input: HudVertexOutput) -> HudFragmentOutput {
     if (input.visible == 0u || input.role > 2u) {
         discard;
     }
@@ -1521,9 +1597,13 @@ fn fs_hud(input: HudVertexOutput) -> @location(0) vec4<f32> {
     if (input.role == 0u) {
         straight_srgb = vec4<f32>(0.93, 0.93, 0.97, 1.0);
     }
-    let alpha = straight_srgb.a * coverage;
+    let echo_alpha = select(1.0, 0.12, input.is_echo != 0u);
+    let alpha = straight_srgb.a * coverage * echo_alpha;
     let linear_rgb = srgb_to_linear(straight_srgb.rgb);
-    return vec4<f32>(linear_rgb * alpha, alpha);
+    return HudFragmentOutput(
+        vec4<f32>(linear_rgb * alpha, alpha),
+        select(coverage, 0.0, input.is_echo != 0u),
+    );
 }
 
 struct FinalVertexOutput {

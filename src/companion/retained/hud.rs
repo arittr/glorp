@@ -27,6 +27,8 @@ use crate::round::hud::{
 pub(super) const HUD_GPU_BUFFER_BYTES: u64 =
     (MAX_COMPANION_HUD_GLYPHS * std::mem::size_of::<HudGlyphGpuValue>()) as u64;
 pub(super) const HUD_GPU_DRAW_INSTANCES: u32 = MAX_COMPANION_HUD_GLYPHS as u32;
+pub(super) const HUD_INTERACTION_GPU_BYTES: u64 =
+    std::mem::size_of::<HudInteractionGpuValue>() as u64;
 
 pub(super) struct HudGpuBufferUsages;
 
@@ -38,17 +40,32 @@ impl HudGpuBufferUsages {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HudGpuStagingError {
     ResourceGenerationMismatch,
+    InvalidInteractionPlan,
 }
 
 impl fmt::Debug for HudGpuStagingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("HudGpuStagingError::ResourceGenerationMismatch")
+        match self {
+            Self::ResourceGenerationMismatch => {
+                formatter.write_str("HudGpuStagingError::ResourceGenerationMismatch")
+            }
+            Self::InvalidInteractionPlan => {
+                formatter.write_str("HudGpuStagingError::InvalidInteractionPlan")
+            }
+        }
     }
 }
 
 impl fmt::Display for HudGpuStagingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("companion HUD GPU generation mismatch")
+        match self {
+            Self::ResourceGenerationMismatch => {
+                formatter.write_str("companion HUD GPU generation mismatch")
+            }
+            Self::InvalidInteractionPlan => {
+                formatter.write_str("companion HUD interaction plan is invalid")
+            }
+        }
     }
 }
 
@@ -66,7 +83,14 @@ pub(super) struct HudDrawBindings<'resources> {
 
 struct HudRenderTarget<'resources> {
     color: &'resources wgpu::TextureView,
+    statistics_coverage: &'resources wgpu::TextureView,
     depth: &'resources wgpu::TextureView,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HudDrawPhase {
+    Echo,
+    Primary,
 }
 
 impl<'resources> HudDrawBindings<'resources> {
@@ -144,6 +168,44 @@ pub(crate) struct HudGlyphGpuValue {
     scene_z: f32,
 }
 
+/// Fixed renderer-private state for one statistics interaction. It is staged
+/// beside, but never packed into, the sealed 32-byte glyph ABI.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
+pub(super) struct HudInteractionGpuValue {
+    reveal_mix: f32,
+    enabled: u32,
+    _padding: [u32; 2],
+}
+
+impl HudInteractionGpuValue {
+    fn from_composition(composition: crate::round::depth::CompanionDepthComposition) -> Self {
+        Self {
+            reveal_mix: composition.statistics_interaction.reveal_mix,
+            enabled: u32::from(
+                composition.pet_effective_z > composition.statistics_interaction.start_z
+                    && composition.pet_effective_z <= composition.statistics_z,
+            ),
+            _padding: [0; 2],
+        }
+    }
+
+    pub(super) const fn enabled(self) -> bool {
+        self.enabled != 0
+    }
+
+    #[cfg(test)]
+    pub(super) const fn reveal_mix(self) -> f32 {
+        self.reveal_mix
+    }
+}
+
+impl fmt::Debug for HudInteractionGpuValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HudInteractionGpuValue(<private>)")
+    }
+}
+
 impl fmt::Debug for HudGlyphGpuValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("HudGlyphGpuValue(<private>)")
@@ -159,6 +221,7 @@ pub(crate) struct HudPreparationGeometry {
     pub(crate) view_height: f64,
     pub(crate) hud_font_size: f64,
     pub(crate) resource_generation: ResourceGeneration,
+    pub(crate) depth_composition: crate::round::depth::CompanionDepthComposition,
 }
 
 impl fmt::Debug for HudPreparationGeometry {
@@ -352,6 +415,7 @@ impl PreparedHudAtlas {
 
         Ok(PreparedHudRecords {
             records,
+            interaction: HudInteractionGpuValue::from_composition(geometry.depth_composition),
             draw_count: MAX_COMPANION_HUD_GLYPHS as u32,
             resource_identity: self.resource_identity,
         })
@@ -385,6 +449,10 @@ impl PreparedHudAtlas {
         }
         CaptureSafePreparedHudFrame {
             records,
+            interaction: HudInteractionGpuValue::from_composition(
+                crate::round::depth::CompanionDepthComposition::resolve(0.0)
+                    .expect("validated test depth"),
+            ),
             draw_count: HUD_GPU_DRAW_INSTANCES,
             resource_generation: self.resource_identity,
         }
@@ -407,6 +475,8 @@ pub(super) struct GpuHudResources {
     prepared_atlas: PreparedHudAtlas,
     live_buffer: wgpu::Buffer,
     redacted_buffer: wgpu::Buffer,
+    live_interaction_buffer: wgpu::Buffer,
+    redacted_interaction_buffer: wgpu::Buffer,
     live_bind_group: wgpu::BindGroup,
     redacted_bind_group: wgpu::BindGroup,
     #[cfg(test)]
@@ -433,22 +503,30 @@ impl GpuHudResources {
     ) -> Self {
         let live_buffer = create_hud_buffer(device, "glorp-scene-live-hud-records");
         let redacted_buffer = create_hud_buffer(device, "glorp-scene-redacted-hud-records");
+        let live_interaction_buffer =
+            create_hud_interaction_buffer(device, "glorp-scene-live-hud-interaction");
+        let redacted_interaction_buffer =
+            create_hud_interaction_buffer(device, "glorp-scene-redacted-hud-interaction");
         let live_bind_group = create_hud_bind_group(
             device,
             layout,
             &live_buffer,
+            &live_interaction_buffer,
             "glorp-scene-live-hud-bind-group",
         );
         let redacted_bind_group = create_hud_bind_group(
             device,
             layout,
             &redacted_buffer,
+            &redacted_interaction_buffer,
             "glorp-scene-redacted-hud-bind-group",
         );
         Self {
             prepared_atlas,
             live_buffer,
             redacted_buffer,
+            live_interaction_buffer,
+            redacted_interaction_buffer,
             live_bind_group,
             redacted_bind_group,
             #[cfg(test)]
@@ -462,6 +540,20 @@ impl GpuHudResources {
 
     pub(super) fn prepared_atlas(&self) -> &PreparedHudAtlas {
         &self.prepared_atlas
+    }
+
+    pub(super) fn bind_sensitive_interaction<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+    ) {
+        pass.set_bind_group(3, &self.live_bind_group, &[]);
+    }
+
+    pub(super) fn bind_redacted_interaction<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+    ) {
+        pass.set_bind_group(3, &self.redacted_bind_group, &[]);
     }
 
     #[cfg(test)]
@@ -481,14 +573,17 @@ impl GpuHudResources {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn encode_sensitive(
         &mut self,
         staging_belt: &mut wgpu::util::StagingBelt,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        statistics_coverage: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         bindings: HudDrawBindings<'_>,
         prepared: &SensitivePreparedHudFrame,
+        phase: HudDrawPhase,
     ) -> Result<(), HudGpuStagingError> {
         validate_staging_generation(
             self.prepared_atlas.resource_identity,
@@ -497,28 +592,38 @@ impl GpuHudResources {
         encode_hud(
             staging_belt,
             encoder,
-            HudRenderTarget { color: target, depth },
+            HudRenderTarget {
+                color: target,
+                statistics_coverage,
+                depth,
+            },
             bindings,
             &self.live_buffer,
+            &self.live_interaction_buffer,
             &self.live_bind_group,
             &prepared.records,
+            prepared.interaction,
+            phase,
         );
         #[cfg(test)]
-        {
+        if phase == HudDrawPhase::Echo {
             self.sensitive_copies += 1;
             self.copied_bytes += HUD_GPU_BUFFER_BYTES;
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn encode_redacted_capture(
         &mut self,
         staging_belt: &mut wgpu::util::StagingBelt,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        statistics_coverage: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         bindings: HudDrawBindings<'_>,
         prepared: &CaptureSafePreparedHudFrame,
+        phase: HudDrawPhase,
     ) -> Result<(), HudGpuStagingError> {
         validate_staging_generation(
             self.prepared_atlas.resource_identity,
@@ -527,14 +632,21 @@ impl GpuHudResources {
         encode_hud(
             staging_belt,
             encoder,
-            HudRenderTarget { color: target, depth },
+            HudRenderTarget {
+                color: target,
+                statistics_coverage,
+                depth,
+            },
             bindings,
             &self.redacted_buffer,
+            &self.redacted_interaction_buffer,
             &self.redacted_bind_group,
             &prepared.records,
+            prepared.interaction,
+            phase,
         );
         #[cfg(test)]
-        {
+        if phase == HudDrawPhase::Echo {
             self.redacted_copies += 1;
             self.copied_bytes += HUD_GPU_BUFFER_BYTES;
         }
@@ -580,19 +692,35 @@ fn create_hud_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffer
     })
 }
 
+fn create_hud_interaction_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: HUD_INTERACTION_GPU_BYTES,
+        usage: HudGpuBufferUsages::RECORDS,
+        mapped_at_creation: false,
+    })
+}
+
 fn create_hud_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     buffer: &wgpu::Buffer,
+    interaction_buffer: &wgpu::Buffer,
     label: &'static str,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: interaction_buffer.as_entire_binding(),
+            },
+        ],
     })
 }
 
@@ -619,29 +747,62 @@ fn stage_exact_records(
     view.copy_from_slice(bytes);
 }
 
+fn stage_interaction(
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::Buffer,
+    interaction: HudInteractionGpuValue,
+) {
+    let size = wgpu::BufferSize::new(HUD_INTERACTION_GPU_BYTES)
+        .expect("fixed HUD interaction extent is nonzero");
+    let mut view = staging_belt.write_buffer(encoder, target, 0, size);
+    view.copy_from_slice(bytemuck::bytes_of(&interaction));
+}
+
+#[allow(clippy::too_many_arguments)]
 fn encode_hud(
     staging_belt: &mut wgpu::util::StagingBelt,
     encoder: &mut wgpu::CommandEncoder,
     target: HudRenderTarget<'_>,
     bindings: HudDrawBindings<'_>,
     buffer: &wgpu::Buffer,
+    interaction_buffer: &wgpu::Buffer,
     bind_group: &wgpu::BindGroup,
     records: &[HudGlyphGpuValue; MAX_COMPANION_HUD_GLYPHS],
+    interaction: HudInteractionGpuValue,
+    phase: HudDrawPhase,
 ) {
-    stage_exact_records(staging_belt, encoder, buffer, records);
+    if phase == HudDrawPhase::Echo {
+        stage_exact_records(staging_belt, encoder, buffer, records);
+        stage_interaction(staging_belt, encoder, interaction_buffer, interaction);
+    }
     // The fixed upload and draw stay inseparable while loading the world color
     // and depth produced by the transparent prefix.
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("glorp-scene-hud-hook"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: target.color,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })],
+        color_attachments: &[
+            Some(wgpu::RenderPassColorAttachment {
+                view: target.color,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: target.statistics_coverage,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: match phase {
+                        HudDrawPhase::Echo => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        HudDrawPhase::Primary => wgpu::LoadOp::Load,
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: target.depth,
             depth_ops: Some(wgpu::Operations {
@@ -656,13 +817,18 @@ fn encode_hud(
     pass.set_bind_group(0, bindings.scene, &[]);
     pass.set_bind_group(1, bindings.atlas, &[]);
     pass.set_bind_group(3, bind_group, &[]);
-    pass.draw(0..6, 0..HUD_GPU_DRAW_INSTANCES);
+    let vertices = match phase {
+        HudDrawPhase::Echo => 0..6,
+        HudDrawPhase::Primary => 6..12,
+    };
+    pass.draw(vertices, 0..HUD_GPU_DRAW_INSTANCES);
 }
 
 /// Private common storage used only while constructing one of the two nominal
 /// prepared projections. It is never exposed as an untyped prepared frame.
 struct PreparedHudRecords {
     records: [HudGlyphGpuValue; MAX_COMPANION_HUD_GLYPHS],
+    interaction: HudInteractionGpuValue,
     draw_count: u32,
     resource_identity: ResourceGeneration,
 }
@@ -672,6 +838,7 @@ struct PreparedHudRecords {
 /// live values. Keep this out of capture, checksums, artifacts, and diagnostics.
 pub(crate) struct SensitivePreparedHudFrame {
     records: [HudGlyphGpuValue; MAX_COMPANION_HUD_GLYPHS],
+    interaction: HudInteractionGpuValue,
     draw_count: u32,
     resource_generation: ResourceGeneration,
 }
@@ -680,6 +847,7 @@ impl SensitivePreparedHudFrame {
     fn from_records(records: PreparedHudRecords) -> Self {
         Self {
             records: records.records,
+            interaction: records.interaction,
             draw_count: records.draw_count,
             resource_generation: records.resource_identity,
         }
@@ -687,6 +855,10 @@ impl SensitivePreparedHudFrame {
 
     fn byte_len(&self) -> usize {
         std::mem::size_of_val(&self.records)
+    }
+
+    pub(super) const fn statistics_interaction(&self) -> HudInteractionGpuValue {
+        self.interaction
     }
 
     #[cfg(test)]
@@ -708,6 +880,7 @@ impl fmt::Debug for SensitivePreparedHudFrame {
 /// redacted sealed input can produce this output.
 pub(crate) struct CaptureSafePreparedHudFrame {
     records: [HudGlyphGpuValue; MAX_COMPANION_HUD_GLYPHS],
+    interaction: HudInteractionGpuValue,
     draw_count: u32,
     resource_generation: ResourceGeneration,
 }
@@ -716,6 +889,7 @@ impl CaptureSafePreparedHudFrame {
     fn from_records(records: PreparedHudRecords) -> Self {
         Self {
             records: records.records,
+            interaction: records.interaction,
             draw_count: records.draw_count,
             resource_generation: records.resource_identity,
         }
@@ -729,9 +903,14 @@ impl CaptureSafePreparedHudFrame {
     pub(super) fn zeroed_for_test(resource_generation: ResourceGeneration) -> Self {
         Self {
             records: [HudGlyphGpuValue::zeroed(); MAX_COMPANION_HUD_GLYPHS],
+            interaction: HudInteractionGpuValue::zeroed(),
             draw_count: HUD_GPU_DRAW_INSTANCES,
             resource_generation,
         }
+    }
+
+    pub(super) const fn statistics_interaction(&self) -> HudInteractionGpuValue {
+        self.interaction
     }
 }
 
@@ -815,6 +994,12 @@ fn validate_geometry(geometry: HudPreparationGeometry) -> Result<(), HudPreparat
         geometry.hud_font_size,
     ];
     if !values.iter().all(|value| value.is_finite())
+        || !geometry.depth_composition.pet_effective_z.is_finite()
+        || !geometry
+            .depth_composition
+            .statistics_interaction
+            .reveal_mix
+            .is_finite()
         || geometry.gap.max_width <= 0.0
         || geometry.aperture_radius <= 0.0
         || geometry.view_width <= 0.0
@@ -1050,6 +1235,8 @@ mod tests {
             view_height: 1_000.0,
             hud_font_size: 8.0,
             resource_generation: ResourceGeneration(0),
+            depth_composition: crate::round::depth::CompanionDepthComposition::resolve(0.0)
+                .unwrap(),
         }
     }
 
@@ -1255,9 +1442,32 @@ mod tests {
     fn dedicated_gpu_storage_contract_is_exact() {
         assert_eq!(HUD_GPU_BUFFER_BYTES, 832);
         assert_eq!(HUD_GPU_DRAW_INSTANCES, 26);
+        assert_eq!(size_of::<HudInteractionGpuValue>(), 16);
         assert_eq!(
             HudGpuBufferUsages::RECORDS,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+        );
+    }
+
+    #[test]
+    fn hud_interaction_state_is_fixed_private_and_redacted() {
+        let atlas = PreparedHudAtlas::from_scene_atlas(&prepared_atlas()).unwrap();
+        let sealed = live(12_345.0, Some(0.5), 789.0);
+        let mut geometry = geometry();
+        geometry.depth_composition =
+            crate::round::depth::CompanionDepthComposition::resolve(0.68).unwrap();
+        let prepared = atlas.prepare_sensitive(&sealed, geometry).unwrap();
+
+        assert_eq!(size_of::<HudInteractionGpuValue>(), 16);
+        assert_eq!(prepared.statistics_interaction().reveal_mix(), 0.5);
+        assert!(prepared.statistics_interaction().enabled());
+        assert_eq!(
+            format!("{prepared:?}"),
+            "SensitivePreparedHudFrame(<private>)"
+        );
+        assert_eq!(
+            format!("{:?}", prepared.statistics_interaction()),
+            "HudInteractionGpuValue(<private>)"
         );
     }
 

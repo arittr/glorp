@@ -1517,9 +1517,14 @@ impl ActiveRetainedHost {
                 .ok_or(SceneActivationError::Start(
                     crate::presentation::companion_scene::runtime::ActivationStartError::NoReadyCandidate,
                 ))?;
-            let geometry = self
-                .host
-                .scene_hud_geometry(version.generation.resources, hud_font_size);
+            let geometry = self.host.scene_hud_geometry(
+                version.generation.resources,
+                hud_font_size,
+                activation
+                    .generations
+                    .ready_hud_depth_composition()
+                    .map_err(|_| SceneActivationError::UnsupportedSurfaceContract)?,
+            );
             let prepared_hud = activation
                 .generations
                 .prepare_ready_hud(hud_text, geometry)
@@ -1610,9 +1615,14 @@ impl ActiveRetainedHost {
             .generations
             .active_version()
             .ok_or(RetainedFailureCategory::SceneCandidateEncode)?;
-        let geometry = self
-            .host
-            .scene_hud_geometry(version.generation.resources, hud_font_size);
+        let geometry = self.host.scene_hud_geometry(
+            version.generation.resources,
+            hud_font_size,
+            activation
+                .generations
+                .active_hud_depth_composition()
+                .map_err(|_| RetainedFailureCategory::SceneCandidateEncode)?,
+        );
         let prepared_hud = activation
             .generations
             .prepare_active_hud(hud_text, geometry)
@@ -1732,9 +1742,17 @@ impl ActiveRetainedHost {
         if receipt.privacy != expected_privacy {
             return Err(RetainedFailureCategory::CaptureUnsupportedVariant);
         }
-        let geometry = self
-            .host
-            .scene_hud_geometry(receipt.scene_version.generation.resources, hud_font_size);
+        let geometry = self.host.scene_hud_geometry(
+            receipt.scene_version.generation.resources,
+            hud_font_size,
+            self.host
+                .scene_activation
+                .as_ref()
+                .ok_or(RetainedFailureCategory::CaptureUnsupportedVariant)?
+                .generations
+                .active_hud_depth_composition()
+                .map_err(|_| RetainedFailureCategory::CaptureUnsupportedVariant)?,
+        );
         let activation = self
             .host
             .scene_activation
@@ -2150,9 +2168,14 @@ impl<Semantic> DirectLifetimeAuditExecutor<'_, Semantic> {
             .generations
             .active_version()
             .ok_or(RetainedFailureCategory::LifetimeFramePreparation)?;
-        let geometry = self
-            .host
-            .scene_hud_geometry(version.generation.resources, self.hud_font_size);
+        let geometry = self.host.scene_hud_geometry(
+            version.generation.resources,
+            self.hud_font_size,
+            self.activation
+                .generations
+                .active_hud_depth_composition()
+                .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?,
+        );
         let prepared_hud = self
             .activation
             .generations
@@ -2448,6 +2471,7 @@ impl RetainedHost {
         &self,
         resource_generation: crate::presentation::companion_scene::ResourceGeneration,
         hud_font_size: f64,
+        depth_composition: crate::round::depth::CompanionDepthComposition,
     ) -> hud::HudPreparationGeometry {
         let view_width = f64::from(self.physical_width) / self.backing_scale;
         let view_height = f64::from(self.physical_height) / self.backing_scale;
@@ -2473,6 +2497,7 @@ impl RetainedHost {
             view_height,
             hud_font_size,
             resource_generation,
+            depth_composition,
         }
     }
 
