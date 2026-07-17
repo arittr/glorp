@@ -338,9 +338,11 @@ mod tests {
     fn projection_retains_unclipped_planar_displacement_separately() {
         let projection = project_round_companion_motion_from_offsets(
             CompanionMotionInput {
+                identity: 0,
                 asleep: false,
-                calm: false,
-                rate_per_hour: 0.0,
+                sleep_onset_utc: None,
+                wake_from_eval_utc: None,
+                woke_at_utc: None,
                 current_facing: 1,
                 resolved_wander_offset_x: 0,
                 resolved_wander_facing: 1,

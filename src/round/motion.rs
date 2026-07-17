@@ -3,6 +3,10 @@ const PET_HEIGHT_CELLS: u16 = 10;
 const PET_INK_WIDTH_CELLS: u16 = 11;
 const PET_INK_HEIGHT_CELLS: u16 = 8;
 
+use crate::round::locomotion::{
+    sample_companion_locomotion, CompanionLocomotionSample, NormalizedLocomotionPoint,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompanionMotion {
     pub wander_half: u16,
@@ -61,9 +65,11 @@ pub struct CompanionMotionClearance {
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct CompanionMotionInput {
+    pub identity: u64,
     pub asleep: bool,
-    pub calm: bool,
-    pub rate_per_hour: f64,
+    pub sleep_onset_utc: Option<time::OffsetDateTime>,
+    pub wake_from_eval_utc: Option<time::OffsetDateTime>,
+    pub woke_at_utc: Option<time::OffsetDateTime>,
     pub current_facing: i8,
     pub resolved_wander_offset_x: i16,
     pub resolved_wander_facing: i8,
@@ -75,7 +81,7 @@ pub struct RoundCompanionMotionProjection {
     pub motion_top_left_cells: MotionPoint,
     pub motion_origin_top_left_cells: MotionPoint,
     pub motion_top_left_points: [f32; 2],
-    /// Energy-scaled planar displacement before the non-Classic placement resolver.
+    /// Unclipped planar displacement before the non-Classic placement resolver.
     /// Classic and parallax keep their existing clamped fields; tank depth uses this
     /// value so the HUD reservation cannot erase local Y motion.
     pub planar_offset_cells: MotionPoint,
@@ -117,18 +123,18 @@ pub fn project_round_companion_motion_with_options(
     motion: &CompanionMotion,
     options: RoundMotionProjectionOptions,
 ) -> RoundCompanionMotionProjection {
-    let energy = companion_motion_energy(input);
-    let facing = if motion.wander {
-        companion_wander_facing(
-            wall_time,
-            motion.drift_period_secs,
-            energy,
-            input.current_facing,
+    let (fx, fy, fz, facing) = if motion.wander {
+        let sample = lifecycle_locomotion_sample(input, wall_time);
+        (
+            sample.point.x,
+            sample.point.y,
+            sample.point.z,
+            sample.facing,
         )
     } else {
-        input.resolved_wander_facing
+        let (fx, fy, fz) = companion_drift_offsets(wall_time, motion.drift_period_secs);
+        (fx, fy, fz, input.resolved_wander_facing)
     };
-    let (fx, fy, fz) = companion_motion_offsets(wall_time, motion, energy);
     project_round_companion_motion_from_offsets(
         input,
         elapsed_ms,
@@ -169,7 +175,7 @@ pub(crate) fn project_round_companion_motion_neutral(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn project_round_companion_motion_from_offsets(
     input: CompanionMotionInput,
-    elapsed_ms: u64,
+    _elapsed_ms: u64,
     viewport: RoundCompanionMotionViewport,
     motion: &CompanionMotion,
     fx: f32,
@@ -233,15 +239,15 @@ pub(crate) fn project_round_companion_motion_from_offsets(
         facing: normalize_facing(facing),
         wander_offset_x,
         breath_offset_y_cells: input.breath_offset_y_cells,
-        bob_offset_y_cells: round_companion_bob(elapsed_ms),
+        bob_offset_y_cells: 0.0,
     }
 }
 
-pub fn round_companion_bob(elapsed_ms: u64) -> f32 {
-    const AMPLITUDE: f32 = 0.33;
-    const PERIOD_MS: f32 = 2_000.0;
-    let phase = (elapsed_ms as f32 / PERIOD_MS) * std::f32::consts::TAU;
-    phase.sin() * AMPLITUDE
+/// Compatibility shim for the legacy smooth scene. Companion locomotion no
+/// longer adds a body bob; the caller can be retired when that renderer is
+/// consolidated onto the shared projection contract.
+pub fn round_companion_bob(_elapsed_ms: u64) -> f32 {
+    0.0
 }
 
 pub(crate) fn companion_drift_position(
@@ -268,63 +274,10 @@ pub(crate) fn companion_drift_position(
     )
 }
 
-pub(crate) fn companion_motion_offsets(
-    now: time::OffsetDateTime,
-    motion: &CompanionMotion,
-    energy: f32,
-) -> (f32, f32, f32) {
-    if motion.wander {
-        let (x, y) = companion_wander_offsets(now, motion.drift_period_secs);
-        let z = companion_wander_depth(now, motion.drift_period_secs);
-        // Activity controls lateral liveliness; lifecycle projection attenuates
-        // depth separately so an awake pet can traverse the full shallow tank.
-        (x * energy, y * energy, z)
-    } else {
-        companion_drift_offsets(now, motion.drift_period_secs)
-    }
-}
-
-pub(crate) fn companion_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
-    use std::f64::consts::TAU;
-    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
-        / period_secs.max(1) as f64;
-    let x = 0.72 * (TAU * t).cos() + 0.28 * (TAU * t * 1.93 + 0.6).sin();
-    let y = 0.72 * (TAU * t * 1.21 + 0.3).sin() + 0.28 * (TAU * t * 2.41 + 1.5).cos();
-    (x as f32, y as f32)
-}
-
-pub(crate) fn companion_wander_facing(
+pub(crate) fn companion_drift_offsets(
     now: time::OffsetDateTime,
     period_secs: u64,
-    energy: f32,
-    current: i8,
-) -> i8 {
-    const WINDOW_SECS: i64 = 1;
-    const DEADZONE: f32 = 0.04;
-    let (x_now, _) = companion_wander_offsets(now, period_secs);
-    let (x_previous, _) =
-        companion_wander_offsets(now - time::Duration::seconds(WINDOW_SECS), period_secs);
-    let visible_dx = (x_now - x_previous) * energy;
-    if visible_dx > DEADZONE {
-        -1
-    } else if visible_dx < -DEADZONE {
-        1
-    } else {
-        normalize_facing(current)
-    }
-}
-
-pub(crate) fn companion_motion_energy(input: CompanionMotionInput) -> f32 {
-    const IDLE_FLOOR: f32 = 0.25;
-    const RESTING_ENERGY: f32 = 0.12;
-    const RATE_FULL: f64 = 50_000_000.0;
-    if input.asleep || input.calm {
-        return RESTING_ENERGY;
-    }
-    (IDLE_FLOOR + (input.rate_per_hour.max(0.0) / RATE_FULL) as f32).clamp(IDLE_FLOOR, 1.0)
-}
-
-fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32, f32) {
+) -> (f32, f32, f32) {
     let unix = now.unix_timestamp() as u64;
     let period = period_secs.max(1);
     let epoch = unix / period;
@@ -355,11 +308,84 @@ fn companion_drift_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32,
     )
 }
 
-fn companion_wander_depth(now: time::OffsetDateTime, period_secs: u64) -> f32 {
-    use std::f64::consts::TAU;
-    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
-        / period_secs.max(1) as f64;
-    (0.70 * (TAU * t * 1.37 + 0.9).sin() + 0.30 * (TAU * t * 0.61 + 2.0).cos()) as f32
+fn lifecycle_locomotion_sample(
+    input: CompanionMotionInput,
+    wall_time: time::OffsetDateTime,
+) -> CompanionLocomotionSample {
+    let live = sample_companion_locomotion(input.identity, wall_time, input.current_facing);
+
+    if input.asleep {
+        return input.sleep_onset_utc.map_or(live, |onset| {
+            let held = sample_companion_locomotion(input.identity, onset, input.current_facing);
+            CompanionLocomotionSample {
+                point: settle_toward_neutral(held.point, wall_time - onset),
+                facing: held.facing,
+                ..live
+            }
+        });
+    }
+
+    let (wake_from_eval_utc, woke_at_utc) = match (input.wake_from_eval_utc, input.woke_at_utc) {
+        (None, None) => return live,
+        (Some(from), Some(woke)) if from <= woke && woke <= wall_time => (from, woke),
+        (Some(from), Some(woke)) => {
+            debug_assert!(
+                from <= woke && woke <= wall_time,
+                "wake locomotion instants must be ordered and not in the future"
+            );
+            return live;
+        }
+        _ => {
+            debug_assert!(
+                false,
+                "wake locomotion requires both wake_from_eval_utc and woke_at_utc"
+            );
+            return live;
+        }
+    };
+    let wake_sample =
+        sample_companion_locomotion(input.identity, wake_from_eval_utc, input.current_facing);
+    let held_at_wake = settle_toward_neutral(wake_sample.point, woke_at_utc - wake_from_eval_utc);
+    let point = blend_locomotion_points(
+        held_at_wake,
+        live.point,
+        settle_fraction(wall_time - woke_at_utc),
+    );
+    CompanionLocomotionSample { point, ..live }
+}
+
+fn settle_toward_neutral(
+    point: NormalizedLocomotionPoint,
+    elapsed: time::Duration,
+) -> NormalizedLocomotionPoint {
+    blend_locomotion_points(
+        point,
+        NormalizedLocomotionPoint { x: 0.0, y: 0.0, z: 0.0 },
+        settle_fraction(elapsed),
+    )
+}
+
+fn blend_locomotion_points(
+    from: NormalizedLocomotionPoint,
+    to: NormalizedLocomotionPoint,
+    fraction: f32,
+) -> NormalizedLocomotionPoint {
+    let fraction = minimum_jerk(fraction);
+    NormalizedLocomotionPoint {
+        x: from.x + (to.x - from.x) * fraction,
+        y: from.y + (to.y - from.y) * fraction,
+        z: from.z + (to.z - from.z) * fraction,
+    }
+}
+
+fn settle_fraction(elapsed: time::Duration) -> f32 {
+    let elapsed_ms = elapsed.whole_milliseconds().max(0) as f64;
+    (elapsed_ms / (crate::pet::animator::WANDER_SETTLE_SECS as f64 * 1_000.0)) as f32
+}
+
+fn minimum_jerk(fraction: f32) -> f32 {
+    let t = fraction.clamp(0.0, 1.0);
+    t * t * t * (10.0 + t * (-15.0 + 6.0 * t))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -415,5 +441,281 @@ fn normalize_facing(facing: i8) -> i8 {
         -1
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::round::locomotion::{sample_companion_locomotion, LocomotionPhase};
+    use crate::tui::view_model::WatchViewModel;
+    use time::macros::datetime;
+
+    fn motion_input(
+        asleep: bool,
+        sleep_onset_utc: Option<time::OffsetDateTime>,
+        wake_from_eval_utc: Option<time::OffsetDateTime>,
+        woke_at_utc: Option<time::OffsetDateTime>,
+    ) -> CompanionMotionInput {
+        CompanionMotionInput {
+            identity: 0x5eed_5eed,
+            asleep,
+            sleep_onset_utc,
+            wake_from_eval_utc,
+            woke_at_utc,
+            current_facing: 1,
+            resolved_wander_offset_x: 0,
+            resolved_wander_facing: 1,
+            breath_offset_y_cells: 0,
+        }
+    }
+
+    fn viewport() -> RoundCompanionMotionViewport {
+        RoundCompanionMotionViewport {
+            grid_columns: 44,
+            grid_rows: 18,
+            width_points: 440.0,
+            height_points: 360.0,
+            clearance: CompanionMotionClearance {
+                near_scale: crate::round::depth::SMOOTH_PET_NEAR_SCALE,
+                perspective_y_max: crate::round::depth::SMOOTH_PERSPECTIVE_Y_MAX,
+                bottom_reserved_rows: 5,
+            },
+        }
+    }
+
+    #[test]
+    fn activity_and_calm_do_not_change_awake_locomotion_geometry() {
+        let mut active = WatchViewModel::fixture_with_habitat_props();
+        active.life_profile.calm_mode = false;
+        active.progress.rate_per_hour = 80_000_000.0;
+        let mut calm = active.clone();
+        calm.life_profile.calm_mode = true;
+        calm.progress.rate_per_hour = 0.0;
+        let motion = companion_roam_motion();
+        let now = datetime!(2026-07-17 12:34:56 UTC);
+        let active = crate::round::scene::companion_pet_placement(&active, now, 44, 18, &motion);
+        let calm = crate::round::scene::companion_pet_placement(&calm, now, 44, 18, &motion);
+
+        assert_eq!(
+            active.fractional_motion_top_left,
+            calm.fractional_motion_top_left
+        );
+        assert_eq!(active.raw_depth, calm.raw_depth);
+        assert_eq!(
+            active.motion_projection.facing,
+            calm.motion_projection.facing
+        );
+    }
+
+    #[test]
+    fn projection_uses_one_locomotion_sample_for_planar_and_depth_intent() {
+        let now = datetime!(2026-07-17 12:34:56 UTC);
+        let input = motion_input(false, None, None, None);
+        let sample = sample_companion_locomotion(input.identity, now, input.current_facing);
+        let projection =
+            project_round_companion_motion(input, now, 0, viewport(), &companion_roam_motion());
+
+        assert_eq!(projection.normalized_depth, sample.point.z);
+        assert_eq!(projection.facing, sample.facing);
+        assert_close(
+            projection.planar_offset_cells.x,
+            sample.point.x * (16.0 * 0.92),
+        );
+        assert_close(
+            projection.planar_offset_cells.y,
+            sample.point.y * (4.0 * 0.6),
+        );
+    }
+
+    #[test]
+    fn sleeping_motion_settles_to_neutral_then_holds() {
+        let onset = datetime!(2026-07-17 12:34:56 UTC);
+        let input = motion_input(true, Some(onset), None, None);
+        let motion = companion_roam_motion();
+        let at_onset = project_round_companion_motion(input, onset, 0, viewport(), &motion);
+        let halfway = project_round_companion_motion(
+            input,
+            onset + time::Duration::seconds(4),
+            0,
+            viewport(),
+            &motion,
+        );
+        let settled = project_round_companion_motion(
+            input,
+            onset + time::Duration::seconds(crate::pet::animator::WANDER_SETTLE_SECS),
+            0,
+            viewport(),
+            &motion,
+        );
+        let held = project_round_companion_motion(
+            input,
+            onset + time::Duration::seconds(crate::pet::animator::WANDER_SETTLE_SECS + 60),
+            0,
+            viewport(),
+            &motion,
+        );
+
+        assert_close(
+            halfway.planar_offset_cells.x,
+            at_onset.planar_offset_cells.x * 0.5,
+        );
+        assert_close(
+            halfway.planar_offset_cells.y,
+            at_onset.planar_offset_cells.y * 0.5,
+        );
+        assert_close(halfway.normalized_depth, at_onset.normalized_depth * 0.5);
+        assert_eq!(settled.planar_offset_cells, MotionPoint { x: 0.0, y: 0.0 });
+        assert_eq!(settled.normalized_depth, 0.0);
+        assert_eq!(held.planar_offset_cells, settled.planar_offset_cells);
+        assert_eq!(held.normalized_depth, settled.normalized_depth);
+    }
+
+    #[test]
+    fn waking_motion_eases_from_neutral_to_the_live_path() {
+        let wake_from_eval_utc = datetime!(2026-07-17 12:34:56 UTC);
+        let woke_at_utc =
+            wake_from_eval_utc + time::Duration::seconds(crate::pet::animator::WANDER_SETTLE_SECS);
+        let waking = motion_input(false, None, Some(wake_from_eval_utc), Some(woke_at_utc));
+        let live = motion_input(false, None, None, None);
+        let motion = companion_roam_motion();
+        let at_wake = project_round_companion_motion(waking, woke_at_utc, 0, viewport(), &motion);
+        let halfway_at = woke_at_utc + time::Duration::seconds(4);
+        let halfway = project_round_companion_motion(waking, halfway_at, 0, viewport(), &motion);
+        let halfway_live = project_round_companion_motion(live, halfway_at, 0, viewport(), &motion);
+        let settled_at =
+            woke_at_utc + time::Duration::seconds(crate::pet::animator::WANDER_SETTLE_SECS);
+        let settled = project_round_companion_motion(waking, settled_at, 0, viewport(), &motion);
+        let settled_live = project_round_companion_motion(live, settled_at, 0, viewport(), &motion);
+
+        assert_eq!(at_wake.planar_offset_cells, MotionPoint { x: 0.0, y: 0.0 });
+        assert_eq!(at_wake.normalized_depth, 0.0);
+        assert_close(
+            halfway.planar_offset_cells.x,
+            halfway_live.planar_offset_cells.x * 0.5,
+        );
+        assert_close(
+            halfway.planar_offset_cells.y,
+            halfway_live.planar_offset_cells.y * 0.5,
+        );
+        assert_close(
+            halfway.normalized_depth,
+            halfway_live.normalized_depth * 0.5,
+        );
+        assert_eq!(settled, settled_live);
+    }
+
+    #[test]
+    fn facing_flips_during_dwell_and_never_mid_glide() {
+        let identity = 0x5eed_5eed;
+        let start = datetime!(2026-07-17 12:00:00 UTC);
+        let mut previous = sample_companion_locomotion(identity, start, 1);
+        let mut saw_flip = false;
+        for second in 1..=(60 * 32) {
+            let current =
+                sample_companion_locomotion(identity, start + time::Duration::seconds(second), 1);
+            if current.phase == LocomotionPhase::Glide && previous.phase == LocomotionPhase::Glide {
+                assert_eq!(current.facing, previous.facing, "second={second}");
+            }
+            if current.facing != previous.facing {
+                saw_flip = true;
+                assert_eq!(current.phase, LocomotionPhase::Dwell, "second={second}");
+                assert_eq!(previous.phase, LocomotionPhase::Glide, "second={second}");
+            }
+            previous = current;
+        }
+        assert!(
+            saw_flip,
+            "fixture must cover at least one route-facing change"
+        );
+    }
+
+    #[test]
+    fn companion_bob_is_zero_for_all_elapsed_times() {
+        let motion = companion_roam_motion();
+        let now = datetime!(2026-07-17 12:34:56 UTC);
+        for elapsed_ms in [0, 250, 500, 1_000, 1_500, 2_000] {
+            let projection = project_round_companion_motion(
+                motion_input(false, None, None, None),
+                now,
+                elapsed_ms,
+                viewport(),
+                &motion,
+            );
+            assert_eq!(
+                projection.bob_offset_y_cells, 0.0,
+                "elapsed_ms={elapsed_ms}"
+            );
+        }
+    }
+
+    #[test]
+    fn depth_override_changes_only_depth_for_review_fixtures() {
+        let now = datetime!(2026-07-17 12:34:56 UTC);
+        let input = motion_input(false, None, None, None);
+        let live = project_round_companion_motion_with_options(
+            input,
+            now,
+            500,
+            viewport(),
+            &companion_roam_motion(),
+            RoundMotionProjectionOptions::default(),
+        );
+        let overridden = project_round_companion_motion_with_options(
+            input,
+            now,
+            500,
+            viewport(),
+            &companion_roam_motion(),
+            RoundMotionProjectionOptions { depth_override: Some(0.75) },
+        );
+
+        assert_eq!(overridden.motion_top_left_cells, live.motion_top_left_cells);
+        assert_eq!(
+            overridden.motion_origin_top_left_cells,
+            live.motion_origin_top_left_cells
+        );
+        assert_eq!(
+            overridden.motion_top_left_points,
+            live.motion_top_left_points
+        );
+        assert_eq!(overridden.planar_offset_cells, live.planar_offset_cells);
+        assert_eq!(
+            overridden.classic_top_left_cells,
+            live.classic_top_left_cells
+        );
+        assert_eq!(overridden.facing, live.facing);
+        assert_eq!(overridden.wander_offset_x, live.wander_offset_x);
+        assert_eq!(overridden.breath_offset_y_cells, live.breath_offset_y_cells);
+        assert_eq!(overridden.bob_offset_y_cells, live.bob_offset_y_cells);
+        assert_eq!(overridden.normalized_depth, 0.75);
+    }
+
+    #[test]
+    #[should_panic(expected = "wake locomotion requires both")]
+    fn incomplete_wake_data_asserts_in_tests() {
+        let now = datetime!(2026-07-17 12:34:56 UTC);
+        let input = motion_input(false, None, Some(now - time::Duration::seconds(1)), None);
+        let _ = project_round_companion_motion(input, now, 0, viewport(), &companion_roam_motion());
+    }
+
+    #[test]
+    #[should_panic(expected = "wake locomotion instants must be ordered")]
+    fn inverted_wake_data_asserts_in_tests() {
+        let now = datetime!(2026-07-17 12:34:56 UTC);
+        let input = motion_input(
+            false,
+            None,
+            Some(now),
+            Some(now - time::Duration::seconds(1)),
+        );
+        let _ = project_round_companion_motion(input, now, 0, viewport(), &companion_roam_motion());
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-5,
+            "expected {expected}, got {actual}"
+        );
     }
 }

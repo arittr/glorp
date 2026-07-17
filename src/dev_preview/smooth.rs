@@ -15,7 +15,7 @@ use crate::presentation::smooth::{
 };
 use crate::round::layout::{RoundAperture, SAFE_INNER_RADIUS_RATIO};
 use crate::round::scene::{build_round_scene_draw_list, CompanionMotion};
-use crate::round::smooth::build_round_smooth_scene_plan;
+use crate::round::smooth::{build_round_smooth_scene_plan, try_build_round_smooth_scene_plan};
 use crate::tui::view_model::WatchViewModel;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,8 +27,9 @@ const DEPTH_GRID_COLS: u16 = 44;
 const DEPTH_GRID_ROWS: u16 = 18;
 const MOTION_FRAME_DURATION_MS: u64 = 160;
 const MOTION_FRAME_COUNT: usize = 12;
-const WANDER_PERIOD_MS: u64 = 22_000;
-const REVIEWED_MOTION_START_UNIX_MS: i128 = 1_760_000_001_000;
+const ROUTE_SEGMENT_SEARCH_WINDOW_MS: u64 =
+    crate::round::locomotion::LOCOMOTION_SEGMENT_SECS as u64 * 1_000;
+const REVIEWED_MOTION_START_UNIX_MS: i128 = 1_760_000_007_720;
 
 pub const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 pub const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
@@ -277,21 +278,23 @@ fn smooth_motion_start_now(
     vm: &WatchViewModel,
     motion: &CompanionMotion,
 ) -> time::OffsetDateTime {
-    let reviewed_start = reviewed_motion_start_now();
-    if smooth_motion_window_satisfies_preview_contract(reviewed_start, vm, motion) {
-        return reviewed_start;
+    first_smooth_motion_start_satisfying_preview_contract(reviewed_motion_start_now(), vm, motion)
+        .unwrap_or(fixed_now)
+}
+
+fn first_smooth_motion_start_satisfying_preview_contract(
+    start_now: time::OffsetDateTime,
+    vm: &WatchViewModel,
+    motion: &CompanionMotion,
+) -> Option<time::OffsetDateTime> {
+    if smooth_motion_window_satisfies_preview_contract(start_now, vm, motion) {
+        return Some(start_now);
     }
 
-    for offset_ms in
-        (MOTION_FRAME_DURATION_MS..WANDER_PERIOD_MS).step_by(MOTION_FRAME_DURATION_MS as usize)
-    {
-        let candidate = reviewed_start + time::Duration::milliseconds(offset_ms as i64);
-        if smooth_motion_window_satisfies_preview_contract(candidate, vm, motion) {
-            return candidate;
-        }
-    }
-
-    fixed_now
+    (MOTION_FRAME_DURATION_MS..=ROUTE_SEGMENT_SEARCH_WINDOW_MS)
+        .step_by(MOTION_FRAME_DURATION_MS as usize)
+        .map(|offset_ms| start_now + time::Duration::milliseconds(offset_ms as i64))
+        .find(|candidate| smooth_motion_window_satisfies_preview_contract(*candidate, vm, motion))
 }
 
 fn reviewed_motion_start_now() -> time::OffsetDateTime {
@@ -304,20 +307,31 @@ fn smooth_motion_samples(
     vm: &WatchViewModel,
     motion: &CompanionMotion,
 ) -> Vec<SmoothMotionSample> {
+    try_smooth_motion_samples(start_now, vm, motion)
+        .expect("selected smooth motion window should build every preview frame")
+}
+
+fn try_smooth_motion_samples(
+    start_now: time::OffsetDateTime,
+    vm: &WatchViewModel,
+    motion: &CompanionMotion,
+) -> Option<Vec<SmoothMotionSample>> {
     (0..MOTION_FRAME_COUNT)
         .map(|index| {
             let elapsed_ms = index as u64 * MOTION_FRAME_DURATION_MS;
             let now = start_now + time::Duration::milliseconds(elapsed_ms as i64);
-            let plan =
-                build_round_smooth_scene_plan(vm, now, GRID_COLS, GRID_ROWS, motion, elapsed_ms);
+            let plan = try_build_round_smooth_scene_plan(
+                vm, now, GRID_COLS, GRID_ROWS, motion, elapsed_ms,
+            )
+            .ok()?;
 
-            SmoothMotionSample {
+            Some(SmoothMotionSample {
                 index,
                 elapsed_ms,
                 now,
                 semantic_art_tick_index: elapsed_ms / 250,
                 plan,
-            }
+            })
         })
         .collect()
 }
@@ -407,7 +421,9 @@ fn smooth_motion_window_satisfies_preview_contract(
     vm: &WatchViewModel,
     motion: &CompanionMotion,
 ) -> bool {
-    let samples = smooth_motion_samples(start_now, vm, motion);
+    let Some(samples) = try_smooth_motion_samples(start_now, vm, motion) else {
+        return false;
+    };
     let mut classic_snap_anchors = BTreeSet::new();
     let mut saw_nonzero_focus = false;
     let mut saw_nonzero_planes = [false; 4];
@@ -619,32 +635,34 @@ mod tests {
     }
 
     #[test]
-    fn smooth_motion_start_now_returns_first_passing_aligned_search_offset() {
-        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
-        let vm = WatchViewModel::fixture_with_habitat_props();
-        let reviewed_start = reviewed_motion_start_now();
-        let mut motion = crate::round::scene::companion_roam_motion();
-        motion.drift_period_secs = 4;
-        let first_passing_offset_ms = 640;
-        let expected = reviewed_start + time::Duration::milliseconds(first_passing_offset_ms);
+    fn route_search_returns_first_aligned_window_for_task_two_fixture() {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_render.seed = "preview-route-search-fixture".to_string();
+        let route_start = time::macros::datetime!(2025-10-09 8:53:21 UTC);
+        let motion = crate::round::scene::companion_roam_motion();
+        let first_passing_offset_ms = 3_680;
+        let expected = route_start + time::Duration::milliseconds(first_passing_offset_ms);
 
         assert!(!smooth_motion_window_satisfies_preview_contract(
-            reviewed_start,
+            route_start,
             &vm,
             &motion,
         ));
         for offset_ms in (MOTION_FRAME_DURATION_MS..first_passing_offset_ms as u64)
             .step_by(MOTION_FRAME_DURATION_MS as usize)
         {
-            let candidate = reviewed_start + time::Duration::milliseconds(offset_ms as i64);
+            let candidate = route_start + time::Duration::milliseconds(offset_ms as i64);
             assert!(
                 !smooth_motion_window_satisfies_preview_contract(candidate, &vm, &motion),
-                "offset {offset_ms}ms should fail before the first passing offset"
+                "offset {offset_ms}ms should fail before the first route window"
             );
         }
         assert!(smooth_motion_window_satisfies_preview_contract(
             expected, &vm, &motion,
         ));
-        assert_eq!(smooth_motion_start_now(fixed_now, &vm, &motion), expected);
+        assert_eq!(
+            first_smooth_motion_start_satisfying_preview_contract(route_start, &vm, &motion),
+            Some(expected)
+        );
     }
 }

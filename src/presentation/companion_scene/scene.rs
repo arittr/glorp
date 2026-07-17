@@ -2021,15 +2021,18 @@ mod tests {
                     })
                     .collect(),
                 pet_motion_input: crate::round::motion::CompanionMotionInput {
+                    identity: 0,
                     asleep: false,
-                    calm: false,
-                    rate_per_hour: 0.0,
+                    sleep_onset_utc: None,
+                    wake_from_eval_utc: None,
+                    woke_at_utc: None,
                     current_facing: 1,
                     resolved_wander_offset_x: 0,
                     resolved_wander_facing: 1,
                     breath_offset_y_cells: 0,
                 },
                 pet_depth_override: None,
+                reduce_motion: false,
             },
         }
     }

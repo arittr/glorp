@@ -560,6 +560,10 @@ pub struct FrameSnapshot {
     pub(crate) pet_motion_input: crate::round::motion::CompanionMotionInput,
     #[serde(skip)]
     pub(crate) pet_depth_override: Option<f32>,
+    /// Renderer-only accessibility state. It deliberately stays outside scene
+    /// serialization, checksums, and Debug output.
+    #[serde(skip)]
+    pub(crate) reduce_motion: bool,
 }
 
 impl std::fmt::Debug for FrameSnapshot {

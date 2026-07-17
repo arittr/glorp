@@ -261,6 +261,86 @@ fn round_scene_tank_life_foreground_avoids_pet_face_and_bottom_hud() {
 }
 
 #[test]
+fn purposeful_motion_round_paths_share_locomotion_projection_contract() {
+    use glorp::presentation::companion_scene::{
+        CompanionLogicalLayout, CompanionProjectionClock, CompanionSceneProjectionInput,
+        CompanionSceneSnapshot,
+    };
+    use glorp::round::depth::resolve_smooth_depth;
+    use glorp::round::placement::resolve_round_depth_placement;
+
+    const COLS: u16 = 44;
+    const ROWS: u16 = 18;
+    const EXTENT_POINTS: f32 = 360.0;
+
+    let now = datetime!(2026-07-17 12:34:56 UTC);
+    let mut vm = WatchViewModel::fixture_with_habitat_props();
+    let rendered = glorp::pet::render::render_pet(
+        &glorp::pet::generation::generate_pet(&vm.pet_render.seed)
+            .with_species(vm.pet_render.generated_species),
+        vm.pet_render.stage,
+        vm.pet_render.mood,
+        glorp::pet::render::AnimationFrame::default(),
+    );
+    vm.pet_art = rendered.lines;
+    vm.pet_spans = rendered.spans;
+    vm.day_context.wake_resume = Some(glorp::tui::day::WakeResume {
+        from_eval_utc: now - time::Duration::seconds(16),
+        woke_at_utc: now - time::Duration::seconds(4),
+    });
+    let motion = glorp::round::scene::companion_roam_motion();
+    let draw_list = glorp::round::scene::build_round_scene_draw_list(&vm, now, COLS, ROWS, &motion);
+    let draw_placement =
+        glorp::round::scene::companion_pet_placement(&vm, now, COLS, ROWS, &motion);
+    let snapshot = CompanionSceneSnapshot::project_with_input(
+        &vm,
+        CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(now, 0),
+            CompanionLogicalLayout::round(EXTENT_POINTS, EXTENT_POINTS),
+            COLS,
+            ROWS,
+            glorp::round::scene::current_round_motion_clearance(ROWS),
+        ),
+    )
+    .expect("valid companion scene projection");
+
+    let projection = draw_placement.motion_projection();
+    let resolved_depth = resolve_smooth_depth(
+        projection.normalized_depth,
+        glorp::round::depth::depth_lifecycle_scale(false, false),
+    )
+    .expect("locomotion depth is normalized");
+    let expected_depth_placement = resolve_round_depth_placement(
+        projection,
+        resolved_depth,
+        glorp::round::motion::RoundCompanionMotionViewport {
+            grid_columns: COLS,
+            grid_rows: ROWS,
+            width_points: EXTENT_POINTS,
+            height_points: EXTENT_POINTS,
+            clearance: glorp::round::scene::current_round_motion_clearance(ROWS),
+        },
+    )
+    .expect("shared projection stays inside the aperture");
+
+    assert_eq!(draw_list.pet_rect, draw_placement.classic_rect);
+    assert_eq!(snapshot.frame.pet_depth, projection.normalized_depth);
+    assert_eq!(snapshot.frame.facing, projection.facing);
+    assert_eq!(
+        draw_placement.fractional_motion_origin_top_left.x,
+        projection.motion_origin_top_left_cells.x
+    );
+    assert_eq!(
+        draw_placement.fractional_motion_origin_top_left.y,
+        projection.motion_origin_top_left_cells.y
+    );
+    assert_eq!(
+        snapshot.frame.pet_anchor_points,
+        expected_depth_placement.anchor_top_left_points
+    );
+}
+
+#[test]
 fn tank_routes_avoid_composition_chrome_and_foreground_props() {
     use glorp::game::habitat::{HabitatPropKind, HEAVY_SESSION_PLANTER};
     use glorp::presentation::companion_scene::{

@@ -354,6 +354,7 @@ impl CompanionSceneSnapshot {
                 ambient_instances,
                 pet_motion_input: motion_input,
                 pet_depth_override: input.depth_override,
+                reduce_motion: options.reduce_motion,
             },
         })
     }
@@ -417,6 +418,7 @@ impl CompanionSceneSnapshot {
         .map_err(|_| CompanionSceneProjectionError::InvalidDepthProjection)?;
         let mut frame = self.frame.clone();
         frame.elapsed_ms = clock.elapsed_ms;
+        frame.reduce_motion = options.reduce_motion;
         frame.pet_anchor_points = depth_placement.anchor_top_left_points;
         frame.pet_depth = motion.normalized_depth;
         frame.pet_depth_cue = DepthCue {
@@ -513,9 +515,14 @@ pub(super) fn companion_motion_input(
     let (resolved_wander_offset_x, resolved_wander_facing) =
         crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
     crate::round::motion::CompanionMotionInput {
+        identity: crate::round::locomotion::stable_companion_identity(&vm.pet_render.seed),
         asleep: vm.day_context.asleep,
-        calm: vm.life_profile.calm_mode,
-        rate_per_hour: vm.progress.rate_per_hour,
+        sleep_onset_utc: vm.day_context.sleep_onset_utc,
+        wake_from_eval_utc: vm
+            .day_context
+            .wake_resume
+            .map(|resume| resume.from_eval_utc),
+        woke_at_utc: vm.day_context.wake_resume.map(|resume| resume.woke_at_utc),
         current_facing: vm.facing,
         resolved_wander_offset_x,
         resolved_wander_facing,
@@ -1575,6 +1582,7 @@ mod tests {
             .expect("reduced-motion frame replay");
 
         assert_eq!(initial.frame, replay.frame);
+        assert!(initial.frame.reduce_motion);
         assert_eq!(initial.frame.bob_offset_y_points, 0.0);
         assert_eq!(initial.frame.pet_depth, 0.0);
         assert_eq!(
@@ -1590,6 +1598,23 @@ mod tests {
             .prop_instances
             .iter()
             .all(|prop| prop.transition.is_none()));
+        let json = serde_json::to_string(&initial).expect("serialize reduced-motion scene");
+        let debug = format!("{initial:?}");
+        assert!(!json.contains("reduce_motion"));
+        assert!(!debug.contains("reduce_motion"));
+
+        let mut private_toggle = initial.clone();
+        private_toggle.frame.reduce_motion = false;
+        let key = super::super::SceneGenerationKey {
+            device: super::super::DeviceEpoch(1),
+            layout: super::super::LayoutGeneration(1),
+            resources: super::super::ResourceGeneration(1),
+        };
+        let projected = super::super::scene::build_scene_generation(&initial, key)
+            .expect("build reduced-motion scene");
+        let toggled = super::super::scene::build_scene_generation(&private_toggle, key)
+            .expect("build private toggle scene");
+        assert_eq!(projected.frame_checksum(), toggled.frame_checksum());
     }
 
     #[test]
@@ -1670,7 +1695,9 @@ mod tests {
             )
             .expect("replayed resumed standard-motion frame");
 
-        assert_ne!(standard.frame.bob_offset_y_points, 0.0);
+        assert!(reduced.frame.reduce_motion);
+        assert!(!resumed.frame.reduce_motion);
+        assert_eq!(standard.frame.bob_offset_y_points, 0.0);
         assert_eq!(reduced.frame.bob_offset_y_points, 0.0);
         assert!(reduced
             .frame
@@ -1682,7 +1709,13 @@ mod tests {
             .iter()
             .all(|cell| cell.position_points == cell.target_position_points)));
         assert_eq!(resumed, resumed_replay);
-        assert_ne!(resumed.frame.bob_offset_y_points, 0.0);
+        assert_eq!(resumed.frame.bob_offset_y_points, 0.0);
+        assert_eq!(
+            resumed.frame.pet_anchor_points,
+            standard.frame.pet_anchor_points
+        );
+        assert_eq!(resumed.frame.pet_depth, standard.frame.pet_depth);
+        assert_eq!(resumed.frame.facing, standard.frame.facing);
         assert_ne!(resumed.frame, reduced.frame);
     }
 
@@ -2213,7 +2246,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_changes_do_not_change_serialized_pet_placement() {
+    fn seed_changes_route_without_serializing_seed_identity() {
         let mut first = fixture_with_real_pet_art();
         first.pet_render.seed = "sentinel-seed-alpha".to_string();
         let mut second = first.clone();
@@ -2224,7 +2257,7 @@ mod tests {
         let first = project_snapshot(&first, now, layout).expect("first projection");
         let second = project_snapshot(&second, now, layout).expect("second projection");
 
-        assert_eq!(
+        assert_ne!(
             first.frame.pet_anchor_points,
             second.frame.pet_anchor_points
         );
@@ -2433,7 +2466,7 @@ mod tests {
             snapshot.frame.bob_offset_y_points,
             shared.bob_offset_y_cells * 20.0
         );
-        assert_ne!(snapshot.frame.bob_offset_y_points, 0.0);
+        assert_eq!(snapshot.frame.bob_offset_y_points, 0.0);
         assert_ne!(snapshot.frame.pet_depth, 0.0);
     }
 
@@ -3904,10 +3937,7 @@ mod tests {
             );
             assert_eq!(snapshot.frame.pet_depth_cue.opacity, expected.atmosphere);
             assert_eq!(snapshot.frame.pet_depth_cue.saturation, 1.0);
-            assert_ne!(
-                shared.bob_offset_y_cells, 0.0,
-                "the parity fixture must exercise retained idle bob"
-            );
+            assert_eq!(shared.bob_offset_y_cells, 0.0);
             let expected_placement = crate::round::placement::resolve_round_depth_placement(
                 shared,
                 expected,
@@ -3925,7 +3955,7 @@ mod tests {
                 - snapshot.frame.pet_depth_cue.y_offset_points_up / cell_h;
             assert!(
                 (rendered_center_y - expected_placement.final_center_cells.y).abs() < 1.0e-4,
-                "retained bob and perspective must land on the resolved rendered center"
+                "zero bob and perspective must land on the resolved rendered center"
             );
         }
     }

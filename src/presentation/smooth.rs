@@ -1137,16 +1137,12 @@ mod tests {
     }
 
     #[test]
-    fn smooth_pet_bob_is_deterministic_fractional_and_bounded() {
+    fn smooth_pet_bob_is_static() {
         let samples = [smooth_pet_bob(0), smooth_pet_bob(250), smooth_pet_bob(500)];
         let repeated = [smooth_pet_bob(0), smooth_pet_bob(250), smooth_pet_bob(500)];
 
         assert_eq!(samples, repeated);
-        assert!(samples.iter().all(|value| value.abs() < 0.5));
-        assert!(samples.iter().any(|value| value.abs() > f32::EPSILON));
-        assert!(samples
-            .iter()
-            .any(|value| (*value - value.round()).abs() > f32::EPSILON));
+        assert_eq!(samples, [0.0; 3]);
     }
 
     #[test]

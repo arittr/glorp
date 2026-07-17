@@ -3,14 +3,13 @@ use std::borrow::Cow;
 use ratatui::layout::Rect;
 
 use crate::presentation::{PetSceneModel, SceneDrawList};
+#[cfg(test)]
+use crate::round::motion::{
+    companion_drift_offsets, companion_roam_envelope, project_round_companion_motion_from_offsets,
+};
 use crate::round::motion::{
     companion_drift_position, project_round_companion_motion, CompanionMotionClearance,
     CompanionMotionInput, RoundCompanionMotionProjection, RoundCompanionMotionViewport,
-};
-#[cfg(test)]
-use crate::round::motion::{
-    companion_motion_energy, companion_motion_offsets, companion_roam_envelope,
-    companion_wander_facing, companion_wander_offsets, project_round_companion_motion_from_offsets,
 };
 pub use crate::round::motion::{companion_roam_motion, CompanionMotion};
 use crate::tui::component::PetScene;
@@ -52,6 +51,14 @@ pub struct CompanionPetPlacement {
     /// wall, `1` against the near glass. Smooth-only evidence — Classic snapped
     /// placement ignores it entirely.
     pub raw_depth: f32,
+}
+
+impl CompanionPetPlacement {
+    /// Returns the shared motion result used to derive the Classic and Smooth
+    /// placements. It is an observation surface, not a renderer selection.
+    pub fn motion_projection(&self) -> RoundCompanionMotionProjection {
+        self.motion_projection
+    }
 }
 
 pub struct RoundTankLifeProtectedRegions {
@@ -167,9 +174,14 @@ fn companion_motion_input(
     let (resolved_wander_offset_x, resolved_wander_facing) =
         crate::tui::wander::resolve_wander_offset(vm, now, wander_width);
     CompanionMotionInput {
+        identity: crate::round::locomotion::stable_companion_identity(&vm.pet_render.seed),
         asleep: vm.day_context.asleep,
-        calm: vm.life_profile.calm_mode,
-        rate_per_hour: vm.progress.rate_per_hour,
+        sleep_onset_utc: vm.day_context.sleep_onset_utc,
+        wake_from_eval_utc: vm
+            .day_context
+            .wake_resume
+            .map(|resume| resume.from_eval_utc),
+        woke_at_utc: vm.day_context.wake_resume.map(|resume| resume.woke_at_utc),
         current_facing: vm.facing,
         resolved_wander_offset_x,
         resolved_wander_facing,
@@ -261,12 +273,13 @@ pub fn drift_keeps_pet_in_aperture(
 /// ground line). `area` fills the entire grid so the background wash covers the
 /// whole circle. The pet position is driven by `companion_pet_placement(...)`,
 /// which preserves the legacy Classic snap-and-breath rect while also exposing a
-/// fractional top-left anchor for Smooth renderers. Motion still follows
-/// deterministic 2D targets every `motion.drift_period_secs` seconds, keeping
-/// the pet body within the safe central ellipse at all times.
+/// fractional top-left anchor for Smooth renderers. Wander mode follows the
+/// shared identity-and-wall-clock locomotion route; only legacy non-wander
+/// placement uses `motion.drift_period_secs`, keeping the pet body within the
+/// safe central ellipse at all times.
 ///
-/// Tune via the caller's `CompanionMotion` fields (`drift_x_frac`,
-/// `drift_y_frac`, `drift_period_secs`).
+/// Tune legacy non-wander placement via the caller's `CompanionMotion` fields
+/// (`drift_x_frac`, `drift_y_frac`, `drift_period_secs`).
 pub fn build_round_scene_draw_list(
     vm: &WatchViewModel,
     now: time::OffsetDateTime,
@@ -394,8 +407,7 @@ mod tests {
         grid_rows: u16,
         motion: &CompanionMotion,
     ) -> Rect {
-        let energy = companion_motion_energy(companion_motion_input(vm, now, motion));
-        let (fx, fy, _) = companion_motion_offsets(now, motion, energy);
+        let (fx, fy, _) = companion_drift_offsets(now, motion.drift_period_secs);
         let (drift_x, drift_y) = companion_drift_position(motion, grid_cols, grid_rows, fx, fy);
         let breathed_y =
             (drift_y + u16::from(vm.breath_offset_y)).min(grid_rows.saturating_sub(PET_H));
@@ -625,9 +637,9 @@ mod tests {
     }
 
     #[test]
-    fn companion_pet_placement_matches_existing_classic_rect() {
+    fn companion_pet_placement_keeps_legacy_nonwander_classic_rect() {
         let vm = WatchViewModel::fixture_with_habitat_props();
-        let motion = companion_roam_motion();
+        let motion = CompanionMotion::default();
         let samples = [
             datetime!(2026-07-08 18:00:00 UTC),
             datetime!(2026-07-08 18:00:00.250 UTC),
@@ -790,100 +802,6 @@ mod tests {
                 || placement.fractional_top_left.y.fract().abs() > f32::EPSILON,
             "roam motion should preserve a fractional anchor for Smooth renderers"
         );
-    }
-
-    #[test]
-    fn companion_wander_is_deterministic_and_bounded() {
-        // Companion roam now uses an organic sinusoidal wander that intentionally
-        // reaches the grid edges (the pet swims partly in/out of the porthole), so it
-        // is NOT circle-bounded. Verify it is deterministic and stays within ~[-1, 1].
-        let now = datetime!(2026-06-13 18:00:00.5 UTC);
-        let a = companion_wander_offsets(now, 16);
-        let b = companion_wander_offsets(now, 16);
-        assert_eq!(a, b, "wander must be deterministic for a fixed instant");
-        assert!(
-            a.0.abs() <= 1.01 && a.1.abs() <= 1.01,
-            "two unit sinusoids per axis stay within ~[-1, 1], got {a:?}"
-        );
-        assert!(
-            companion_roam_motion().wander,
-            "companion roam uses wander mode"
-        );
-    }
-
-    #[test]
-    fn motion_energy_tracks_activity() {
-        let motion = companion_roam_motion();
-        let mut vm = WatchViewModel::fixture_with_habitat_props();
-        vm.day_context.asleep = false;
-        vm.life_profile.calm_mode = false;
-        vm.progress.rate_per_hour = 0.0;
-        let idle = companion_motion_energy(companion_motion_input(&vm, GOLDEN_NOW, &motion));
-        vm.progress.rate_per_hour = 80_000_000.0;
-        let busy = companion_motion_energy(companion_motion_input(&vm, GOLDEN_NOW, &motion));
-        assert!(
-            busy > idle,
-            "busy pet moves more than idle (idle={idle}, busy={busy})"
-        );
-        assert!(
-            (0.99..=1.0).contains(&busy),
-            "high burn saturates near full, got {busy}"
-        );
-        vm.day_context.asleep = true;
-        let asleep = companion_motion_energy(companion_motion_input(&vm, GOLDEN_NOW, &motion));
-        assert!(
-            asleep < idle,
-            "a sleeping pet barely drifts (asleep={asleep}, idle={idle})"
-        );
-    }
-
-    #[test]
-    fn awake_depth_traverses_full_waveform_independent_of_lateral_energy() {
-        let motion = companion_roam_motion();
-        let idle = companion_motion_offsets(GOLDEN_NOW, &motion, 0.25);
-        let active = companion_motion_offsets(GOLDEN_NOW, &motion, 1.0);
-
-        assert_eq!(idle.0, active.0 * 0.25);
-        assert_eq!(idle.1, active.1 * 0.25);
-        assert_eq!(idle.2, active.2);
-    }
-
-    #[test]
-    fn wander_facing_uses_companion_art_orientation_and_holds_when_still() {
-        // At full energy the pet uses both render orientations across a cycle.
-        // The companion's authored art faces left before mirroring, so rightward
-        // movement selects -1 (the mirrored art) and leftward movement selects 1.
-        let (mut saw_authored, mut saw_mirrored) = (false, false);
-        for s in 0..30i64 {
-            let now = datetime!(2026-06-13 18:00:00 UTC) + time::Duration::seconds(s);
-            let (fx_now, _) = companion_wander_offsets(now, 22);
-            let (fx_prev, _) = companion_wander_offsets(now - time::Duration::seconds(1), 22);
-            let dx = fx_now - fx_prev;
-            let f = companion_wander_facing(now, 22, 1.0, 1);
-            match f {
-                1 => saw_authored = true,
-                -1 => saw_mirrored = true,
-                other => panic!("facing must be ±1, got {other}"),
-            }
-            // Render-facing follows travel under the companion artwork convention
-            // (outside the deadzone).
-            if dx > 0.06 {
-                assert_eq!(f, -1, "moving right uses the mirrored art at s={s}");
-            }
-            if dx < -0.06 {
-                assert_eq!(f, 1, "moving left keeps the authored art at s={s}");
-            }
-        }
-        assert!(
-            saw_authored && saw_mirrored,
-            "pet must use both art orientations across a wander cycle"
-        );
-        // A (near-)still pet — energy 0, so visible movement is below the deadzone —
-        // HOLDS its current facing instead of flipping. This is the bug we fixed:
-        // facing must never flip without matching movement.
-        let still = datetime!(2026-06-13 18:00:30 UTC);
-        assert_eq!(companion_wander_facing(still, 22, 0.0, -1), -1);
-        assert_eq!(companion_wander_facing(still, 22, 0.0, 1), 1);
     }
 
     #[test]
