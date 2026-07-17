@@ -665,6 +665,12 @@ pub struct StaticAtlasRecipeSlot {
     pub recipe: Option<StaticAtlasRecipe>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct PropShadowTopologySlot {
+    pub slot: u8,
+    pub profile: Option<crate::game::habitat::HabitatPropShadowProfile>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AnalyticSemantic {
@@ -781,6 +787,12 @@ fn empty_static_atlas_recipe_slots() -> Vec<StaticAtlasRecipeSlot> {
         .collect()
 }
 
+fn empty_prop_shadow_topology_slots() -> Vec<PropShadowTopologySlot> {
+    (0..MAX_VISIBLE_PROPS)
+        .map(|slot| PropShadowTopologySlot { slot: slot as u8, profile: None })
+        .collect()
+}
+
 fn empty_analytic_template_slots() -> Vec<AnalyticTemplateSlot> {
     (0..MAX_ANALYTIC_PARAMS)
         .map(|slot| AnalyticTemplateSlot {
@@ -801,6 +813,7 @@ pub struct SceneTemplate {
     pub materials: Vec<MaterialTemplate>,
     pub resources: Vec<ResourceTemplate>,
     pub attachments: Vec<AttachmentTemplate>,
+    pub prop_shadow_topology_slots: Vec<PropShadowTopologySlot>,
     pub static_atlas_recipes: Vec<StaticAtlasRecipeSlot>,
     pub analytic_templates: Vec<AnalyticTemplateSlot>,
     pub privacy: PrivacyProjection,
@@ -1256,6 +1269,9 @@ pub struct PropFrameSlot {
     pub opacity: f32,
     pub footprint_points: [f32; 2],
     pub contact_shadow_strength: f32,
+    pub cast_shadow_vector_points: [f32; 2],
+    pub cast_shadow_softness_points: f32,
+    pub cast_shadow_strength: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -1338,6 +1354,9 @@ impl SceneFrame {
                     opacity: 0.0,
                     footprint_points: [0.0; 2],
                     contact_shadow_strength: 0.0,
+                    cast_shadow_vector_points: [0.0; 2],
+                    cast_shadow_softness_points: 0.0,
+                    cast_shadow_strength: 0.0,
                 })
                 .collect(),
             tank_slots: (0..MAX_ROUND_TANK_INHABITANTS)
@@ -1759,6 +1778,7 @@ impl SceneFixture {
                     mode: AttachmentMode::Follow,
                     instance_binding: None,
                 }],
+                prop_shadow_topology_slots: empty_prop_shadow_topology_slots(),
                 static_atlas_recipes,
                 analytic_templates: compiler::build_analytic_templates(Bounds3 {
                     min: [0.0; 3],
@@ -2027,6 +2047,9 @@ mod tests {
             opacity: 1.0,
             footprint_points: [0.0; 2],
             contact_shadow_strength: 0.0,
+            cast_shadow_vector_points: [0.0; 2],
+            cast_shadow_softness_points: 0.0,
+            cast_shadow_strength: 0.0,
             transition: None,
         }
     }
@@ -2396,6 +2419,7 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
             presentation_motion: super::super::input::prop_presentation_motion(
                 crate::game::habitat::TOKEN_PEBBLE_25K,
             ),
@@ -2680,6 +2704,11 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            shadow_profile: crate::game::habitat::catalog_prop_by_str(
+                crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            )
+            .unwrap()
+            .shadow_profile,
             presentation_motion: super::super::input::prop_presentation_motion(
                 crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
             ),
@@ -2776,6 +2805,9 @@ mod tests {
                 stable_order: 0,
                 zone: super::super::PropZoneSnapshot::FloorMid,
                 authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+                shadow_profile: crate::game::habitat::catalog_prop_by_str(catalog_id)
+                    .unwrap()
+                    .shadow_profile,
                 presentation_motion: super::super::input::prop_presentation_motion(catalog_id),
             }];
             snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
@@ -2839,6 +2871,11 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            shadow_profile: crate::game::habitat::catalog_prop_by_str(
+                crate::game::habitat::HEAVY_SESSION_PLANTER,
+            )
+            .unwrap()
+            .shadow_profile,
             presentation_motion: super::super::input::prop_presentation_motion(
                 crate::game::habitat::HEAVY_SESSION_PLANTER,
             ),
@@ -2895,6 +2932,9 @@ mod tests {
                     stable_order: 0,
                     zone: super::super::PropZoneSnapshot::FloorMid,
                     authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+                    shadow_profile: crate::game::habitat::catalog_prop_by_str(catalog_id)
+                        .unwrap()
+                        .shadow_profile,
                     presentation_motion: super::super::input::prop_presentation_motion(catalog_id),
                 }];
                 snapshot.content.prop_animation_states =
@@ -2942,6 +2982,9 @@ mod tests {
                 stable_order: 0,
                 zone: super::super::PropZoneSnapshot::FloorMid,
                 authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+                shadow_profile: crate::game::habitat::catalog_prop_by_str(catalog_id)
+                    .unwrap()
+                    .shadow_profile,
                 presentation_motion: super::super::input::prop_presentation_motion(catalog_id),
             }];
             snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
@@ -3084,6 +3127,15 @@ mod tests {
             checksum::checksum_frame(&fixture.template, &shadow).unwrap(),
             checksum::checksum_frame(&fixture.template, &visible).unwrap()
         );
+
+        let mut cast = visible.clone();
+        cast.prop_slots[0].cast_shadow_vector_points = [3.0, -15.0];
+        cast.prop_slots[0].cast_shadow_softness_points = 4.5;
+        cast.prop_slots[0].cast_shadow_strength = 0.25;
+        assert_ne!(
+            checksum::checksum_frame(&fixture.template, &cast).unwrap(),
+            checksum::checksum_frame(&fixture.template, &visible).unwrap()
+        );
     }
 
     #[test]
@@ -3094,6 +3146,7 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorLeft,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
             presentation_motion: super::super::input::prop_presentation_motion(
                 crate::game::habitat::TOKEN_PEBBLE_25K,
             ),
@@ -3240,6 +3293,11 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorMid,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            shadow_profile: crate::game::habitat::catalog_prop_by_str(
+                crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+            )
+            .unwrap()
+            .shadow_profile,
             presentation_motion: super::super::input::prop_presentation_motion(
                 crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
             ),
@@ -3878,6 +3936,9 @@ mod tests {
                     stable_order: slot as u8,
                     zone: super::super::PropZoneSnapshot::FloorMid,
                     authored_depth: *authored_depth,
+                    shadow_profile: crate::game::habitat::catalog_prop_by_str(catalog_id)
+                        .unwrap()
+                        .shadow_profile,
                     presentation_motion: super::super::PropPresentationMotion::Static,
                 },
             )
@@ -4013,6 +4074,7 @@ mod tests {
                 stable_order: index as u8,
                 zone: spec.zone.into(),
                 authored_depth: spec.pet_layer.into(),
+                shadow_profile: spec.shadow_profile,
                 presentation_motion: super::super::input::prop_presentation_motion(spec.id),
             })
             .collect();
@@ -4763,6 +4825,7 @@ mod tests {
             stable_order: 0,
             zone: super::super::PropZoneSnapshot::FloorLeft,
             authored_depth: super::super::AuthoredDepthSnapshot::BehindPet,
+            shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
             presentation_motion: super::super::PropPresentationMotion::Static,
         }];
         snapshot.content.prop_animation_states = vec![super::super::PropAnimationSnapshot {
@@ -4896,6 +4959,14 @@ mod tests {
                 .unwrap()
                 .source
                 .0 ^= 1;
+        });
+
+        assert_changed(|template| {
+            template.prop_shadow_topology_slots[0].profile =
+                Some(crate::game::habitat::HabitatPropShadowProfile::Elevated {
+                    visual_height_cells: 2.25,
+                    softness_cells: 0.45,
+                });
         });
         assert_changed(|template| {
             template.static_atlas_recipes[0]

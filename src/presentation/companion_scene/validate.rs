@@ -234,6 +234,7 @@ pub fn validate_template(
     validate_nodes(template)?;
     validate_materials(template)?;
     validate_resources(template)?;
+    validate_prop_shadow_topology(&template.prop_shadow_topology_slots)?;
     validate_static_atlas_recipes(&template.static_atlas_recipes)?;
     validate_analytic_templates(&template.analytic_templates)?;
     validate_attachments(template)?;
@@ -400,7 +401,10 @@ fn validate_frame_against_template(
     {
         return Err(SceneValidationError::FixedSlotCountMismatch);
     }
-    validate_instance_frame_slots(frame)?;
+    validate_instance_frame_slots(
+        frame,
+        accepted_template.template.glyph_grid.cell_extent_points,
+    )?;
     validate_analytic_frame_slots(&frame.analytic_slots, true, frame.camera)?;
     if frame
         .prop_slots
@@ -450,7 +454,10 @@ fn validate_frame_against_template(
     validate_lit_card_world_transforms(&accepted_template.lit_paths, |id| {
         frame_transforms.get(&id).copied()
     })?;
-    validate_instance_frame_slots(frame)?;
+    validate_instance_frame_slots(
+        frame,
+        accepted_template.template.glyph_grid.cell_extent_points,
+    )?;
     validate_frame_scalars(frame.gauges, frame.dim_amount, &frame.lights)
 }
 
@@ -646,7 +653,10 @@ fn prepare_accepted_frame_delta(
     if delta.lights.len() > MAX_LIGHTS {
         return Err(SceneValidationError::LightCapacityExceeded);
     }
-    validate_changed_instance_frame_slots(delta)?;
+    validate_changed_instance_frame_slots(
+        delta,
+        accepted_template.template.glyph_grid.cell_extent_points,
+    )?;
     if let Some(camera) = delta.camera {
         validate_camera(camera)?;
     }
@@ -919,6 +929,35 @@ fn validate_capacity_counts(template: &SceneTemplate) -> Result<(), SceneValidat
         || template.attachments.len() > MAX_ATTACHMENTS
     {
         return Err(SceneValidationError::AttachmentCapacityExceeded);
+    }
+    Ok(())
+}
+
+fn validate_prop_shadow_topology(
+    slots: &[PropShadowTopologySlot],
+) -> Result<(), SceneValidationError> {
+    if slots.len() != MAX_VISIBLE_PROPS
+        || slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| usize::from(slot.slot) != index)
+    {
+        return Err(SceneValidationError::FixedSlotCountMismatch);
+    }
+    for slot in slots {
+        if let Some(crate::game::habitat::HabitatPropShadowProfile::Elevated {
+            visual_height_cells,
+            softness_cells,
+        }) = slot.profile
+        {
+            if !visual_height_cells.is_finite()
+                || !softness_cells.is_finite()
+                || visual_height_cells <= 0.0
+                || softness_cells <= 0.0
+            {
+                return Err(SceneValidationError::InvalidFrameValue);
+            }
+        }
     }
     Ok(())
 }
@@ -2162,7 +2201,10 @@ fn validate_analytic_frame(
         .ok_or(SceneValidationError::InvalidFrameValue)
 }
 
-fn validate_instance_frame_slots(frame: &SceneFrame) -> Result<(), SceneValidationError> {
+fn validate_instance_frame_slots(
+    frame: &SceneFrame,
+    glyph_cell_extent_points: [f32; 2],
+) -> Result<(), SceneValidationError> {
     validate_unique_slots(
         frame
             .room_glyph_slots
@@ -2190,7 +2232,7 @@ fn validate_instance_frame_slots(frame: &SceneFrame) -> Result<(), SceneValidati
         SceneValidationError::AmbientSlotOutOfBounds,
     )?;
     for slot in &frame.prop_slots {
-        validate_prop_frame_slot(*slot)?;
+        validate_prop_frame_slot(*slot, glyph_cell_extent_points)?;
     }
     for slot in &frame.room_glyph_slots {
         validate_points(slot.position_points)?;
@@ -2277,7 +2319,10 @@ fn validate_content_frame_canonical(
     Ok(())
 }
 
-fn validate_changed_instance_frame_slots(delta: &FrameDelta) -> Result<(), SceneValidationError> {
+fn validate_changed_instance_frame_slots(
+    delta: &FrameDelta,
+    glyph_cell_extent_points: [f32; 2],
+) -> Result<(), SceneValidationError> {
     validate_unique_slots(
         delta
             .room_glyph_slots
@@ -2305,7 +2350,7 @@ fn validate_changed_instance_frame_slots(delta: &FrameDelta) -> Result<(), Scene
         SceneValidationError::AmbientSlotOutOfBounds,
     )?;
     for slot in &delta.prop_slots {
-        validate_prop_frame_slot(*slot)?;
+        validate_prop_frame_slot(*slot, glyph_cell_extent_points)?;
     }
     for slot in &delta.room_glyph_slots {
         validate_points(slot.position_points)?;
@@ -2335,21 +2380,39 @@ fn validate_points(points: [f32; 2]) -> Result<(), SceneValidationError> {
         .ok_or(SceneValidationError::NonFiniteFrameValue)
 }
 
-fn validate_prop_frame_slot(slot: PropFrameSlot) -> Result<(), SceneValidationError> {
+fn validate_prop_frame_slot(
+    slot: PropFrameSlot,
+    glyph_cell_extent_points: [f32; 2],
+) -> Result<(), SceneValidationError> {
     validate_points(slot.origin_points)?;
     validate_points(slot.motion_offset_points)?;
     validate_points(slot.footprint_points)?;
+    validate_points(slot.cast_shadow_vector_points)?;
     validate_unit_interval(slot.opacity)?;
+    let shadow_values = [
+        slot.contact_shadow_strength,
+        slot.cast_shadow_softness_points,
+        slot.cast_shadow_strength,
+    ];
+    if shadow_values.into_iter().any(|value| !value.is_finite()) {
+        return Err(SceneValidationError::NonFiniteFrameValue);
+    }
+    let has_cast = slot.cast_shadow_strength > 0.0;
+    let has_cast_shape =
+        slot.cast_shadow_vector_points != [0.0; 2] && slot.cast_shadow_softness_points > 0.0;
     if slot.footprint_points.into_iter().any(|extent| extent < 0.0)
-        || !slot.contact_shadow_strength.is_finite()
         || !(0.0..=1.0).contains(&slot.contact_shadow_strength)
+        || slot.cast_shadow_softness_points < 0.0
+        || !(0.0..=1.0).contains(&slot.cast_shadow_strength)
+        || has_cast != has_cast_shape
         || (!slot.visible && slot.contact_shadow_strength != 0.0)
+        || (!slot.visible && has_cast)
+        || (slot.opacity == 0.0 && has_cast)
+        || (has_cast
+            && (slot.footprint_points[0] < glyph_cell_extent_points[0]
+                || slot.footprint_points[1] < glyph_cell_extent_points[1] * 2.0))
     {
-        return if slot.contact_shadow_strength.is_finite() {
-            Err(SceneValidationError::InvalidFrameValue)
-        } else {
-            Err(SceneValidationError::NonFiniteFrameValue)
-        };
+        return Err(SceneValidationError::InvalidFrameValue);
     }
     Ok(())
 }
@@ -2891,6 +2954,66 @@ mod tests {
             validate_frame(&frame, &accepted).map(|_| ()),
             Err(SceneValidationError::InvalidFrameValue)
         );
+
+        let mut frame = fixture.frame.clone();
+        frame.prop_slots[0].visible = true;
+        frame.prop_slots[0].opacity = 1.0;
+        frame.prop_slots[0].footprint_points = [12.0, 24.0];
+        frame.prop_slots[0].cast_shadow_vector_points = [f32::NAN, -10.0];
+        frame.prop_slots[0].cast_shadow_softness_points = 2.0;
+        frame.prop_slots[0].cast_shadow_strength = 0.2;
+        assert_eq!(
+            validate_frame(&frame, &accepted).map(|_| ()),
+            Err(SceneValidationError::NonFiniteFrameValue)
+        );
+
+        let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
+        let mut delta = FrameDelta::empty();
+        delta.prop_slots.push(frame.prop_slots[0]);
+        assert_eq!(
+            validate_frame_delta(&delta, &accepted, &mut current),
+            Err(SceneValidationError::NonFiniteFrameValue)
+        );
+
+        let mut valid_cast = fixture.frame.prop_slots[0];
+        valid_cast.visible = true;
+        valid_cast.opacity = 1.0;
+        valid_cast.footprint_points = [12.0, 24.0];
+        valid_cast.cast_shadow_vector_points = [2.0, -10.0];
+        valid_cast.cast_shadow_softness_points = 2.0;
+        valid_cast.cast_shadow_strength = 0.2;
+        for invalid in [
+            PropFrameSlot {
+                cast_shadow_vector_points: [0.0; 2],
+                ..valid_cast
+            },
+            PropFrameSlot { visible: false, ..valid_cast },
+            PropFrameSlot { opacity: 0.0, ..valid_cast },
+            PropFrameSlot {
+                footprint_points: [11.9, 24.0],
+                ..valid_cast
+            },
+            PropFrameSlot {
+                footprint_points: [12.0, 23.9],
+                ..valid_cast
+            },
+            PropFrameSlot { cast_shadow_strength: 0.0, ..valid_cast },
+        ] {
+            let mut frame = fixture.frame.clone();
+            frame.prop_slots[0] = invalid;
+            assert_eq!(
+                validate_frame(&frame, &accepted).map(|_| ()),
+                Err(SceneValidationError::InvalidFrameValue)
+            );
+
+            let mut current = validate_frame(&fixture.frame, &accepted).unwrap();
+            let mut delta = FrameDelta::empty();
+            delta.prop_slots.push(invalid);
+            assert_eq!(
+                validate_frame_delta(&delta, &accepted, &mut current),
+                Err(SceneValidationError::InvalidFrameValue)
+            );
+        }
     }
 
     #[test]

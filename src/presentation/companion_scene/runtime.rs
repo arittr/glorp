@@ -255,6 +255,7 @@ fn prop_topology_changed(
         || previous.stable_order != newest.stable_order
         || previous.zone != newest.zone
         || previous.authored_depth != newest.authored_depth
+        || previous.shadow_profile != newest.shadow_profile
         || previous.presentation_motion != newest.presentation_motion
 }
 
@@ -787,6 +788,14 @@ pub(crate) fn validate_snapshot(
                     .iter()
                     .all(|value| value.is_finite())
                 || !state.opacity.is_finite()
+                || !state.footprint_points.iter().all(|value| value.is_finite())
+                || !state.contact_shadow_strength.is_finite()
+                || !state
+                    .cast_shadow_vector_points
+                    .iter()
+                    .all(|value| value.is_finite())
+                || !state.cast_shadow_softness_points.is_finite()
+                || !state.cast_shadow_strength.is_finite()
                 || state.transition.is_some_and(|anchor| {
                     !anchor.source_pose.iter().all(|value| value.is_finite())
                         || !anchor.target_pose.iter().all(|value| value.is_finite())
@@ -992,8 +1001,27 @@ pub(crate) fn validate_snapshot(
             return Err(SnapshotRejection::InconsistentIdentity);
         }
         let frame = &snapshot.frame.prop_instances[index];
+        let authored = crate::game::habitat::catalog_prop_by_str(topology.catalog_id);
+        let has_cast = frame.cast_shadow_strength > 0.0;
         if frame.slot != topology.stable_order
+            || authored.is_none_or(|spec| spec.shadow_profile != topology.shadow_profile)
             || !(0.0..=1.0).contains(&frame.opacity)
+            || frame
+                .footprint_points
+                .into_iter()
+                .any(|extent| extent < 0.0)
+            || !(0.0..=1.0).contains(&frame.contact_shadow_strength)
+            || frame.cast_shadow_softness_points < 0.0
+            || !(0.0..=1.0).contains(&frame.cast_shadow_strength)
+            || has_cast
+                != (frame.cast_shadow_vector_points != [0.0; 2]
+                    && frame.cast_shadow_softness_points > 0.0)
+            || (!frame.visible
+                && (frame.contact_shadow_strength != 0.0 || frame.cast_shadow_strength != 0.0))
+            || (frame.opacity == 0.0 && frame.cast_shadow_strength != 0.0)
+            || (has_cast
+                && (frame.footprint_points[0] < grid.cell_extent_points[0]
+                    || frame.footprint_points[1] < grid.cell_extent_points[1] * 2.0))
             || frame.transition.is_some_and(|anchor| {
                 anchor.duration_ms == 0
                     || !(0.0..=1.0).contains(&anchor.source_opacity)
@@ -2940,6 +2968,11 @@ mod tests {
                     stable_order: 0,
                     zone: PropZoneSnapshot::FloorRight,
                     authored_depth: AuthoredDepthSnapshot::Foreground,
+                    shadow_profile: crate::game::habitat::catalog_prop_by_str(
+                        crate::game::habitat::TOKEN_TREASURE_CHEST_2M,
+                    )
+                    .unwrap()
+                    .shadow_profile,
                     presentation_motion: PropPresentationMotion::Static,
                 }],
                 visible_tank_inhabitants: vec![TankTopologySnapshot {
@@ -3042,6 +3075,9 @@ mod tests {
                     opacity: 1.0,
                     footprint_points: [0.0; 2],
                     contact_shadow_strength: 0.0,
+                    cast_shadow_vector_points: [0.0; 2],
+                    cast_shadow_softness_points: 0.0,
+                    cast_shadow_strength: 0.0,
                     transition: None,
                 }],
                 tank_instances: vec![TankFrameSnapshot {
@@ -3243,6 +3279,11 @@ mod tests {
         assert_class!(prop_depth, generation, |s| s.topology.visible_props[0]
             .authored_depth =
             AuthoredDepthSnapshot::Background);
+        assert_class!(prop_shadow_profile, generation, |s| s
+            .topology
+            .visible_props[0]
+            .shadow_profile =
+            crate::game::habitat::HabitatPropShadowProfile::ContactOnly);
         assert_class!(tank_identity, generation, |s| s
             .topology
             .visible_tank_inhabitants[0]
@@ -3300,6 +3341,15 @@ mod tests {
         assert_class!(prop_resolved_origin, frame, |s| s.frame.prop_instances
             [0]
         .origin_points[0] += 1.0);
+        assert_class!(prop_cast_vector, frame, |s| s.frame.prop_instances[0]
+            .cast_shadow_vector_points =
+            [1.0, -2.0]);
+        assert_class!(prop_cast_softness, frame, |s| s.frame.prop_instances[0]
+            .cast_shadow_softness_points =
+            1.0);
+        assert_class!(prop_cast_strength, frame, |s| s.frame.prop_instances[0]
+            .cast_shadow_strength =
+            0.2);
         assert_class!(tank_visible, semantic, |s| s
             .content
             .tank_animation_states[0]
@@ -4330,6 +4380,10 @@ mod tests {
         let mut previous = (*snapshot()).clone();
         previous.topology.visible_props[0].catalog_id = crate::game::habitat::TOKEN_PEBBLE_25K;
         previous.topology.visible_props[0].authored_depth = AuthoredDepthSnapshot::Foreground;
+        previous.topology.visible_props[0].shadow_profile =
+            crate::game::habitat::catalog_prop_by_str(crate::game::habitat::TOKEN_PEBBLE_25K)
+                .unwrap()
+                .shadow_profile;
         previous.topology.visible_props[0].presentation_motion = PropPresentationMotion::Static;
         previous.content.prop_animation_states[0].catalog_id =
             crate::game::habitat::TOKEN_PEBBLE_25K;

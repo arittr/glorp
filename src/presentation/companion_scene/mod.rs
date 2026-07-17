@@ -18,8 +18,8 @@ use crate::pet::generation::Species;
 use crate::presentation::privacy::PrivacyProjection;
 use std::ops::{Deref, DerefMut};
 
-pub const COMPANION_SCENE_SCHEMA_VERSION: u16 = 2;
-pub const COMPANION_RENDERER_SCHEMA_VERSION: u16 = 2;
+pub const COMPANION_SCENE_SCHEMA_VERSION: u16 = 3;
+pub const COMPANION_RENDERER_SCHEMA_VERSION: u16 = 3;
 pub const PET_LATTICE_WIDTH: u16 = 13;
 pub const PET_LATTICE_HEIGHT: u16 = 10;
 pub const PET_LATTICE_SLOTS: u16 = scene::MAX_PET_ART_SLOTS as u16;
@@ -55,6 +55,7 @@ pub enum CompanionSceneProjectionError {
     InvalidProjectionGrid,
     InvalidProjectionLayout,
     InvalidDepthProjection,
+    InvalidPropShadowProjection,
 }
 
 impl std::fmt::Display for CompanionSceneProjectionError {
@@ -97,6 +98,9 @@ impl std::fmt::Display for CompanionSceneProjectionError {
             }
             Self::InvalidDepthProjection => {
                 write!(f, "companion depth projection must be finite and bounded")
+            }
+            Self::InvalidPropShadowProjection => {
+                write!(f, "companion prop shadow projection must be finite and bounded")
             }
         }
     }
@@ -285,6 +289,7 @@ pub struct PropTopologySnapshot {
     pub stable_order: u8,
     pub zone: PropZoneSnapshot,
     pub authored_depth: AuthoredDepthSnapshot,
+    pub shadow_profile: crate::game::habitat::HabitatPropShadowProfile,
     pub presentation_motion: PropPresentationMotion,
 }
 
@@ -629,6 +634,9 @@ pub struct PropFrameSnapshot {
     pub opacity: f32,
     pub footprint_points: [f32; 2],
     pub contact_shadow_strength: f32,
+    pub cast_shadow_vector_points: [f32; 2],
+    pub cast_shadow_softness_points: f32,
+    pub cast_shadow_strength: f32,
     pub transition: Option<PropTransitionAnchor>,
 }
 

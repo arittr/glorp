@@ -741,6 +741,9 @@ fn project_prop_frame_delta(
             opacity: source.opacity,
             footprint_points: source.footprint_points,
             contact_shadow_strength: source.contact_shadow_strength,
+            cast_shadow_vector_points: source.cast_shadow_vector_points,
+            cast_shadow_softness_points: source.cast_shadow_softness_points,
+            cast_shadow_strength: source.cast_shadow_strength,
         });
     }
 }
@@ -1556,6 +1559,11 @@ fn build_template(
             )),
         });
     }
+    let mut prop_shadow_topology_slots = super::empty_prop_shadow_topology_slots();
+    for prop in &snapshot.topology.visible_props {
+        prop_shadow_topology_slots[usize::from(prop.stable_order)].profile =
+            Some(prop.shadow_profile);
+    }
     Ok(SceneTemplate {
         schema_version: SCENE_CONTRACT_SCHEMA_VERSION,
         renderer_schema_version:
@@ -1567,6 +1575,7 @@ fn build_template(
         materials,
         resources,
         attachments,
+        prop_shadow_topology_slots,
         static_atlas_recipes: empty_static_atlas_recipe_slots(),
         analytic_templates: build_analytic_templates(unit_bounds),
         privacy: snapshot.privacy,
@@ -2474,6 +2483,9 @@ fn build_frame(
             opacity: source.opacity,
             footprint_points: source.footprint_points,
             contact_shadow_strength: source.contact_shadow_strength,
+            cast_shadow_vector_points: source.cast_shadow_vector_points,
+            cast_shadow_softness_points: source.cast_shadow_softness_points,
+            cast_shadow_strength: source.cast_shadow_strength,
         };
     }
     for (semantic, source) in snapshot

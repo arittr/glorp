@@ -83,7 +83,7 @@ struct FrameGpuValue {
     slot: u32,
     flags: u32,
     variant: u32,
-    values: array<f32, 8>,
+    values: array<f32, 12>,
 }
 
 struct AnalyticFrameGpuValue {

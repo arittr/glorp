@@ -182,8 +182,27 @@ fn presentation_surface_tag(value: crate::presentation::privacy::PresentationSur
     }
 }
 
+fn encode_prop_shadow_profile(
+    hash: &mut Fnv1a64,
+    profile: crate::game::habitat::HabitatPropShadowProfile,
+) -> Result<(), CanonicalEncodingError> {
+    match profile {
+        crate::game::habitat::HabitatPropShadowProfile::None => hash.u8(1),
+        crate::game::habitat::HabitatPropShadowProfile::ContactOnly => hash.u8(2),
+        crate::game::habitat::HabitatPropShadowProfile::Elevated {
+            visual_height_cells,
+            softness_cells,
+        } => {
+            hash.u8(3);
+            hash.f32(visual_height_cells)?;
+            hash.f32(softness_cells)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGenerationError> {
-    let mut hash = Fnv1a64::domain(b"glorp.scene-template.v2\0");
+    let mut hash = Fnv1a64::domain(b"glorp.scene-template.v3\0");
     hash.u16(template.schema_version);
     hash.u16(template.renderer_schema_version);
     for value in [
@@ -250,6 +269,18 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
         hash.string(resource.alias.as_str());
         hash.u32(resource.id.0);
         hash.u8(resource_kind_tag(resource.kind));
+    }
+    hash.usize(template.prop_shadow_topology_slots.len());
+    for slot in &template.prop_shadow_topology_slots {
+        hash.u8(slot.slot);
+        match slot.profile {
+            Some(profile) => {
+                hash.u8(1);
+                encode_prop_shadow_profile(&mut hash, profile)
+                    .map_err(|_| SceneGenerationError::NonFinite)?;
+            }
+            None => hash.u8(0),
+        }
     }
     let mut primitives = template.primitives.iter().collect::<Vec<_>>();
     primitives.sort_by_key(|primitive| primitive.authored_order);
@@ -327,7 +358,7 @@ pub(super) fn checksum_template(template: &SceneTemplate) -> Result<u64, SceneGe
 }
 
 pub(super) fn checksum_content(content: &SceneContent) -> Result<u64, SceneGenerationError> {
-    let mut hash = Fnv1a64::domain(b"glorp.scene-content.v2\0");
+    let mut hash = Fnv1a64::domain(b"glorp.scene-content.v3\0");
     hash.u16(content.schema_version);
     hash.u16(content.renderer_schema_version);
     for color in content.palette {
@@ -470,7 +501,7 @@ fn checksum_frame_with_projection(
     projection: FrameChecksumProjection,
 ) -> Result<u64, SceneGenerationError> {
     let mut hash = Fnv1a64::domain(match projection {
-        FrameChecksumProjection::InternalExact => b"glorp.scene-frame.v2\0",
+        FrameChecksumProjection::InternalExact => b"glorp.scene-frame.v3\0",
         FrameChecksumProjection::CapturePrivacy => b"glorp.capture-frame.v1\0",
     });
     let capture_privacy = matches!(projection, FrameChecksumProjection::CapturePrivacy)
@@ -517,6 +548,11 @@ fn checksum_frame_with_projection(
             .map_err(|_| SceneGenerationError::NonFinite)?;
         encode_points(&mut hash, slot.footprint_points)?;
         hash.f32(slot.contact_shadow_strength)
+            .map_err(|_| SceneGenerationError::NonFinite)?;
+        encode_points(&mut hash, slot.cast_shadow_vector_points)?;
+        hash.f32(slot.cast_shadow_softness_points)
+            .map_err(|_| SceneGenerationError::NonFinite)?;
+        hash.f32(slot.cast_shadow_strength)
             .map_err(|_| SceneGenerationError::NonFinite)?;
     }
     for slot in &frame.room_glyph_slots {

@@ -271,7 +271,7 @@ impl CompanionSceneSnapshot {
                 composition: &composition,
                 parallax,
             },
-        );
+        )?;
         let tank_instances = project_tank_frame_states(&tank_animation_states, input, parallax);
         let (ambient_semantics, ambient_instances) = project_ambient_slots();
         let (room_glyphs, room_glyph_frames) =
@@ -451,7 +451,7 @@ impl CompanionSceneSnapshot {
                 composition: &composition,
                 parallax,
             },
-        );
+        )?;
         frame.tank_instances = project_tank_frame_states_interpolated(
             &self.frame.tank_instances,
             &self.content.tank_animation_states,
@@ -542,6 +542,7 @@ fn project_props(vm: &WatchViewModel, now: OffsetDateTime) -> Vec<PropTopologySn
                 stable_order: index as u8,
                 zone: spec.zone.into(),
                 authored_depth: spec.pet_layer.into(),
+                shadow_profile: spec.shadow_profile,
                 presentation_motion: prop_presentation_motion(spec.id),
             })
         })
@@ -873,7 +874,7 @@ fn project_prop_frame_states(
     topology: &[PropTopologySnapshot],
     semantics: &[PropAnimationSnapshot],
     context: PropFrameProjectionContext<'_>,
-) -> Vec<PropFrameSnapshot> {
+) -> Result<Vec<PropFrameSnapshot>, CompanionSceneProjectionError> {
     let PropFrameProjectionContext {
         clock,
         species,
@@ -1049,7 +1050,7 @@ fn project_prop_frame_states(
             } else {
                 1.0
             };
-            let contact_shadow_strength = placement.map_or(0.0, |placement| {
+            let authored_contact_shadow_strength = placement.map_or(0.0, |placement| {
                 if !placement.visible || !placement.grounded {
                     return 0.0;
                 }
@@ -1059,20 +1060,49 @@ fn project_prop_frame_states(
                     AuthoredDepthSnapshot::Foreground => 0.34,
                 }
             });
-            PropFrameSnapshot {
+            let origin_y_up_points = [
+                origin_points[0] + motion_offset_points[0],
+                parallax.glyph_grid.y_up_origin_points[1]
+                    + f32::from(parallax.glyph_grid.rows)
+                        * parallax.glyph_grid.cell_extent_points[1]
+                    - origin_points[1]
+                    - parallax.glyph_grid.cell_extent_points[1]
+                    + motion_offset_points[1],
+            ];
+            let resolved_shadow = crate::presentation::props::resolve_prop_shadow(
+                crate::presentation::props::PropShadowResolveInput {
+                    profile: topology.shadow_profile,
+                    visible,
+                    grounded: placement.is_some_and(|placement| placement.grounded),
+                    opacity,
+                    footprint_points,
+                    cell_extent_points: parallax.glyph_grid.cell_extent_points,
+                    contact_strength: authored_contact_shadow_strength,
+                    origin_y_up_points,
+                },
+            )
+            .map_err(|_| CompanionSceneProjectionError::InvalidPropShadowProjection)?;
+            let (cast_shadow_vector_points, cast_shadow_softness_points, cast_shadow_strength) =
+                resolved_shadow.cast.map_or(([0.0; 2], 0.0, 0.0), |cast| {
+                    (cast.vector_y_up_points, cast.softness_points, cast.strength)
+                });
+            Ok(PropFrameSnapshot {
                 slot: topology.stable_order,
                 visible,
                 origin_points,
                 motion_offset_points,
                 opacity,
                 footprint_points,
-                contact_shadow_strength,
+                contact_shadow_strength: resolved_shadow.contact_strength,
+                cast_shadow_vector_points,
+                cast_shadow_softness_points,
+                cast_shadow_strength,
                 transition: if options.reduce_motion {
                     None
                 } else {
                     transition
                 },
-            }
+            })
         })
         .collect()
 }
@@ -1812,7 +1842,7 @@ mod tests {
         )
         .expect("project canonical generated pet art");
 
-        assert_eq!(snapshot.schema_version, 2);
+        assert_eq!(snapshot.schema_version, 3);
         assert_eq!(
             snapshot.topology.pet.species,
             vm.pet_render.generated_species
@@ -1832,6 +1862,18 @@ mod tests {
             .pet_lines
             .iter()
             .all(|line| line.chars().count() == usize::from(PET_LATTICE_WIDTH)));
+    }
+
+    #[test]
+    fn prop_projection_carries_authored_shadow_profile() {
+        let vm = lifetime_watch_fixture();
+        let projected = super::project_props(&vm, datetime!(2026-07-11 12:00 UTC));
+
+        assert!(!projected.is_empty());
+        for prop in projected {
+            let authored = crate::game::habitat::catalog_prop_by_str(prop.catalog_id).unwrap();
+            assert_eq!(prop.shadow_profile, authored.shadow_profile);
+        }
     }
 
     #[test]
@@ -2624,6 +2666,7 @@ mod tests {
             stable_order: 0,
             zone: PropZoneSnapshot::FloorLeft,
             authored_depth: AuthoredDepthSnapshot::Foreground,
+            shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
             presentation_motion: PropPresentationMotion::TwoPoseEase {
                 duration_ms: 900,
                 curve: EaseCurve::SmoothStep,
@@ -2669,7 +2712,8 @@ mod tests {
                     composition: &composition,
                     parallax,
                 },
-            )[0]
+            )
+            .unwrap()[0]
         };
         let assert_close = |actual: f32, expected: f32| {
             assert!(
@@ -2702,6 +2746,7 @@ mod tests {
             stable_order: 0,
             zone: PropZoneSnapshot::FloorLeft,
             authored_depth: AuthoredDepthSnapshot::Foreground,
+            shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
             presentation_motion: PropPresentationMotion::TwoPoseEase {
                 duration_ms: 900,
                 curve: EaseCurve::SmoothStep,
@@ -2743,6 +2788,9 @@ mod tests {
             opacity: 1.0,
             footprint_points: [8.0, 20.0],
             contact_shadow_strength: 0.0,
+            cast_shadow_vector_points: [0.0; 2],
+            cast_shadow_softness_points: 0.0,
+            cast_shadow_strength: 0.0,
             transition: Some(PropTransitionAnchor {
                 source_pose: [0.0; 2],
                 target_pose: [0.0, 3.0],
@@ -2767,7 +2815,8 @@ mod tests {
                 composition: &composition,
                 parallax,
             },
-        );
+        )
+        .unwrap();
 
         let anchor = frames[0].transition.unwrap();
         assert_eq!(anchor.source_pose, [0.0, 1.5]);
@@ -2840,6 +2889,7 @@ mod tests {
                 stable_order: 0,
                 zone,
                 authored_depth,
+                shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
                 presentation_motion: PropPresentationMotion::Static,
             }];
             let grounded = matches!(
@@ -2876,7 +2926,8 @@ mod tests {
                     composition: &composition,
                     parallax: test_depth_parallax_context(false),
                 },
-            );
+            )
+            .unwrap();
 
             assert_eq!(
                 frames[0].contact_shadow_strength, expected,
@@ -2897,6 +2948,7 @@ mod tests {
             stable_order: 0,
             zone: PropZoneSnapshot::FloorMid,
             authored_depth: AuthoredDepthSnapshot::Foreground,
+            shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
             presentation_motion: PropPresentationMotion::Static,
         }];
         let composition = super::CompanionComposition {
@@ -2937,7 +2989,8 @@ mod tests {
                     composition: &composition,
                     parallax: test_depth_parallax_context(false),
                 },
-            )[0]
+            )
+            .unwrap()[0]
         };
 
         let young = project(false);
@@ -3039,6 +3092,7 @@ mod tests {
                 stable_order: 0,
                 zone: PropZoneSnapshot::from(spec.zone),
                 authored_depth: AuthoredDepthSnapshot::from(spec.pet_layer),
+                shadow_profile: spec.shadow_profile,
                 presentation_motion: super::prop_presentation_motion(spec.id),
             }];
             let semantic_for = |now| {
@@ -3119,7 +3173,24 @@ mod tests {
                     composition: &composition,
                     parallax: test_depth_parallax_context(false),
                 },
-            );
+            )
+            .unwrap();
+            let frame = frames_1x[0];
+            let should_cast = matches!(
+                spec.shadow_profile,
+                crate::game::habitat::HabitatPropShadowProfile::Elevated { .. }
+            ) && frame.visible
+                && frame.opacity > 0.0
+                && frame.footprint_points[0]
+                    >= test_depth_parallax_context(false)
+                        .glyph_grid
+                        .cell_extent_points[0]
+                && frame.footprint_points[1]
+                    >= test_depth_parallax_context(false)
+                        .glyph_grid
+                        .cell_extent_points[1]
+                        * 2.0;
+            assert_eq!(frame.cast_shadow_strength > 0.0, should_cast, "{}", spec.id);
             let frames_2x = super::project_prop_frame_states(
                 &topology,
                 std::slice::from_ref(&initial),
@@ -3133,7 +3204,8 @@ mod tests {
                     composition: &composition,
                     parallax: test_depth_parallax_context(false),
                 },
-            );
+            )
+            .unwrap();
             assert_eq!(
                 frames_1x, frames_2x,
                 "logical points changed at 2x for {}",
@@ -3152,7 +3224,8 @@ mod tests {
                     composition: &composition,
                     parallax: test_depth_parallax_context(false),
                 },
-            );
+            )
+            .unwrap();
             assert_eq!(frames_1x, replay, "nondeterministic frame for {}", spec.id);
 
             let later = super::project_prop_frame_states(
@@ -3168,7 +3241,8 @@ mod tests {
                     composition: &composition,
                     parallax: test_depth_parallax_context(false),
                 },
-            );
+            )
+            .unwrap();
             if topology[0].presentation_motion == PropPresentationMotion::Static {
                 assert_eq!(
                     frames_1x[0].origin_points, later[0].origin_points,
@@ -3198,7 +3272,8 @@ mod tests {
                     composition: &composition,
                     parallax: test_depth_parallax_context(true),
                 },
-            );
+            )
+            .unwrap();
             match topology[0].presentation_motion {
                 PropPresentationMotion::TwoPoseEase { curve, .. } => {
                     assert_eq!(curve, EaseCurve::SmoothStep);

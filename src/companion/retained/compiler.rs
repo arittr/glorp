@@ -199,7 +199,7 @@ pub(super) struct FrameGpuValue {
     slot: u32,
     flags: u32,
     variant: u32,
-    values: [f32; 8],
+    values: [f32; 12],
 }
 
 #[repr(C)]
@@ -2272,6 +2272,10 @@ fn pack_room_frame(
             0.0,
             0.0,
             0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
         ],
     }
 }
@@ -2293,6 +2297,10 @@ fn pack_prop_frame(
             value.footprint_points[0],
             value.footprint_points[1],
             value.contact_shadow_strength,
+            value.cast_shadow_vector_points[0],
+            value.cast_shadow_vector_points[1],
+            value.cast_shadow_softness_points,
+            value.cast_shadow_strength,
         ],
     }
 }
@@ -2317,6 +2325,10 @@ fn pack_tank_frame(
             cell.bounds_points[1],
             cell.bounds_points[2],
             cell.bounds_points[3],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
         ],
     }
 }
@@ -2333,6 +2345,10 @@ fn pack_ambient_frame(
             value.position_points[0],
             value.position_points[1],
             value.opacity,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             0.0,
             0.0,
             0.0,
@@ -2361,6 +2377,10 @@ fn pack_light(
                 value.color_linear[2],
                 value.intensity,
                 0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
             ],
         },
         None => FrameGpuValue {
@@ -2368,7 +2388,7 @@ fn pack_light(
             slot: u32::try_from(slot).expect("fixed light slot fits u32"),
             flags: 0,
             variant: NONE_U32,
-            values: [0.0; 8],
+            values: [0.0; 12],
         },
     }
 }
@@ -2984,6 +3004,10 @@ fn compile_frame_mirrors(
                     cell.bounds_points[1],
                     cell.bounds_points[2],
                     cell.bounds_points[3],
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
                 ],
             }
         }),
@@ -3001,6 +3025,10 @@ fn compile_frame_mirrors(
                     value.position_points[0],
                     value.position_points[1],
                     value.opacity,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
                     0.0,
                     0.0,
                     0.0,
@@ -3031,6 +3059,10 @@ fn compile_frame_mirrors(
                     value.color_linear[2],
                     value.intensity,
                     0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
                 ],
             },
             None => FrameGpuValue {
@@ -3038,7 +3070,7 @@ fn compile_frame_mirrors(
                 slot: u32::try_from(slot).expect("fixed light slot fits u32"),
                 flags: 0,
                 variant: NONE_U32,
-                values: [0.0; 8],
+                values: [0.0; 12],
             },
         }),
     );
@@ -3813,7 +3845,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<AnalyticContentGpuValue>(), 48);
         assert_eq!(std::mem::align_of::<AnalyticContentGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(AnalyticContentGpuValue, payload), 16);
-        assert_eq!(std::mem::size_of::<FrameGpuValue>(), 48);
+        assert_eq!(std::mem::size_of::<FrameGpuValue>(), 64);
         assert_eq!(std::mem::align_of::<FrameGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(FrameGpuValue, values), 16);
         assert_eq!(std::mem::size_of::<AnalyticFrameGpuValue>(), 96);
@@ -3850,7 +3882,7 @@ mod tests {
     }
 
     #[test]
-    fn prop_frame_pack_uses_existing_width_height_shadow_lanes() {
+    fn prop_frame_packs_cast_shadow_tail() {
         let packed = pack_prop_frame(crate::presentation::companion_scene::scene::PropFrameSlot {
             slot: 3,
             visible: true,
@@ -3859,10 +3891,16 @@ mod tests {
             opacity: 0.8,
             footprint_points: [12.0, 14.0],
             contact_shadow_strength: 0.6,
+            cast_shadow_vector_points: [3.0, -15.0],
+            cast_shadow_softness_points: 4.5,
+            cast_shadow_strength: 0.25,
         });
 
-        assert_eq!(std::mem::size_of::<FrameGpuValue>(), 48);
-        assert_eq!(packed.values, [10.0, 20.0, 1.0, 2.0, 0.8, 12.0, 14.0, 0.6]);
+        assert_eq!(std::mem::size_of::<FrameGpuValue>(), 64);
+        assert_eq!(
+            packed.values,
+            [10.0, 20.0, 1.0, 2.0, 0.8, 12.0, 14.0, 0.6, 3.0, -15.0, 4.5, 0.25,]
+        );
     }
 
     #[test]
@@ -4173,7 +4211,7 @@ mod tests {
         assert_eq!(room_frame.flags, 1);
         assert_eq!(
             room_frame.values,
-            [2.0, 3.0, 24.0, 312.0, 0.75, 0.0, 0.0, 0.0]
+            [2.0, 3.0, 24.0, 312.0, 0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
 
         let prop = compiled.content.prop_glyphs.as_slice()[0];
@@ -4625,12 +4663,15 @@ mod tests {
         assert_eq!(frame_globals.light_count, 1);
         assert_eq!(
             compiled.frame.props.as_slice()[2].values,
-            [10.0, 20.0, 1.0, 2.0, 0.75, 12.0, 14.0, 0.6]
+            [10.0, 20.0, 1.0, 2.0, 0.75, 12.0, 14.0, 0.6, 0.0, 0.0, 0.0, 0.0]
         );
         let tank = compiled.frame.tank_cells.as_slice()[MAX_TANK_GLYPHS_PER_SLOT + 3];
         assert_eq!(tank.slot, 1);
         assert_eq!(tank.variant, 2 | (3 << 16));
-        assert_eq!(tank.values, [30.0, 40.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            tank.values,
+            [30.0, 40.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0]
+        );
         assert_eq!(
             compiled.frame.ambient.as_slice()[2].values[..3],
             [70.0, 80.0, 0.6]
@@ -5017,6 +5058,9 @@ mod tests {
                 opacity: 0.8,
                 footprint_points: [12.0, 14.0],
                 contact_shadow_strength: 0.6,
+                cast_shadow_vector_points: [0.0; 2],
+                cast_shadow_softness_points: 0.0,
+                cast_shadow_strength: 0.0,
             });
         let mut tank = candidate.accepted.frame().frame().tank_slots[1];
         tank.visible = true;
@@ -5402,6 +5446,9 @@ mod tests {
                 opacity: 1.0,
                 footprint_points: [0.0; 2],
                 contact_shadow_strength: 0.0,
+                cast_shadow_vector_points: [0.0; 2],
+                cast_shadow_softness_points: 0.0,
+                cast_shadow_strength: 0.0,
             });
         frame.to = content.to;
 

@@ -731,6 +731,7 @@ mod tests {
                     stable_order: u8::try_from(stable_order).unwrap(),
                     zone: spec.zone.into(),
                     authored_depth: spec.pet_layer.into(),
+                    shadow_profile: spec.shadow_profile,
                     presentation_motion: PropPresentationMotion::Static,
                 })
             })
@@ -748,6 +749,9 @@ mod tests {
             stable_order,
             zone,
             authored_depth,
+            shadow_profile: crate::game::habitat::catalog_prop_by_str(catalog_id)
+                .unwrap()
+                .shadow_profile,
             presentation_motion: PropPresentationMotion::Static,
         }
     }
@@ -1236,6 +1240,7 @@ mod tests {
             stable_order: 0,
             zone: spec.zone.into(),
             authored_depth: spec.pet_layer.into(),
+            shadow_profile: spec.shadow_profile,
             presentation_motion: PropPresentationMotion::Static,
         }];
 
@@ -1272,6 +1277,7 @@ mod tests {
                 stable_order: 0,
                 zone: spec.zone.into(),
                 authored_depth: spec.pet_layer.into(),
+                shadow_profile: spec.shadow_profile,
                 presentation_motion: PropPresentationMotion::Static,
             }];
             let composition = resolve_companion_composition(CompanionCompositionInput {
@@ -1321,6 +1327,7 @@ mod tests {
             stable_order: 0,
             zone: PropZoneSnapshot::FloorLeft,
             authored_depth: AuthoredDepthSnapshot::Foreground,
+            shadow_profile: crate::game::habitat::HabitatPropShadowProfile::ContactOnly,
             presentation_motion: PropPresentationMotion::Static,
         }];
 

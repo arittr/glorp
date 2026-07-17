@@ -35,11 +35,9 @@ pub(crate) struct PresentationPropFootprint {
 }
 
 // These shared interfaces are consumed incrementally by prop-shadow Tasks 2 and 4.
-#[allow(dead_code, reason = "consumed by follow-up prop-shadow tasks")]
 pub(crate) const PROP_CAST_SHADOW_DIRECTION_Y_UP: [f32; 2] = [0.196_116_13, -0.980_580_7];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code, reason = "consumed by follow-up prop-shadow tasks")]
 pub(crate) struct PropShadowResolveInput {
     pub(crate) profile: HabitatPropShadowProfile,
     pub(crate) visible: bool,
@@ -69,14 +67,12 @@ pub struct ResolvedPropShadow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "consumed by follow-up prop-shadow tasks")]
 pub(crate) enum PropShadowResolveError {
     NonFinite,
     NegativeGeometry,
     InvalidAuthoredProfile,
 }
 
-#[allow(dead_code, reason = "consumed by follow-up prop-shadow tasks")]
 pub(crate) fn resolve_prop_shadow(
     input: PropShadowResolveInput,
 ) -> Result<ResolvedPropShadow, PropShadowResolveError> {
