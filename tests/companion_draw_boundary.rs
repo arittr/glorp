@@ -43,7 +43,9 @@ fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
     let behind = [
         SmoothAppKitPaintStep::WorldBeforeStatistics,
         SmoothAppKitPaintStep::PetFront,
-        SmoothAppKitPaintStep::Statistics,
+        SmoothAppKitPaintStep::StatisticsEcho,
+        SmoothAppKitPaintStep::StatisticsPrimary,
+        SmoothAppKitPaintStep::StatisticsInteraction,
         SmoothAppKitPaintStep::Foreground,
         SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
         SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
@@ -53,8 +55,23 @@ fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
     ];
     let in_front = [
         SmoothAppKitPaintStep::WorldBeforeStatistics,
-        SmoothAppKitPaintStep::Statistics,
+        SmoothAppKitPaintStep::StatisticsEcho,
+        SmoothAppKitPaintStep::StatisticsPrimary,
         SmoothAppKitPaintStep::PetFront,
+        SmoothAppKitPaintStep::StatisticsInteraction,
+        SmoothAppKitPaintStep::Foreground,
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
+        SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Xp),
+        SmoothAppKitPaintStep::StatusTrouble,
+        SmoothAppKitPaintStep::Dim,
+    ];
+    let interacting = [
+        SmoothAppKitPaintStep::WorldBeforeStatistics,
+        SmoothAppKitPaintStep::StatisticsEcho,
+        SmoothAppKitPaintStep::PetFront,
+        SmoothAppKitPaintStep::StatisticsPrimary,
+        SmoothAppKitPaintStep::StatisticsInteraction,
         SmoothAppKitPaintStep::Foreground,
         SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
         SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
@@ -67,7 +84,7 @@ fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
     for (depth, expected_order, expected_schedule) in [
         (-1.0, PetStatisticsOrder::BehindStatistics, behind),
         (0.0, PetStatisticsOrder::BehindStatistics, behind),
-        (0.72, PetStatisticsOrder::BehindStatistics, behind),
+        (0.72, PetStatisticsOrder::BehindStatistics, interacting),
         (
             just_in_front,
             PetStatisticsOrder::InFrontOfStatistics,
@@ -78,9 +95,23 @@ fn smooth_appkit_prepared_schedule_crosses_statistics_at_effective_pet_depth() {
         let composition = CompanionDepthComposition::resolve(depth).unwrap();
         assert_eq!(composition.pet_statistics_order, expected_order);
         assert_eq!(
-            smooth_appkit_paint_schedule(composition.pet_statistics_order),
+            smooth_appkit_paint_schedule(composition),
             expected_schedule,
             "effective depth {depth} produced the wrong AppKit schedule"
+        );
+    }
+}
+
+#[test]
+fn smooth_statistics_interaction_uses_prepared_effective_depth() {
+    let just_in_front = f32::from_bits(0.72_f32.to_bits() + 1);
+    for (depth, expected_reveal) in [(0.64, 0.0), (0.68, 0.5), (0.72, 1.0), (just_in_front, 1.0)] {
+        let composition = CompanionDepthComposition::resolve(depth).unwrap();
+        let _schedule = smooth_appkit_paint_schedule(composition);
+        assert!(
+            (composition.statistics_interaction.reveal_mix - expected_reveal).abs()
+                <= f32::EPSILON * 8.0,
+            "effective depth {depth} carried the wrong reveal mix"
         );
     }
 }

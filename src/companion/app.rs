@@ -34,7 +34,9 @@ use crate::presentation::smooth::{
     SmoothCompanionScenePlan, SmoothFill, SmoothGeometryError, SmoothLayerItem,
     SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
 };
-use crate::round::depth::{CompanionDepthComposition, CompanionGaugeLane, PetStatisticsOrder};
+#[cfg(feature = "retained-renderer")]
+use crate::round::depth::PetStatisticsOrder;
+use crate::round::depth::{CompanionDepthComposition, CompanionGaugeLane};
 use crate::round::hud::{
     companion_hud_text, companion_pace_fraction, daily_fraction_for_gauge,
     daily_overage_marker_fraction, mood_aura_radius, perimeter_gauge_colors,
@@ -120,6 +122,8 @@ const DEFAULT_WINDOW_SIZE: f64 = 360.0;
 const WINDOW_ORIGIN_X: f64 = 120.0;
 const WINDOW_ORIGIN_Y: f64 = 120.0;
 const MIN_WINDOW_SIZE: f64 = 260.0;
+const APPKIT_HUD_ECHO_OFFSET_Y_UP: [f64; 2] = [0.60, -0.60];
+const APPKIT_HUD_ECHO_ALPHA: f32 = 0.12;
 
 /// The companion's drift config (tuned on device). Starts at the legacy default;
 /// diverge here WITHOUT touching the shared menubar popover.
@@ -149,6 +153,7 @@ pub(super) struct PreparedCompanionFrame {
     gauge_arcs: Vec<PreparedGaugeArc>,
     hud: CompanionHudText,
     hud_font_size: f64,
+    hud_volume: PreparedAppKitHudVolume,
     overlay_commands: Vec<RoundDrawCommand>,
     review_sample: Option<crate::companion::review_capture::SmoothReviewFrameSample>,
 }
@@ -179,8 +184,27 @@ enum PreparedRendererFrame {
         draw_order: Vec<usize>,
         composition: CompanionDepthComposition,
         passes: PreparedSmoothDepthPasses,
-        paint_schedule: [SmoothAppKitPaintStep; 9],
+        paint_schedule: [SmoothAppKitPaintStep; 11],
     },
+}
+
+#[derive(Clone)]
+struct PreparedAppKitHudLine {
+    primary: Retained<NSAttributedString>,
+    echo: Retained<NSAttributedString>,
+    origin: NSPoint,
+}
+
+#[derive(Clone)]
+struct PreparedAppKitHudVolume {
+    lines: [PreparedAppKitHudLine; 3],
+    primary_coverage: Retained<NSImage>,
+}
+
+impl std::fmt::Debug for PreparedAppKitHudVolume {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedAppKitHudVolume(<private>)")
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -210,31 +234,47 @@ enum SmoothDepthBucket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmoothAppKitPaintStep {
     WorldBeforeStatistics,
+    StatisticsEcho,
     PetFront,
-    Statistics,
+    StatisticsPrimary,
+    StatisticsInteraction,
     Foreground,
     Gauge(CompanionGaugeLane),
     StatusTrouble,
     Dim,
 }
 
-pub const fn smooth_appkit_paint_schedule(
-    pet_statistics_order: PetStatisticsOrder,
-) -> [SmoothAppKitPaintStep; 9] {
-    let crossing_steps = match pet_statistics_order {
-        PetStatisticsOrder::BehindStatistics => [
+pub fn smooth_appkit_paint_schedule(
+    composition: CompanionDepthComposition,
+) -> [SmoothAppKitPaintStep; 11] {
+    let crossing = if composition.pet_effective_z <= composition.statistics_interaction.start_z {
+        [
             SmoothAppKitPaintStep::PetFront,
-            SmoothAppKitPaintStep::Statistics,
-        ],
-        PetStatisticsOrder::InFrontOfStatistics => [
-            SmoothAppKitPaintStep::Statistics,
+            SmoothAppKitPaintStep::StatisticsEcho,
+            SmoothAppKitPaintStep::StatisticsPrimary,
+            SmoothAppKitPaintStep::StatisticsInteraction,
+        ]
+    } else if composition.pet_effective_z <= composition.statistics_z {
+        [
+            SmoothAppKitPaintStep::StatisticsEcho,
             SmoothAppKitPaintStep::PetFront,
-        ],
+            SmoothAppKitPaintStep::StatisticsPrimary,
+            SmoothAppKitPaintStep::StatisticsInteraction,
+        ]
+    } else {
+        [
+            SmoothAppKitPaintStep::StatisticsEcho,
+            SmoothAppKitPaintStep::StatisticsPrimary,
+            SmoothAppKitPaintStep::PetFront,
+            SmoothAppKitPaintStep::StatisticsInteraction,
+        ]
     };
     [
         SmoothAppKitPaintStep::WorldBeforeStatistics,
-        crossing_steps[0],
-        crossing_steps[1],
+        crossing[0],
+        crossing[1],
+        crossing[2],
+        crossing[3],
         SmoothAppKitPaintStep::Foreground,
         SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Pace),
         SmoothAppKitPaintStep::Gauge(CompanionGaugeLane::Daily),
@@ -362,6 +402,14 @@ impl PreparedCompanionFrame {
     /// entirely from constants — never from live pet state.
     pub(super) fn fixture() -> Self {
         let aperture = RoundAperture::new(360, 360);
+        let hud = CompanionHudText {
+            today_total: "—".to_string(),
+            daily_percent: "—".to_string(),
+            pace: "—".to_string(),
+        };
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0));
+        let hud_volume = prepare_appkit_hud_volume(bounds, &aperture, &hud, 8.5)
+            .expect("constant prepared HUD fixture must be drawable");
         let gauges = PreparedGaugeFrame {
             xp_fraction: 0.5,
             daily_fraction: 0.5,
@@ -384,12 +432,9 @@ impl PreparedCompanionFrame {
             },
             gauges,
             gauge_arcs: prepare_gauge_arcs(&aperture, gauges),
-            hud: CompanionHudText {
-                today_total: "—".to_string(),
-                daily_percent: "—".to_string(),
-                pace: "—".to_string(),
-            },
+            hud,
             hud_font_size: 8.5,
+            hud_volume,
             overlay_commands: Vec::new(),
             review_sample: None,
         }
@@ -419,6 +464,7 @@ struct CompanionMetricCache {
 enum CompanionFramePreparationError {
     InvalidBounds,
     MissingGridMetrics,
+    AppKitHudVolumeUnavailable,
     SmoothMissingPetBody,
     SmoothInvalidParallaxGeometry,
     SmoothInvalidDepth,
@@ -431,6 +477,9 @@ impl CompanionFramePreparationError {
         match self {
             CompanionFramePreparationError::InvalidBounds => "invalid-bounds",
             CompanionFramePreparationError::MissingGridMetrics => "missing-grid-metrics",
+            CompanionFramePreparationError::AppKitHudVolumeUnavailable => {
+                "appkit-hud-volume-unavailable"
+            }
             CompanionFramePreparationError::SmoothMissingPetBody => "smooth-missing-pet-body",
             CompanionFramePreparationError::SmoothInvalidParallaxGeometry => {
                 "smooth-invalid-parallax-geometry"
@@ -654,7 +703,7 @@ fn prepare_companion_frame_at(
             let passes = prepare_smooth_depth_passes(&plan, &draw_order);
             let composition = CompanionDepthComposition::resolve(plan.pet.effective_depth)
                 .map_err(|_| CompanionFramePreparationError::SmoothInvalidDepth)?;
-            let paint_schedule = smooth_appkit_paint_schedule(composition.pet_statistics_order);
+            let paint_schedule = smooth_appkit_paint_schedule(composition);
             // The aura follows the pet's composed depth transform, so it grows and
             // sinks with the creature instead of staying pinned to the unscaled art.
             let transformed = plan.pet.transformed_bounds;
@@ -755,6 +804,8 @@ fn prepare_companion_frame_at(
         }
         _ => None,
     };
+    let hud_volume = prepare_appkit_hud_volume(bounds, &aperture, &hud, hud_font_size)
+        .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?;
 
     Ok(PreparedCompanionFrame {
         bounds: prepared_bounds,
@@ -767,6 +818,7 @@ fn prepare_companion_frame_at(
         gauge_arcs,
         hud,
         hud_font_size,
+        hud_volume,
         overlay_commands,
         review_sample,
     })
@@ -3383,7 +3435,12 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                 paint_flat_appkit_chrome(bounds, frame);
             }
             PreparedRendererFrame::Smooth {
-                metrics, plan, passes, paint_schedule, ..
+                metrics,
+                plan,
+                composition,
+                passes,
+                paint_schedule,
+                ..
             } => {
                 for step in paint_schedule {
                     match *step {
@@ -3396,8 +3453,24 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                         SmoothAppKitPaintStep::PetFront => {
                             paint_smooth_pet_front(frame, plan, passes, metrics, &aperture)
                         }
-                        SmoothAppKitPaintStep::Statistics => {
-                            paint_prepared_statistics(bounds, frame)
+                        SmoothAppKitPaintStep::StatisticsEcho => {
+                            draw_prepared_hud_lines(&frame.hud_volume, true)
+                        }
+                        SmoothAppKitPaintStep::StatisticsPrimary => {
+                            draw_prepared_hud_lines(&frame.hud_volume, false)
+                        }
+                        SmoothAppKitPaintStep::StatisticsInteraction => {
+                            if composition.pet_effective_z <= composition.statistics_z {
+                                paint_smooth_statistics_interaction(
+                                    bounds,
+                                    frame,
+                                    plan,
+                                    passes,
+                                    metrics,
+                                    &aperture,
+                                    composition.statistics_interaction.reveal_mix,
+                                );
+                            }
                         }
                         SmoothAppKitPaintStep::Foreground => {
                             appkit_blit_smooth_plan(plan, &passes.foreground, metrics, &aperture)
@@ -3442,6 +3515,100 @@ fn paint_smooth_pet_front(
                 appkit_blit_smooth_plan(plan, &passes.pet_front, metrics, aperture)
             }
         }
+    }
+}
+
+fn paint_smooth_statistics_interaction(
+    bounds: NSRect,
+    frame: &PreparedCompanionFrame,
+    plan: &SmoothCompanionScenePlan,
+    passes: &PreparedSmoothDepthPasses,
+    metrics: &CompanionGridMetrics,
+    aperture: &RoundAperture,
+    reveal_mix: f32,
+) {
+    if !(0.0..=1.0).contains(&reveal_mix) || reveal_mix == 0.0 {
+        return;
+    }
+    let Some(overlay) = render_masked_pet_front_image(
+        frame,
+        plan,
+        passes,
+        metrics,
+        aperture,
+        &frame.hud_volume.primary_coverage,
+    ) else {
+        return;
+    };
+    draw_appkit_image(&overlay, bounds, f64::from(reveal_mix));
+}
+
+fn render_masked_pet_front_image(
+    frame: &PreparedCompanionFrame,
+    plan: &SmoothCompanionScenePlan,
+    passes: &PreparedSmoothDepthPasses,
+    metrics: &CompanionGridMetrics,
+    aperture: &RoundAperture,
+    primary_coverage: &NSImage,
+) -> Option<Retained<NSImage>> {
+    let pixel_width = frame.bounds.width_px as isize;
+    let pixel_height = frame.bounds.height_px as isize;
+    let bytes_per_row = pixel_width.checked_mul(4)?;
+    let bounds = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(frame.bounds.width_f64, frame.bounds.height_f64),
+    );
+    unsafe {
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            pixel_width,
+            pixel_height,
+            8,
+            4,
+            true,
+            false,
+            NSCalibratedRGBColorSpace,
+            bytes_per_row,
+            32,
+        )?;
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        std::ptr::write_bytes(
+            data,
+            0,
+            usize::try_from(bytes_per_row.checked_mul(pixel_height)?).ok()?,
+        );
+        rep.setSize(bounds.size);
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        let previous = NSGraphicsContext::currentContext();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        paint_smooth_pet_front(frame, plan, passes, metrics, aperture);
+        primary_coverage.drawInRect_fromRect_operation_fraction(
+            bounds,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            NSCompositingOperation::DestinationIn,
+            1.0,
+        );
+        context.flushGraphics();
+        NSGraphicsContext::setCurrentContext(previous.as_deref());
+
+        let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+        image.addRepresentation(&rep);
+        Some(image)
+    }
+}
+
+fn draw_appkit_image(image: &NSImage, bounds: NSRect, fraction: f64) {
+    unsafe {
+        image.drawInRect_fromRect_operation_fraction(
+            bounds,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            NSCompositingOperation::SourceOver,
+            fraction,
+        );
     }
 }
 
@@ -4530,6 +4697,130 @@ fn live_hud_text(vm: &WatchViewModel) -> CompanionHudText {
     )
 }
 
+fn prepare_appkit_hud_volume(
+    bounds: NSRect,
+    aperture: &RoundAperture,
+    hud_text: &CompanionHudText,
+    font_size: f64,
+) -> Option<PreparedAppKitHudVolume> {
+    let gauge_layout = perimeter_gauge_layout(
+        aperture.center_x as f64,
+        aperture.center_y as f64,
+        aperture.radius as f64,
+        COMPANION_GAUGE_GAP_DEG,
+    );
+    let gap = crate::round::hud::stat_gap_box(
+        aperture.center_x as f64,
+        aperture.center_y as f64,
+        gauge_layout.pace.ring.radius - gauge_layout.pace.stroke_width / 2.0,
+        COMPANION_GAUGE_GAP_DEG,
+    );
+    let big_color = RoundColor(0.93, 0.93, 0.97, 1.0);
+    let sub_color =
+        crate::round::hud::rate_direction_color(crate::tui::view_model::RateDirection::Neutral);
+    let texts = [
+        (&hud_text.today_total, big_color),
+        (&hud_text.daily_percent, sub_color),
+        (&hud_text.pace, sub_color),
+    ];
+    let layout = prepare_hud_layout(
+        gap,
+        aperture.radius as f64,
+        bounds.size.height,
+        font_size,
+        |sizes| {
+            let mut metrics = [HudLineMetrics { width: 0.0, height: 0.0 }; 3];
+            for (index, metric) in metrics.iter_mut().enumerate() {
+                let size = unsafe {
+                    attributed_pet_glyph(texts[index].0, sizes[index], &texts[index].1).size()
+                };
+                *metric = HudLineMetrics { width: size.width, height: size.height };
+            }
+            metrics
+        },
+    );
+    let lines = std::array::from_fn(|index| {
+        let line = layout.lines[index];
+        let color = texts[index].1;
+        let echo_color = RoundColor(color.0, color.1, color.2, color.3 * APPKIT_HUD_ECHO_ALPHA);
+        PreparedAppKitHudLine {
+            primary: attributed_pet_glyph(texts[index].0, line.font_size, &color),
+            echo: attributed_pet_glyph(texts[index].0, line.font_size, &echo_color),
+            origin: NSPoint::new(line.origin_x, line.baseline_y),
+        }
+    });
+
+    let pixel_width = bounds.size.width.ceil();
+    let pixel_height = bounds.size.height.ceil();
+    if !pixel_width.is_finite()
+        || !pixel_height.is_finite()
+        || pixel_width <= 0.0
+        || pixel_height <= 0.0
+        || pixel_width > isize::MAX as f64
+        || pixel_height > isize::MAX as f64
+    {
+        return None;
+    }
+    let pixel_width = pixel_width as isize;
+    let pixel_height = pixel_height as isize;
+    let bytes_per_row = pixel_width.checked_mul(4)?;
+
+    unsafe {
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            pixel_width,
+            pixel_height,
+            8,
+            4,
+            true,
+            false,
+            NSCalibratedRGBColorSpace,
+            bytes_per_row,
+            32,
+        )?;
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        std::ptr::write_bytes(
+            data,
+            0,
+            usize::try_from(bytes_per_row.checked_mul(pixel_height)?).ok()?,
+        );
+        rep.setSize(bounds.size);
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        let previous = NSGraphicsContext::currentContext();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        let white = RoundColor(1.0, 1.0, 1.0, 1.0);
+        for (index, prepared) in lines.iter().enumerate() {
+            let mask = attributed_pet_glyph(texts[index].0, layout.lines[index].font_size, &white);
+            mask.drawAtPoint(prepared.origin);
+        }
+        context.flushGraphics();
+        NSGraphicsContext::setCurrentContext(previous.as_deref());
+
+        let primary_coverage = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+        primary_coverage.addRepresentation(&rep);
+        Some(PreparedAppKitHudVolume { lines, primary_coverage })
+    }
+}
+
+fn draw_prepared_hud_lines(prepared: &PreparedAppKitHudVolume, echo: bool) {
+    unsafe {
+        for line in &prepared.lines {
+            if echo {
+                for offset_y in APPKIT_HUD_ECHO_OFFSET_Y_UP {
+                    line.echo
+                        .drawAtPoint(NSPoint::new(line.origin.x, line.origin.y + offset_y));
+                }
+            } else {
+                line.primary.drawAtPoint(line.origin);
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn draw_hud(bounds: NSRect, aperture: &RoundAperture, hud_text: &CompanionHudText, font_size: f64) {
     let gauge_layout = perimeter_gauge_layout(
@@ -4659,6 +4950,97 @@ mod tests {
             .collect()
     }
 
+    fn prepared_appkit_hud_volume_fixture(
+        today_total: &str,
+        daily_percent: &str,
+        pace: &str,
+    ) -> PreparedAppKitHudVolume {
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 360.0));
+        prepare_appkit_hud_volume(
+            bounds,
+            &RoundAperture::new(360, 360),
+            &CompanionHudText {
+                today_total: today_total.to_string(),
+                daily_percent: daily_percent.to_string(),
+                pace: pace.to_string(),
+            },
+            8.5,
+        )
+        .expect("HUD fixture preparation must succeed")
+    }
+
+    #[test]
+    fn appkit_schedule_moves_the_pet_between_echo_and_primary_inside_the_band() {
+        fn assert_before(
+            schedule: &[SmoothAppKitPaintStep],
+            left: SmoothAppKitPaintStep,
+            right: SmoothAppKitPaintStep,
+        ) {
+            let left_index = schedule.iter().position(|step| *step == left).unwrap();
+            let right_index = schedule.iter().position(|step| *step == right).unwrap();
+            assert!(left_index < right_index, "{left:?} must precede {right:?}");
+        }
+
+        let behind =
+            smooth_appkit_paint_schedule(CompanionDepthComposition::resolve(0.63).unwrap());
+        assert_before(
+            &behind,
+            SmoothAppKitPaintStep::PetFront,
+            SmoothAppKitPaintStep::StatisticsEcho,
+        );
+        assert_before(
+            &behind,
+            SmoothAppKitPaintStep::StatisticsEcho,
+            SmoothAppKitPaintStep::StatisticsPrimary,
+        );
+
+        let interacting =
+            smooth_appkit_paint_schedule(CompanionDepthComposition::resolve(0.68).unwrap());
+        assert_before(
+            &interacting,
+            SmoothAppKitPaintStep::StatisticsEcho,
+            SmoothAppKitPaintStep::PetFront,
+        );
+        assert_before(
+            &interacting,
+            SmoothAppKitPaintStep::PetFront,
+            SmoothAppKitPaintStep::StatisticsPrimary,
+        );
+        assert_before(
+            &interacting,
+            SmoothAppKitPaintStep::StatisticsPrimary,
+            SmoothAppKitPaintStep::StatisticsInteraction,
+        );
+
+        let front = smooth_appkit_paint_schedule(CompanionDepthComposition::resolve(0.73).unwrap());
+        assert_before(
+            &front,
+            SmoothAppKitPaintStep::StatisticsPrimary,
+            SmoothAppKitPaintStep::PetFront,
+        );
+    }
+
+    #[test]
+    fn appkit_statistics_interaction_group_excludes_receiving_surface_shadows() {
+        let plan = smooth_pass_plan_fixture();
+        let passes = prepare_smooth_depth_passes(&plan, &smooth_layer_draw_order(&plan));
+        let roles = pass_roles(&plan, &passes.pet_front);
+        assert_eq!(
+            roles,
+            [SmoothLayerRole::PetBody, SmoothLayerRole::PerformanceCue]
+        );
+        assert!(!roles.contains(&SmoothLayerRole::WallShadow));
+        assert!(!roles.contains(&SmoothLayerRole::FloorProjection));
+    }
+
+    #[test]
+    fn prepared_appkit_hud_volume_debug_never_exposes_live_text() {
+        let prepared = prepared_appkit_hud_volume_fixture("981.7M", "49% yday", "349.4k/10m");
+        let debug = format!("{prepared:?}");
+        assert_eq!(debug, "PreparedAppKitHudVolume(<private>)");
+        assert!(!debug.contains("981.7M"));
+    }
+
     #[test]
     fn smooth_appkit_pass_plan_groups_roles_without_following_motion_binding() {
         let plan = smooth_pass_plan_fixture();
@@ -4708,14 +5090,14 @@ mod tests {
         ] {
             let composition = CompanionDepthComposition::resolve(depth).unwrap();
             assert_eq!(composition.pet_statistics_order, expected_order);
-            let schedule = smooth_appkit_paint_schedule(composition.pet_statistics_order);
+            let schedule = smooth_appkit_paint_schedule(composition);
             let pet = schedule
                 .iter()
                 .position(|step| *step == SmoothAppKitPaintStep::PetFront)
                 .unwrap();
             let statistics = schedule
                 .iter()
-                .position(|step| *step == SmoothAppKitPaintStep::Statistics)
+                .position(|step| *step == SmoothAppKitPaintStep::StatisticsPrimary)
                 .unwrap();
             assert_eq!(
                 pet < statistics,
@@ -4788,10 +5170,7 @@ mod tests {
             composition.pet_statistics_order,
             PetStatisticsOrder::BehindStatistics
         );
-        assert_eq!(
-            *paint_schedule,
-            smooth_appkit_paint_schedule(PetStatisticsOrder::BehindStatistics)
-        );
+        assert_eq!(*paint_schedule, smooth_appkit_paint_schedule(*composition));
         assert!(!passes.world_before_statistics.is_empty());
         assert!(!passes.pet_front.is_empty());
         assert!(!passes.foreground.is_empty());
