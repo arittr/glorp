@@ -699,8 +699,8 @@ pub fn pet_visual_checksum(
     hash
 }
 
-pub fn smooth_pet_bob(elapsed_ms: u64) -> f32 {
-    crate::round::motion::round_companion_bob(elapsed_ms)
+pub fn smooth_pet_bob(_elapsed_ms: u64) -> f32 {
+    0.0
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

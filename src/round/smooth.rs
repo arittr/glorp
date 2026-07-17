@@ -123,7 +123,7 @@ pub(crate) fn try_build_round_smooth_scene_plan_with_grid_points(
     grid_cols: u16,
     grid_rows: u16,
     motion: &CompanionMotion,
-    elapsed_ms: u64,
+    _elapsed_ms: u64,
     options: SmoothSceneBuildOptions,
     grid_points: Option<SmoothGridPointGeometry>,
 ) -> std::result::Result<SmoothCompanionScenePlan, SmoothScenePlanError> {
@@ -174,8 +174,7 @@ pub(crate) fn try_build_round_smooth_scene_plan_with_grid_points(
         .unwrap_or([f32::from(grid_cols), f32::from(grid_rows) * 2.0]);
     let prop_shadow_grid_points =
         validated_prop_shadow_grid_points(grid_points, viewport_points, grid_cols, grid_rows)?;
-    let mut motion_projection = placement.motion_projection;
-    motion_projection.bob_offset_y_cells = crate::round::motion::round_companion_bob(elapsed_ms);
+    let motion_projection = placement.motion_projection;
     let depth_placement = crate::round::placement::resolve_round_depth_placement(
         motion_projection,
         depth,

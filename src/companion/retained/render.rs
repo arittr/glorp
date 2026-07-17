@@ -6263,6 +6263,9 @@ fn encode_pet_rim_statistics_reveal_in_pass<'pass>(
     pass.draw(0..3, 0..1);
 }
 
+// The two fault-selection arguments exist only in test builds; production has
+// the six rendering inputs required to encode the sealed HUD sequence.
+#[allow(clippy::too_many_arguments)]
 fn encode_scene_with_sealed_hud(
     encoder: &mut wgpu::CommandEncoder,
     staging_belt: &mut wgpu::util::StagingBelt,

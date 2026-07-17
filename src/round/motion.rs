@@ -243,13 +243,6 @@ pub(crate) fn project_round_companion_motion_from_offsets(
     }
 }
 
-/// Compatibility shim for the legacy smooth scene. Companion locomotion no
-/// longer adds a body bob; the caller can be retired when that renderer is
-/// consolidated onto the shared projection contract.
-pub fn round_companion_bob(_elapsed_ms: u64) -> f32 {
-    0.0
-}
-
 pub(crate) fn companion_drift_position(
     motion: &CompanionMotion,
     grid_columns: u16,
