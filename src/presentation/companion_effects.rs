@@ -21,6 +21,147 @@ const WALL_SHADOW_DETACH_NEAR: f32 = 1.2;
 const WALL_SHADOW_STRENGTH_FAR: f32 = 1.0;
 const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.0;
 
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+pub(crate) const PET_RIM_ENABLED: bool = true;
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+pub(crate) const PET_RIM_RADIUS_POINTS: f32 = 1.25;
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+pub(crate) const PET_RIM_IDLE_ALPHA: f32 = 0.09;
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+pub(crate) const PET_RIM_ACTIVITY_ALPHA_BONUS: f32 = 0.07;
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+const STATISTICS_REAR_SHADOW_LENGTH_CELLS: f32 = 0.90;
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+const STATISTICS_REAR_SHADOW_SOFTNESS_CELLS: f32 = 0.75;
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+const STATISTICS_REAR_SHADOW_OPACITY: f32 = 0.10;
+
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct StatisticsRearShadowStyle {
+    pub(crate) offset_y_up_points: [f32; 2],
+    pub(crate) softness_points: f32,
+    pub(crate) opacity: f32,
+}
+
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PetRimStyle {
+    pub(crate) enabled: bool,
+    pub(crate) radius_points: f32,
+    pub(crate) alpha: f32,
+}
+
+/// Resolves the fixed, rearward statistics shadow in physical point space.
+///
+/// The shared prop key-light direction is the only authored direction for
+/// cast shadows, so each renderer receives the same backend-neutral vector.
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+pub(crate) fn statistics_rear_shadow_style(
+    cell_extent_points: [f32; 2],
+) -> Option<StatisticsRearShadowStyle> {
+    if cell_extent_points
+        .into_iter()
+        .any(|extent| !extent.is_finite() || extent <= 0.0)
+    {
+        return None;
+    }
+
+    let vertical_extent_points = cell_extent_points[1];
+    let length_points = STATISTICS_REAR_SHADOW_LENGTH_CELLS * vertical_extent_points;
+    let softness_points = STATISTICS_REAR_SHADOW_SOFTNESS_CELLS * vertical_extent_points;
+    let offset_y_up_points = crate::presentation::props::PROP_CAST_SHADOW_DIRECTION_Y_UP
+        .map(|component| component * length_points);
+    if offset_y_up_points
+        .into_iter()
+        .any(|value| !value.is_finite())
+        || !softness_points.is_finite()
+        || !STATISTICS_REAR_SHADOW_OPACITY.is_finite()
+        || !(0.0..=0.12).contains(&STATISTICS_REAR_SHADOW_OPACITY)
+    {
+        return None;
+    }
+
+    Some(StatisticsRearShadowStyle {
+        offset_y_up_points,
+        softness_points,
+        opacity: STATISTICS_REAR_SHADOW_OPACITY,
+    })
+}
+
+/// Resolves the single optional pet rim. Activity may lift opacity, but never
+/// changes its body-local radius; reduced motion keeps the idle opacity.
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+pub(crate) fn pet_rim_style(activity_opacity: f32, reduce_motion: bool) -> PetRimStyle {
+    let disabled = PetRimStyle {
+        enabled: false,
+        radius_points: PET_RIM_RADIUS_POINTS,
+        alpha: 0.0,
+    };
+    if !PET_RIM_ENABLED || !activity_opacity.is_finite() {
+        return disabled;
+    }
+
+    let activity_opacity = activity_opacity.clamp(0.0, 1.0);
+    let activity_bonus = if reduce_motion {
+        0.0
+    } else {
+        activity_opacity * PET_RIM_ACTIVITY_ALPHA_BONUS
+    };
+    PetRimStyle {
+        enabled: true,
+        radius_points: PET_RIM_RADIUS_POINTS,
+        alpha: PET_RIM_IDLE_ALPHA + activity_bonus,
+    }
+}
+
+/// Returns an alpha-only rim mask, with source coverage subtracted so callers
+/// can paint the pet above it without leaving an interior aura.
+#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+pub(crate) fn exterior_dilated_alpha(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    radius_pixels: u32,
+) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let expected_length = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+    if source.len() != expected_length {
+        return None;
+    }
+
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    let radius = usize::try_from(radius_pixels).ok()?;
+    let horizontal_radius = radius.min(width - 1);
+    let vertical_radius = radius.min(height - 1);
+    let mut exterior = vec![0; source.len()];
+
+    for y in 0..height {
+        let top = y.saturating_sub(vertical_radius);
+        let bottom = y.saturating_add(vertical_radius).min(height - 1);
+        for x in 0..width {
+            let left = x.saturating_sub(horizontal_radius);
+            let right = x.saturating_add(horizontal_radius).min(width - 1);
+            let neighborhood_alpha = (top..=bottom)
+                .flat_map(|neighbor_y| {
+                    source[neighbor_y * width + left..=neighbor_y * width + right]
+                        .iter()
+                        .copied()
+                })
+                .max()
+                .unwrap_or_default();
+            let index = y * width + x;
+            exterior[index] = neighborhood_alpha.saturating_sub(source[index]);
+        }
+    }
+
+    Some(exterior)
+}
+
 pub(crate) const fn depth_lifecycle_scale(asleep: bool, _calm: bool) -> f32 {
     if asleep {
         0.25
@@ -641,5 +782,102 @@ mod tests {
                 assert_eq!(sample.fleck_mix, 0.0, "sample=({x}, {y})");
             }
         }
+    }
+
+    fn assert_parallel(actual: [f32; 2], expected: [f32; 2]) {
+        let cross_product = actual[0] * expected[1] - actual[1] * expected[0];
+        assert!(
+            cross_product.abs() < 1.0e-5,
+            "expected {actual:?} to be parallel with {expected:?}",
+        );
+    }
+
+    fn center_index(width: u32, height: u32) -> usize {
+        (height as usize / 2) * width as usize + width as usize / 2
+    }
+
+    fn neighbor_index(width: u32, height: u32) -> usize {
+        center_index(width, height) + 1
+    }
+
+    fn alpha_fixture_with_one_opaque_center_pixel() -> Vec<u8> {
+        let mut source = vec![0; 9];
+        source[center_index(3, 3)] = u8::MAX;
+        source
+    }
+
+    #[test]
+    fn statistics_shadow_uses_prop_key_light_and_stays_soft_and_faint() {
+        let style = statistics_rear_shadow_style([7.0, 14.0]).unwrap();
+        assert!(style.offset_y_up_points[0] > 0.0);
+        assert!(style.offset_y_up_points[1] < 0.0);
+        assert!(style.softness_points >= 7.0);
+        assert!(style.opacity > 0.0 && style.opacity <= 0.12);
+        assert_parallel(
+            style.offset_y_up_points,
+            crate::presentation::props::PROP_CAST_SHADOW_DIRECTION_Y_UP,
+        );
+    }
+
+    #[test]
+    fn statistics_shadow_rejects_invalid_cell_extents_without_non_finite_output() {
+        for extent in [
+            [0.0, 14.0],
+            [7.0, 0.0],
+            [-7.0, 14.0],
+            [7.0, -14.0],
+            [f32::NAN, 14.0],
+            [7.0, f32::INFINITY],
+        ] {
+            assert_eq!(statistics_rear_shadow_style(extent), None, "{extent:?}");
+        }
+
+        let style = statistics_rear_shadow_style([f32::MAX, f32::MAX]).unwrap();
+        assert!(style.offset_y_up_points.into_iter().all(f32::is_finite));
+        assert!(style.softness_points.is_finite());
+        assert!(style.opacity.is_finite());
+        assert!(style.opacity > 0.0 && style.opacity <= 0.12);
+    }
+
+    #[test]
+    fn pet_rim_is_narrow_constant_backed_and_activity_only_changes_alpha() {
+        let idle = pet_rim_style(0.0, false);
+        let active = pet_rim_style(1.0, false);
+        let reduced = pet_rim_style(1.0, true);
+        let clamped_low = pet_rim_style(-1.0, false);
+        let clamped_high = pet_rim_style(2.0, false);
+        assert!(idle.enabled);
+        assert!(idle.radius_points > 0.0 && idle.radius_points <= 1.5);
+        assert!(idle.alpha > 0.0 && idle.alpha <= 0.12);
+        assert_eq!(active.radius_points, idle.radius_points);
+        assert!(active.alpha > idle.alpha);
+        assert_eq!(reduced.alpha, idle.alpha);
+        assert_eq!(clamped_low.alpha, idle.alpha);
+        assert_eq!(clamped_high.alpha, active.alpha);
+    }
+
+    #[test]
+    fn mask_dilation_returns_only_exterior_coverage() {
+        let source = alpha_fixture_with_one_opaque_center_pixel();
+        let rim = exterior_dilated_alpha(&source, 3, 3, 1).unwrap();
+        assert_eq!(rim[center_index(3, 3)], 0);
+        assert!(rim[neighbor_index(3, 3)] > 0);
+    }
+
+    #[test]
+    fn mask_dilation_rejects_invalid_dimensions_and_subtracts_source_alpha() {
+        assert!(exterior_dilated_alpha(&[], 0, 0, 1).is_none());
+        assert!(exterior_dilated_alpha(&[u8::MAX], 2, 2, 1).is_none());
+
+        let source = vec![32, 128, 255, 64];
+        let rim = exterior_dilated_alpha(&source, 2, 2, 1).unwrap();
+        assert_eq!(rim, vec![223, 127, 0, 191]);
+    }
+
+    #[test]
+    fn invalid_rim_inputs_disable_the_rim_without_restoring_an_aura() {
+        let invalid = pet_rim_style(f32::NAN, false);
+        assert!(!invalid.enabled);
+        assert_eq!(invalid.alpha, 0.0);
     }
 }
