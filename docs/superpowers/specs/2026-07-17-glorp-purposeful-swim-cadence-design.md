@@ -1,7 +1,7 @@
 # Glorp Purposeful Swim Cadence Design
 
 **Date:** 2026-07-17
-**Status:** Approved design, pending written-spec review
+**Status:** Approved for implementation
 
 ## Problem
 
