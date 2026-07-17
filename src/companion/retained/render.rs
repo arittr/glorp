@@ -7303,6 +7303,154 @@ mod tests {
         assert!(!xp.contains("daily_excess"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_gauge_semantics_isolate_lane_pixels_and_daily_rollover() {
+        let base_fixture = canonical_materialization_fixture();
+        let base_cpu = compile_fixture(&base_fixture);
+        let atlas = full_hud_atlas_for('^', base_cpu.generation_key.resources, None, None);
+        let (device, queue) = native_device();
+        let shared = SceneGpuShared::create(&device, base_cpu.generation_key.device).unwrap();
+        let request = render_request_fixture(
+            base_cpu.generation_key,
+            base_cpu.source_revisions,
+            base_cpu.logical_viewport_points(),
+            1.0,
+        );
+        let zero_hud = super::super::hud::CaptureSafePreparedHudFrame::zeroed_for_test(
+            base_cpu.generation_key.resources,
+        );
+        let mut renderer = SceneRenderer::new(&device, &queue, &shared);
+
+        let mut render_isolated = |binding: Option<u32>, gauges: [f32; 4]| {
+            let mut fixture = canonical_materialization_fixture();
+            fixture.frame.gauges = gauges;
+            let cpu = compile_fixture(&fixture);
+            let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+            let mut candidate =
+                materialize_gpu_candidate(&device, &queue, &shared, &upload, &atlas).unwrap();
+            let target = binding.map(|binding| {
+                upload
+                    .draws
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, draw)| {
+                        (draw.source == PrimitiveSource::Analytic
+                            && upload.primitives[index].binding_index == binding)
+                            .then_some(u32::try_from(index).unwrap())
+                    })
+                    .expect("requested gauge semantic has one draw")
+            });
+            for draw in &mut candidate.draw_plan.world_blended_unsorted {
+                if Some(draw.primitive_index) != target {
+                    draw.instance_range = 0..0;
+                }
+            }
+            for draw in candidate
+                .draw_plan
+                .chrome
+                .prefix
+                .iter_mut()
+                .chain(candidate.draw_plan.chrome.suffix.iter_mut())
+            {
+                draw.instance_range = 0..0;
+            }
+            renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &zero_hud,
+                )
+                .unwrap()
+        };
+
+        let pixel_at = |outcome: &SceneRenderOutcome, point: [f32; 2]| -> [u8; 4] {
+            assert_eq!(outcome.physical_extent_pixels, [360, 360]);
+            let x = point[0].floor() as u32;
+            let y = point[1].floor() as u32;
+            let offset = usize::try_from((y * 360 + x) * 4).unwrap();
+            outcome.rgba[offset..offset + 4].try_into().unwrap()
+        };
+        let layout = crate::presentation::companion_effects::perimeter_gauge_layout(
+            180.0,
+            crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+        );
+        let lanes = [
+            ("pace", 5_u32, 3_usize, layout.pace),
+            ("daily", 9_u32, 1_usize, layout.daily),
+            ("xp", 10_u32, 0_usize, layout.xp),
+        ];
+        let background = render_isolated(None, [0.0; 4]);
+
+        for (name, binding, fraction_index, lane) in lanes {
+            // Both points lie on the lane centerline. Zero degrees is inside a
+            // 50% fill; 180 degrees remains on the track beyond that fill.
+            // Keeping y at the aperture midpoint also makes the sample
+            // invariant to the readback's top-left row convention.
+            let fill_point = [180.0 + lane.radius as f32, 180.0];
+            let track_point = [180.0 - lane.radius as f32, 180.0];
+            let track_only = render_isolated(Some(binding), [0.0; 4]);
+            let mut half_filled_gauges = [0.0; 4];
+            half_filled_gauges[fraction_index] = 0.5;
+            let half_filled = render_isolated(Some(binding), half_filled_gauges);
+
+            assert_ne!(
+                pixel_at(&track_only, fill_point),
+                pixel_at(&background, fill_point),
+                "{name} track is blank at its fill sample",
+            );
+            assert_ne!(
+                pixel_at(&track_only, track_point),
+                pixel_at(&background, track_point),
+                "{name} track is blank beyond the fill",
+            );
+            assert_ne!(
+                pixel_at(&half_filled, fill_point),
+                pixel_at(&track_only, fill_point),
+                "{name} fill did not compose over its track",
+            );
+            assert_eq!(
+                pixel_at(&half_filled, track_point),
+                pixel_at(&track_only, track_point),
+                "{name} fill escaped into the track-only arc",
+            );
+
+            for (foreign_name, _, _, foreign_lane) in lanes {
+                if foreign_name == name {
+                    continue;
+                }
+                let foreign_point = [180.0 + foreign_lane.radius as f32, 180.0];
+                assert_eq!(
+                    pixel_at(&half_filled, foreign_point),
+                    pixel_at(&background, foreign_point),
+                    "{name} semantic leaked pixels onto the {foreign_name} annulus",
+                );
+            }
+        }
+
+        let base_gauges = [0.5, 0.5, 0.0, 0.5];
+        let rollover_gauges = [0.5, 0.5, 1.5, 0.5];
+        for (name, binding) in [("pace", 5_u32), ("xp", 10_u32)] {
+            assert_eq!(
+                render_isolated(Some(binding), base_gauges).rgba,
+                render_isolated(Some(binding), rollover_gauges).rgba,
+                "daily excess changed the isolated {name} semantic",
+            );
+        }
+        let daily_base = render_isolated(Some(9), base_gauges);
+        let daily_rollover = render_isolated(Some(9), rollover_gauges);
+        let daily_fill_point = [180.0 + layout.daily.radius as f32, 180.0];
+        assert_ne!(daily_rollover.rgba, daily_base.rgba);
+        assert_ne!(
+            pixel_at(&daily_rollover, daily_fill_point),
+            pixel_at(&daily_base, daily_fill_point),
+            "completed plus current daily rollover did not alter the daily annulus",
+        );
+    }
+
     fn two_weight_atlas(scalar: char) -> super::super::resources::PreparedSceneAtlas {
         two_weight_atlas_for(
             scalar,
