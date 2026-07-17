@@ -1,13 +1,15 @@
 //! Deterministic locomotion shared by live companion motion and Preview Lab.
 
-pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 30;
+pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 16;
 pub(crate) const LOCOMOTION_BLOCK_SEGMENTS: usize = 8;
-pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 4;
-pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 8;
+pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 2;
+pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 4;
 pub(crate) const LOCOMOTION_MAX_PLANAR_STEP: f32 = 0.62;
 pub(crate) const LOCOMOTION_MAX_DEPTH_STEP: f32 = 0.67;
 const LOCOMOTION_CONTROL_OFFSET_FRACTION: f32 = 0.12;
 const LOCOMOTION_FACING_DEADZONE: f32 = 0.06;
+const LOCOMOTION_DEPTH_EXTREME: f32 = 0.70;
+const LOCOMOTION_DEPTH_MID: f32 = 0.23;
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -221,15 +223,25 @@ fn boundary_anchor(identity: u64, block_index: i64) -> NormalizedLocomotionPoint
         x: hash_range(identity, block_index, 0x01, -0.55, 0.55),
         y: hash_range(identity, block_index, 0x02, -0.45, 0.45),
         z: if block_index.rem_euclid(2) == 0 {
-            -1.0
+            -LOCOMOTION_DEPTH_EXTREME
         } else {
-            1.0
+            LOCOMOTION_DEPTH_EXTREME
         },
     }
 }
 
 fn depth_waypoints(block_index: i64) -> [f32; ROUTE_POINTS] {
-    let rear_to_front = [-1.0, -1.0, -1.0, -0.33, -0.33, 0.33, 0.33, 1.0, 1.0];
+    let rear_to_front = [
+        -LOCOMOTION_DEPTH_EXTREME,
+        -LOCOMOTION_DEPTH_EXTREME,
+        -LOCOMOTION_DEPTH_EXTREME,
+        -LOCOMOTION_DEPTH_MID,
+        -LOCOMOTION_DEPTH_MID,
+        LOCOMOTION_DEPTH_MID,
+        LOCOMOTION_DEPTH_MID,
+        LOCOMOTION_DEPTH_EXTREME,
+        LOCOMOTION_DEPTH_EXTREME,
+    ];
     if block_index.rem_euclid(2) == 0 {
         rear_to_front
     } else {
@@ -556,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn each_segment_has_a_brief_dwell_and_a_readable_glide_cadence() {
+    fn each_segment_has_a_brief_turn_and_a_visibly_purposeful_glide() {
         let identity = stable_companion_identity("dwell-duration");
         for segment in -24..24 {
             let dwell = dwell_seconds(identity, segment);
@@ -577,7 +589,7 @@ mod tests {
             );
             let glide = LOCOMOTION_SEGMENT_SECS - dwell;
             assert!(
-                (22..=26).contains(&glide),
+                (12..=14).contains(&glide),
                 "segment {segment} had a {glide}-second glide"
             );
         }
@@ -759,14 +771,16 @@ mod tests {
     }
 
     #[test]
-    fn a_sixteen_segment_window_reaches_rear_and_front_depth() {
+    fn a_sixteen_segment_window_reaches_visible_rear_and_front_depth() {
         for seed in ["depth-window-a", "depth-window-b"] {
             let identity = stable_companion_identity(seed);
             for start in [-8, 0, 8] {
                 let mut points =
                     (start..=start + 16).map(|segment| route_target(identity, segment));
-                assert!(points.clone().any(|point| point.z <= -0.95));
-                assert!(points.any(|point| point.z >= 0.95));
+                assert!(points
+                    .clone()
+                    .any(|point| (-0.75..=-0.65).contains(&point.z)));
+                assert!(points.any(|point| (0.65..=0.75).contains(&point.z)));
             }
         }
     }
@@ -865,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn every_phase_aligned_two_minute_window_has_at_most_four_reversals_per_axis() {
+    fn every_phase_aligned_two_minute_window_has_at_most_eight_reversals_per_axis() {
         for seed in 0..16 {
             let identity = stable_companion_identity(&format!("two-minute-window-{seed}"));
             for minute in [-9, -1, 0, 7, 15] {
@@ -877,11 +891,11 @@ mod tests {
                     let x_reversals = axis_reversal_count(&samples, |point| point.x);
                     let y_reversals = axis_reversal_count(&samples, |point| point.y);
                     assert!(
-                        x_reversals <= 4,
+                        x_reversals <= 8,
                         "seed {seed} at minute {minute}, phase {phase} had {x_reversals} X reversals"
                     );
                     assert!(
-                        y_reversals <= 4,
+                        y_reversals <= 8,
                         "seed {seed} at minute {minute}, phase {phase} had {y_reversals} Y reversals"
                     );
                 }

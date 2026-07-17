@@ -410,6 +410,36 @@ mod tests {
     }
 
     #[test]
+    fn production_aperture_keeps_a_visible_horizontal_lane_at_locomotion_depth_limit() {
+        let mut production = viewport(5);
+        production.grid_columns = 36;
+        production.width_points = 360.0;
+
+        let motion_at = |planar_x| RoundCompanionMotionProjection {
+            motion_top_left_cells: MotionPoint { x: 12.0 + planar_x, y: 2.0 },
+            motion_origin_top_left_cells: MotionPoint { x: 12.0, y: 2.0 },
+            motion_top_left_points: [(12.0 + planar_x) * 10.0, 40.0],
+            planar_offset_cells: MotionPoint { x: planar_x, y: 0.0 },
+            classic_top_left_cells: [12, 2],
+            normalized_depth: 0.70,
+            facing: 1,
+            wander_offset_x: 0,
+            breath_offset_y_cells: 0,
+            bob_offset_y_cells: 0.0,
+        };
+        let depth = resolve_smooth_depth(0.70, 1.0).unwrap();
+        let left = resolve_round_depth_placement(motion_at(-6.0), depth, production).unwrap();
+        let right = resolve_round_depth_placement(motion_at(6.0), depth, production).unwrap();
+
+        assert!(
+            right.final_center_cells.x - left.final_center_cells.x >= 4.0,
+            "the locomotion depth limit must leave a visible horizontal swim lane: {left:?} to {right:?}"
+        );
+        assert_bounds_inside_physical_aperture(left.max_scale_bounds_cells, production);
+        assert_bounds_inside_physical_aperture(right.max_scale_bounds_cells, production);
+    }
+
+    #[test]
     fn maximum_scale_corners_stay_inside_the_elliptical_cell_aperture() {
         let neutral_depth = resolve_smooth_depth(0.0, 1.0).unwrap();
         let neutral =
