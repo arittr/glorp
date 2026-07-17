@@ -83,6 +83,17 @@ pub enum HabitatPropZone {
     Ceiling,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum HabitatPropShadowProfile {
+    None,
+    ContactOnly,
+    Elevated {
+        visual_height_cells: f32,
+        softness_cells: f32,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HabitatPropSpec {
     pub id: &'static str,
@@ -91,6 +102,7 @@ pub struct HabitatPropSpec {
     pub display_priority: i16,
     pub lifetime_threshold: Option<f64>,
     pub pet_layer: HabitatPetLayer,
+    pub shadow_profile: HabitatPropShadowProfile,
     /// Natural rendering color for this prop's glyphs. Picked to read as
     /// the real-world thing (mossy green for plants, amber for chests,
     /// warm orange for lanterns) rather than tinted to match the pet —
@@ -207,6 +219,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         // of truth. Maturity gate and later thresholds are unchanged.
         lifetime_threshold: Some(10_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::ContactOnly,
         color: (0xa8, 0xa4, 0x9c), // weathered stone
     },
     HabitatPropSpec {
@@ -216,6 +229,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 20,
         lifetime_threshold: Some(100_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::ContactOnly,
         color: (0xe8, 0xc8, 0xa8), // pearly cream
     },
     HabitatPropSpec {
@@ -225,6 +239,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 150,
         lifetime_threshold: Some(250_000.0),
         pet_layer: HabitatPetLayer::Foreground,
+        shadow_profile: HabitatPropShadowProfile::ContactOnly,
         color: (0x6f, 0xb0, 0x60), // moss green
     },
     HabitatPropSpec {
@@ -234,6 +249,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 30,
         lifetime_threshold: Some(500_000.0),
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xff, 0xee, 0x9c), // soft spark yellow
     },
     HabitatPropSpec {
@@ -243,6 +259,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 45,
         lifetime_threshold: Some(750_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0x9c, 0xac, 0xc0), // overcast blue-grey
     },
     HabitatPropSpec {
@@ -252,6 +269,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 40,
         lifetime_threshold: Some(1_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0x82, 0xcc, 0xd8), // crystal teal
     },
     HabitatPropSpec {
@@ -261,6 +279,10 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 145, // animated bubbling centerpiece — a featured trophy
         lifetime_threshold: Some(2_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::Elevated {
+            visual_height_cells: 2.25,
+            softness_cells: 0.45,
+        },
         color: (0xd8, 0xa4, 0x4c), // antique gold
     },
     HabitatPropSpec {
@@ -270,6 +292,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 50,
         lifetime_threshold: Some(5_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xb0, 0x9c, 0xe8), // pale violet
     },
     HabitatPropSpec {
@@ -279,6 +302,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 60,
         lifetime_threshold: Some(10_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xf0, 0xb4, 0x60), // lantern glow
     },
     HabitatPropSpec {
@@ -288,6 +312,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 152, // vine — green plants anchor the tank
         lifetime_threshold: Some(25_000_000.0),
         pet_layer: HabitatPetLayer::Foreground,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0x7a, 0xb8, 0x80), // leafy green
     },
     HabitatPropSpec {
@@ -297,6 +322,10 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 151, // reeds — third green plant anchor
         lifetime_threshold: Some(5_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::Elevated {
+            visual_height_cells: 3.50,
+            softness_cells: 0.65,
+        },
         color: (0x8c, 0xc4, 0x6c), // reed green
     },
     HabitatPropSpec {
@@ -306,6 +335,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 100,
         lifetime_threshold: Some(50_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0x9c, 0x5c, 0xd0), // amethyst geode
     },
     HabitatPropSpec {
@@ -315,6 +345,10 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 110,
         lifetime_threshold: Some(100_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::Elevated {
+            visual_height_cells: 3.25,
+            softness_cells: 0.70,
+        },
         color: (0xe8, 0x9c, 0xc0), // cherry blossom
     },
     HabitatPropSpec {
@@ -324,6 +358,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 120,
         lifetime_threshold: Some(250_000_000.0),
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xf0, 0xe4, 0x9c), // starlight gold
     },
     HabitatPropSpec {
@@ -333,6 +368,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 130,
         lifetime_threshold: Some(500_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xc0, 0x88, 0xe0), // aurora violet
     },
     HabitatPropSpec {
@@ -342,6 +378,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 140,
         lifetime_threshold: Some(1_000_000_000.0),
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xb4, 0xa0, 0xf0), // moonlit violet — aurora palette, its own shade
     },
     HabitatPropSpec {
@@ -351,6 +388,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 70,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xd8, 0x6c, 0x5c), // signal-lamp red
     },
     HabitatPropSpec {
@@ -360,6 +398,10 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 148,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Foreground,
+        shadow_profile: HabitatPropShadowProfile::Elevated {
+            visual_height_cells: 3.00,
+            softness_cells: 0.65,
+        },
         color: (0x6f, 0xb0, 0x60), // potted foliage
     },
     HabitatPropSpec {
@@ -369,6 +411,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 90,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::ContactOnly,
         color: (0x88, 0xc8, 0x78), // tender sprout
     },
     HabitatPropSpec {
@@ -378,6 +421,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 75,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Background,
+        shadow_profile: HabitatPropShadowProfile::None,
         color: (0xf0, 0xc4, 0x6a),
     },
     HabitatPropSpec {
@@ -387,6 +431,7 @@ pub const HABITAT_PROP_CATALOG: &[HabitatPropSpec] = &[
         display_priority: 85,
         lifetime_threshold: None,
         pet_layer: HabitatPetLayer::Behind,
+        shadow_profile: HabitatPropShadowProfile::ContactOnly,
         color: (0x88, 0xc8, 0x78),
     },
 ];
@@ -693,6 +738,66 @@ mod tests {
     use super::*;
     use crate::storage::day_axis::LocalDayMapper;
     use time::{macros::datetime, UtcOffset};
+
+    #[test]
+    fn prop_shadow_profiles_are_explicit_for_every_catalog_entry() {
+        let expected = [
+            (TOKEN_PEBBLE_25K, HabitatPropShadowProfile::ContactOnly),
+            (TOKEN_SHELL_100K, HabitatPropShadowProfile::ContactOnly),
+            (TOKEN_MOSS_TUFT_250K, HabitatPropShadowProfile::ContactOnly),
+            (TOKEN_SPARK_500K, HabitatPropShadowProfile::None),
+            (TOKEN_FRIENDLY_CLOUD_750K, HabitatPropShadowProfile::None),
+            (TOKEN_SHARD_1M, HabitatPropShadowProfile::None),
+            (
+                TOKEN_TREASURE_CHEST_2M,
+                HabitatPropShadowProfile::Elevated {
+                    visual_height_cells: 2.25,
+                    softness_cells: 0.45,
+                },
+            ),
+            (TOKEN_ORBIT_5M, HabitatPropShadowProfile::None),
+            (TOKEN_LANTERN_10M, HabitatPropShadowProfile::None),
+            (TOKEN_HANGING_VINE_25M, HabitatPropShadowProfile::None),
+            (
+                TOKEN_REEDS_5M,
+                HabitatPropShadowProfile::Elevated {
+                    visual_height_cells: 3.50,
+                    softness_cells: 0.65,
+                },
+            ),
+            (TOKEN_GEODE_50M, HabitatPropShadowProfile::None),
+            (
+                TOKEN_BONSAI_100M,
+                HabitatPropShadowProfile::Elevated {
+                    visual_height_cells: 3.25,
+                    softness_cells: 0.70,
+                },
+            ),
+            (TOKEN_CONSTELLATION_250M, HabitatPropShadowProfile::None),
+            (TOKEN_AURORA_500M, HabitatPropShadowProfile::None),
+            (TOKEN_MOON_1B, HabitatPropShadowProfile::None),
+            (CODEX_SIGNAL_LAMP, HabitatPropShadowProfile::None),
+            (
+                HEAVY_SESSION_PLANTER,
+                HabitatPropShadowProfile::Elevated {
+                    visual_height_cells: 3.00,
+                    softness_cells: 0.65,
+                },
+            ),
+            (WILT_RECOVERY_SPROUT, HabitatPropShadowProfile::ContactOnly),
+            (FIRST_ENSEMBLE_DAY, HabitatPropShadowProfile::None),
+            (RETURN_SPROUT, HabitatPropShadowProfile::ContactOnly),
+        ];
+
+        assert_eq!(HABITAT_PROP_CATALOG.len(), expected.len());
+        for (id, profile) in expected {
+            assert_eq!(
+                catalog_prop_by_str(id).unwrap().shadow_profile,
+                profile,
+                "{id} shadow profile"
+            );
+        }
+    }
 
     #[test]
     fn moss_tuft_and_planter_render_in_green() {
