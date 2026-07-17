@@ -537,6 +537,7 @@ pub(crate) fn classify_snapshot_changes(
         changes.frame.insert(FrameChangeMask::PET_TRANSFORM);
     }
     if previous.frame.asleep != newest.frame.asleep {
+        changes.frame.insert(FrameChangeMask::PET_TRANSFORM);
         changes.frame.insert(FrameChangeMask::STATUS_VISIBILITY);
         changes.frame.insert(FrameChangeMask::PROP_TRANSFORMS);
     }
@@ -3655,6 +3656,8 @@ mod tests {
 
         let pet_motion = classify(|s| offset_pet_depth(s, 0.1));
         assert!(pet_motion.frame().contains(FrameChangeMask::PET_TRANSFORM));
+        let asleep = classify(|s| s.frame.asleep = !s.frame.asleep);
+        assert!(asleep.frame().contains(FrameChangeMask::PET_TRANSFORM));
         let trouble = classify(|s| s.frame.helper_trouble = true);
         assert!(trouble
             .frame()

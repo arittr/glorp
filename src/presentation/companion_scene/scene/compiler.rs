@@ -201,7 +201,7 @@ impl SceneGenerationData {
                 local_transform: pet_transform(snapshot),
                 ..node
             });
-            if snapshot.frame.pet_depth != self.source_snapshot.frame.pet_depth
+            if resolved_effective_depth(snapshot) != resolved_effective_depth(&self.source_snapshot)
                 || snapshot.frame.pet_depth_cue != self.source_snapshot.frame.pet_depth_cue
             {
                 project_depth_effect_node_deltas(
@@ -601,7 +601,7 @@ fn pet_transform(
         snapshot.frame.pet_anchor_points[0],
         snapshot.topology.layout.height_points - y - pet_extent[1]
             + snapshot.frame.pet_depth_cue.y_offset_points_up,
-        snapshot.frame.pet_depth,
+        resolved_effective_depth(snapshot),
     ]);
     transform.scale[0] = f32::from(snapshot.frame.facing) * snapshot.frame.pet_depth_cue.scale;
     transform.scale[1] = snapshot.frame.pet_depth_cue.scale;
@@ -679,6 +679,21 @@ fn project_depth_effect_node_deltas(
     current_frame: &SceneFrame,
     output: &mut Vec<NodeFrameState>,
 ) -> Result<(), SceneGenerationError> {
+    let aura_id = template
+        .nodes
+        .iter()
+        .find(|node| node.alias.as_str() == "pet.aura.mood")
+        .map(|node| node.id)
+        .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+    let mut aura = current_frame
+        .nodes
+        .iter()
+        .find(|node| node.node == aura_id)
+        .copied()
+        .ok_or(SceneGenerationError::UnknownAuthoredIdentity)?;
+    aura.local_transform = Transform3::translated([0.0, 0.0, resolved_effective_depth(snapshot)]);
+    output.push(aura);
+
     let wall_opacity = crate::presentation::companion_effects::wall_shadow_depth_cue(
         resolved_effective_depth(snapshot),
     )
@@ -1135,7 +1150,11 @@ fn build_template(
         ("chrome.screen", Some("scene.root"), 0.0),
         ("chrome.status", Some("chrome.screen"), 0.0),
         ("chrome.trouble", Some("chrome.screen"), 0.0),
-        ("chrome.hud", Some("chrome.screen"), 0.0),
+        (
+            "chrome.hud",
+            Some("scene.root"),
+            crate::round::depth::COMPANION_STATISTICS_Z,
+        ),
         ("chrome.dim", Some("chrome.screen"), 0.0),
     ] {
         add_node(name.to_owned(), parent, z, scene_bounds, DepthCue::NEUTRAL)?;
@@ -1490,18 +1509,16 @@ fn build_template(
         PrimitiveBinding::Analytic(AnalyticSemantic::Trouble.id()),
         PrimitiveSpace::Screen,
     )?;
-    match crate::round::hud::COMPANION_HUD_DEPTH_PLANE {
-        crate::round::hud::CompanionHudDepthPlane::FrontGlass => push(
-            "chrome.hud",
-            PrimitiveKind::InstanceQuad,
-            "material.screen-chrome",
-            "resource.hud-glyph-atlas",
-            WorldBlend::PremultipliedAlpha,
-            DepthBehavior::ScreenNoDepth,
-            PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
-            PrimitiveSpace::Screen,
-        )?,
-    }
+    push(
+        "chrome.hud",
+        PrimitiveKind::InstanceQuad,
+        "material.unlit-glyph",
+        "resource.hud-glyph-atlas",
+        WorldBlend::PremultipliedAlpha,
+        DepthBehavior::WorldReadOnly,
+        PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
+        PrimitiveSpace::World,
+    )?;
     push(
         "chrome.dim",
         PrimitiveKind::AnalyticShape,
@@ -2391,6 +2408,13 @@ fn build_frame(
     let effective_depth = resolved_effective_depth(snapshot);
     set_node(
         &mut frame,
+        "pet.aura.mood",
+        Some(Transform3::translated([0.0, 0.0, effective_depth])),
+        None,
+        None,
+    )?;
+    set_node(
+        &mut frame,
         "pet.shadow.wall",
         None,
         None,
@@ -2532,7 +2556,7 @@ mod tests {
     use crate::pet::generation::Species;
 
     #[test]
-    fn front_glass_hud_compiles_after_pet_as_screen_chrome() {
+    fn statistics_hud_compiles_once_as_world_read_only_at_the_shared_plane() {
         let mut vm = crate::tui::view_model::WatchViewModel::fixture_with_habitat_props();
         let pet = crate::pet::generation::generate_pet("front-glass-hud-fixture")
             .with_species(Species::Fuzz);
@@ -2585,13 +2609,24 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            crate::round::hud::COMPANION_HUD_DEPTH_PLANE,
-            crate::round::hud::CompanionHudDepthPlane::FrontGlass
-        );
         assert!(hud.authored_order > pet.authored_order);
-        assert_eq!(hud.depth, DepthBehavior::ScreenNoDepth);
-        assert_eq!(hud.space, PrimitiveSpace::Screen);
+        assert_eq!(hud.depth, DepthBehavior::WorldReadOnly);
+        assert_eq!(hud.space, PrimitiveSpace::World);
+        let hud_node = template
+            .nodes
+            .iter()
+            .find(|node| node.id == hud.node)
+            .unwrap();
+        let root = template
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == "scene.root")
+            .unwrap();
+        assert_eq!(hud_node.parent, Some(root.id));
+        assert_eq!(
+            hud_node.base_transform.translation[2],
+            crate::round::depth::COMPANION_STATISTICS_Z
+        );
     }
 
     #[test]

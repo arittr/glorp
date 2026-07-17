@@ -3887,8 +3887,8 @@ mod tests {
         let production = compile_projected_full_scene_for_render_test(0);
         assert_eq!(production.primitive_count(), 22);
         assert_eq!(production.phases.opaque_cutout.len(), 1);
-        assert_eq!(production.phases.world_blended_unsorted.len(), 17);
-        assert_eq!(production.phases.chrome_authored.len(), 4);
+        assert_eq!(production.phases.world_blended_unsorted.len(), 18);
+        assert_eq!(production.phases.chrome_authored.len(), 3);
     }
 
     #[test]

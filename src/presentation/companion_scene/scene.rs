@@ -3574,6 +3574,7 @@ mod tests {
                 let pet = node_frame("pet");
                 let body = node_frame("pet.body");
                 let particles = node_frame("pet.particles");
+                let aura = node_frame("pet.aura.mood");
                 let wall = node_frame("pet.shadow.wall");
                 let floor = node_frame("pet.projection.floor");
                 let cell = snapshot.topology.glyph_grid.cell_extent_points;
@@ -3590,8 +3591,17 @@ mod tests {
 
                 assert_eq!(
                     pet.local_transform.translation,
-                    [snapshot.frame.pet_anchor_points[0], expected_y, raw_depth],
+                    [
+                        snapshot.frame.pet_anchor_points[0],
+                        expected_y,
+                        resolved.effective_z
+                    ],
                     "{lifecycle} at depth {raw_depth}"
+                );
+                assert_eq!(
+                    aura.local_transform.translation,
+                    [0.0, 0.0, resolved.effective_z],
+                    "the absolute-point-space aura follows only effective pet Z"
                 );
                 assert_eq!(
                     pet.local_transform.scale,
@@ -3704,6 +3714,18 @@ mod tests {
                     .find(|node| node.alias.as_str() == "scene.root")
                     .unwrap();
                 assert_eq!(aura_node.parent, Some(root.id));
+                let receiver_z = |alias: &str| {
+                    generation
+                        .template
+                        .nodes
+                        .iter()
+                        .find(|node| node.alias.as_str() == alias)
+                        .unwrap()
+                        .base_transform
+                        .translation[2]
+                };
+                assert_eq!(receiver_z("pet.shadow.wall"), -1.30);
+                assert_eq!(receiver_z("pet.projection.floor"), -1.70);
                 let status_tone = match generation.frame.analytic_slots[3].value.unwrap().geometry {
                     AnalyticGeometry::StatusBeacon { tone, .. } => tone,
                     _ => unreachable!(),

@@ -134,7 +134,7 @@ struct HudGlyphGpuValue {
     glyph_entry_index: u32,
     role: u32,
     visible: u32,
-    padding: u32,
+    scene_z: f32,
 }
 
 struct HudGlyphBuffer {
@@ -1492,11 +1492,8 @@ fn vs_hud(
 
     let corner = hud_quad_corner(vertex_index);
     let point_position = instance.rect_points.xy + corner * instance.rect_points.zw;
-    let normalized = vec2<f32>(
-        point_position.x * 2.0 / frame_buffer.globals.viewport_points.x - 1.0,
-        point_position.y * 2.0 / frame_buffer.globals.viewport_points.y - 1.0,
-    );
-    output.position = vec4<f32>(normalized, 0.0, 1.0);
+    let world = vec4<f32>(point_position, instance.scene_z, 1.0);
+    output.position = frame_buffer.globals.projection * frame_buffer.globals.view * world;
     output.uv = corner;
     return output;
 }

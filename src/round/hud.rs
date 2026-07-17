@@ -10,13 +10,6 @@ pub use crate::presentation::gauge_values::{
     PACE_SOFT_CAP_10M_TOKENS,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompanionHudDepthPlane {
-    FrontGlass,
-}
-
-pub const COMPANION_HUD_DEPTH_PLANE: CompanionHudDepthPlane = CompanionHudDepthPlane::FrontGlass;
-
 /// Open-bottom growth ring geometry. Angles are degrees, CCW from +x (AppKit).
 /// The gap is centered at the bottom (270°); the track sweeps CCW over the top
 /// from the gap's right edge to its left edge.

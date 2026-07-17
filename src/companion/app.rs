@@ -144,7 +144,6 @@ pub(super) struct PreparedCompanionFrame {
     background: RoundColor,
     mood_aura_color: RoundColor,
     dim_overlay: bool,
-    hud_plane: crate::round::hud::CompanionHudDepthPlane,
     renderer: PreparedRendererFrame,
     gauges: PreparedGaugeFrame,
     gauge_arcs: Vec<PreparedGaugeArc>,
@@ -380,7 +379,6 @@ impl PreparedCompanionFrame {
             background: RoundColor(0.05, 0.06, 0.10, 1.0),
             mood_aura_color: RoundColor(0.30, 0.40, 0.55, 0.80),
             dim_overlay: false,
-            hud_plane: crate::round::hud::COMPANION_HUD_DEPTH_PLANE,
             renderer: PreparedRendererFrame::Pixel {
                 frame: PixelFrame::transparent(PixelViewport::companion_default()),
             },
@@ -764,7 +762,6 @@ fn prepare_companion_frame_at(
         background,
         mood_aura_color: crate::round::hud::mood_aura_color(scene.pet.mood),
         dim_overlay,
-        hud_plane: crate::round::hud::COMPANION_HUD_DEPTH_PLANE,
         renderer,
         gauges,
         gauge_arcs,
@@ -3484,11 +3481,7 @@ fn paint_prepared_status_trouble(frame: &PreparedCompanionFrame) {
 }
 
 fn paint_prepared_statistics(bounds: NSRect, frame: &PreparedCompanionFrame) {
-    match frame.hud_plane {
-        crate::round::hud::CompanionHudDepthPlane::FrontGlass => {
-            draw_hud(bounds, &frame.aperture, &frame.hud, frame.hud_font_size);
-        }
-    }
+    draw_hud(bounds, &frame.aperture, &frame.hud, frame.hud_font_size);
 }
 
 fn paint_prepared_dim(bounds: NSRect, frame: &PreparedCompanionFrame) {

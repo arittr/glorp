@@ -64,6 +64,11 @@ pub(super) struct HudDrawBindings<'resources> {
     atlas: &'resources wgpu::BindGroup,
 }
 
+struct HudRenderTarget<'resources> {
+    color: &'resources wgpu::TextureView,
+    depth: &'resources wgpu::TextureView,
+}
+
 impl<'resources> HudDrawBindings<'resources> {
     pub(super) fn new(
         pipeline: &'resources wgpu::RenderPipeline,
@@ -136,7 +141,7 @@ pub(crate) struct HudGlyphGpuValue {
     glyph_entry_index: u32,
     role: u32,
     visible: u32,
-    padding: u32,
+    scene_z: f32,
 }
 
 impl fmt::Debug for HudGlyphGpuValue {
@@ -313,6 +318,9 @@ impl PreparedHudAtlas {
             },
         );
         validate_prepared_layout(layout)?;
+        let scene_z = crate::round::depth::CompanionDepthComposition::resolve(0.0)
+            .expect("validated shared companion depth composition")
+            .statistics_z;
 
         let mut records = [HudGlyphGpuValue::zeroed(); MAX_COMPANION_HUD_GLYPHS];
         let mut record_index = 0;
@@ -334,7 +342,7 @@ impl PreparedHudAtlas {
                         glyph_entry_index: metric.entry_index,
                         role: line_index as u32,
                         visible: 1,
-                        padding: 0,
+                        scene_z,
                     };
                 }
                 pen_x += f64::from(super::glyph_advance(metric.entry, font_size));
@@ -352,6 +360,9 @@ impl PreparedHudAtlas {
     #[cfg(test)]
     pub(super) fn shader_contract_fixture_for_test(&self) -> CaptureSafePreparedHudFrame {
         let mut records = [HudGlyphGpuValue::zeroed(); MAX_COMPANION_HUD_GLYPHS];
+        let scene_z = crate::round::depth::CompanionDepthComposition::resolve(0.0)
+            .expect("validated shared companion depth composition")
+            .statistics_z;
         for (slot, (glyph, rect_points, role)) in [
             ('r', [32.0, 32.0, 16.0, 16.0], 0),
             ('e', [64.0, 32.0, 16.0, 16.0], 0),
@@ -369,7 +380,7 @@ impl PreparedHudAtlas {
                     .entry_index,
                 role,
                 visible: 1,
-                padding: 0,
+                scene_z,
             };
         }
         CaptureSafePreparedHudFrame {
@@ -475,6 +486,7 @@ impl GpuHudResources {
         staging_belt: &mut wgpu::util::StagingBelt,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
         bindings: HudDrawBindings<'_>,
         prepared: &SensitivePreparedHudFrame,
     ) -> Result<(), HudGpuStagingError> {
@@ -485,7 +497,7 @@ impl GpuHudResources {
         encode_hud(
             staging_belt,
             encoder,
-            target,
+            HudRenderTarget { color: target, depth },
             bindings,
             &self.live_buffer,
             &self.live_bind_group,
@@ -504,6 +516,7 @@ impl GpuHudResources {
         staging_belt: &mut wgpu::util::StagingBelt,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
         bindings: HudDrawBindings<'_>,
         prepared: &CaptureSafePreparedHudFrame,
     ) -> Result<(), HudGpuStagingError> {
@@ -514,7 +527,7 @@ impl GpuHudResources {
         encode_hud(
             staging_belt,
             encoder,
-            target,
+            HudRenderTarget { color: target, depth },
             bindings,
             &self.redacted_buffer,
             &self.redacted_bind_group,
@@ -609,20 +622,19 @@ fn stage_exact_records(
 fn encode_hud(
     staging_belt: &mut wgpu::util::StagingBelt,
     encoder: &mut wgpu::CommandEncoder,
-    target: &wgpu::TextureView,
+    target: HudRenderTarget<'_>,
     bindings: HudDrawBindings<'_>,
     buffer: &wgpu::Buffer,
     bind_group: &wgpu::BindGroup,
     records: &[HudGlyphGpuValue; MAX_COMPANION_HUD_GLYPHS],
 ) {
     stage_exact_records(staging_belt, encoder, buffer, records);
-    // Task 10 may split the chrome phase here at the authored `chrome.hud`
-    // marker. Load/store preserves all earlier work in the intermediate while
-    // keeping this nominal upload and its draw inseparable on one encoder.
+    // The fixed upload and draw stay inseparable while loading the world color
+    // and depth produced by the transparent prefix.
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("glorp-scene-hud-hook"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: target,
+            view: target.color,
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
@@ -630,6 +642,14 @@ fn encode_hud(
                 store: wgpu::StoreOp::Store,
             },
         })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: target.depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
         ..Default::default()
     });
     pass.set_pipeline(bindings.pipeline);
@@ -1210,11 +1230,16 @@ mod tests {
         assert_eq!(offset_of!(HudGlyphGpuValue, glyph_entry_index), 16);
         assert_eq!(offset_of!(HudGlyphGpuValue, role), 20);
         assert_eq!(offset_of!(HudGlyphGpuValue, visible), 24);
-        assert_eq!(offset_of!(HudGlyphGpuValue, padding), 28);
+        assert_eq!(offset_of!(HudGlyphGpuValue, scene_z), 28);
 
         let atlas = PreparedHudAtlas::from_scene_atlas(&prepared_atlas()).unwrap();
         let sealed = live(1_100_000.0, Some(0.01), 1_100_000.0);
         let prepared = prepare_sensitive(&sealed, &atlas).unwrap();
+        assert!(prepared
+            .records
+            .iter()
+            .filter(|record| record.visible == 1)
+            .all(|record| record.scene_z == crate::round::depth::COMPANION_STATISTICS_Z));
         assert_eq!(prepared.records[6], HudGlyphGpuValue::zeroed());
         let last_visible = prepared
             .records

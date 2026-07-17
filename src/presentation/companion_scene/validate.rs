@@ -1228,10 +1228,10 @@ fn instance_binding_semantics_match(
             PrimitiveSpace::World,
         ),
         InstanceGroupBinding::Hud => (
-            MaterialKind::ScreenChrome,
+            MaterialKind::UnlitGlyphSprite,
             WorldBlend::PremultipliedAlpha,
-            DepthBehavior::ScreenNoDepth,
-            PrimitiveSpace::Screen,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveSpace::World,
         ),
         InstanceGroupBinding::RoomGlyphs
         | InstanceGroupBinding::PetArt(PetArtFilter::Body)
@@ -3123,10 +3123,10 @@ mod tests {
                 primitive.blend = WorldBlend::Additive;
             }
             InstanceGroupBinding::Hud => {
-                template.materials[0].kind = MaterialKind::ScreenChrome;
+                template.materials[0].kind = MaterialKind::UnlitGlyphSprite;
                 primitive.blend = WorldBlend::PremultipliedAlpha;
-                primitive.depth = DepthBehavior::ScreenNoDepth;
-                primitive.space = PrimitiveSpace::Screen;
+                primitive.depth = DepthBehavior::WorldReadOnly;
+                primitive.space = PrimitiveSpace::World;
             }
             _ => {
                 template.materials[0].kind = MaterialKind::UnlitGlyphSprite;

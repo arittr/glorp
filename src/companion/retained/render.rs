@@ -123,8 +123,8 @@ pub(super) enum ScenePipelineClass {
     /// Materialized to keep the pipeline family complete. Scene v2 authors no
     /// additive analytic primitive, so the selector never returns this class.
     WorldAdditiveAnalyticReserved,
+    WorldHud,
     ChromeAnalytic,
-    SealedHudHook,
 }
 
 fn scene_pipeline_class(
@@ -263,15 +263,15 @@ fn scene_pipeline_class(
     }
     if primitive.primitive_kind == INSTANCE_QUAD_PRIMITIVE_TAG
         && glyph_resource
-        && primitive.material_kind == 6
+        && primitive.material_kind == 1
         && primitive.blend == 3
-        && primitive.depth == 3
-        && primitive.space == 2
+        && primitive.depth == 2
+        && primitive.space == 1
         && primitive.instance_group == 8
         && primitive.binding_index == 0
         && draw.source == PrimitiveSource::Instances(InstanceSource::Hud)
     {
-        return Some(SealedHudHook);
+        return Some(WorldHud);
     }
     None
 }
@@ -376,15 +376,15 @@ const fn scene_pipeline_contract(class: ScenePipelineClass) -> ScenePipelineCont
             blend: Some(SceneBlendContract::Additive),
             depth_write_enabled: Some(false),
         },
+        WorldHud => ScenePipelineContract {
+            vertex_entry: "vs_hud",
+            fragment_entry: "fs_hud",
+            blend: Some(SceneBlendContract::SourceOver),
+            depth_write_enabled: Some(false),
+        },
         ChromeAnalytic => ScenePipelineContract {
             vertex_entry: "vs_screen_analytic",
             fragment_entry: "fs_analytic",
-            blend: Some(SceneBlendContract::SourceOver),
-            depth_write_enabled: None,
-        },
-        SealedHudHook => ScenePipelineContract {
-            vertex_entry: "vs_hud",
-            fragment_entry: "fs_hud",
             blend: Some(SceneBlendContract::SourceOver),
             depth_write_enabled: None,
         },
@@ -435,14 +435,12 @@ pub(super) struct SceneHudMarker {
     pub(super) authored_order: u32,
 }
 
-/// Fixed scene-v2 screen-space schedule. The sealed HUD marker is deliberately
-/// not a [`ScenePlannedDraw`], so no general scene encoder can accidentally
-/// submit private HUD instances through the ordinary storage-buffer path.
+/// Fixed scene-v2 screen-space schedule. The sealed HUD marker lives in the
+/// world plan; chrome contains only status, trouble, and dim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SceneChromePlan {
     /// Status and trouble.
     pub(super) prefix: [ScenePlannedDraw; 2],
-    pub(super) hud: SceneHudMarker,
     /// Dim overlay.
     pub(super) suffix: [ScenePlannedDraw; 1],
 }
@@ -453,6 +451,7 @@ pub(super) struct SceneDrawPlan {
     /// Immutable lookup table. [`PersistentBlendOrder`] supplies the current
     /// camera-depth order without rebuilding this generation-owned storage.
     pub(super) world_blended_unsorted: Vec<ScenePlannedDraw>,
+    pub(super) hud: SceneHudMarker,
     pub(super) chrome: SceneChromePlan,
 }
 
@@ -798,8 +797,7 @@ pub(super) fn validate_scene_draw_plan(
 ) -> Result<SceneDrawPlan, SceneDrawPlanError> {
     const CHROME_PREFIX_BINDINGS: [u32; 2] = [3, 6];
     const CHROME_SUFFIX_BINDINGS: [u32; 1] = [7];
-    const CHROME_DRAW_COUNT: usize =
-        CHROME_PREFIX_BINDINGS.len() + 1 + CHROME_SUFFIX_BINDINGS.len();
+    const CHROME_DRAW_COUNT: usize = CHROME_PREFIX_BINDINGS.len() + CHROME_SUFFIX_BINDINGS.len();
 
     if primitives.len() != draws.len() {
         return Err(SceneDrawPlanError::MetadataLengthMismatch);
@@ -820,19 +818,29 @@ pub(super) fn validate_scene_draw_plan(
         )?);
     }
     let mut world_blended_unsorted = Vec::with_capacity(phases.world_blended_unsorted.len());
+    let mut hud = None;
     for primitive_index in phases.world_blended_unsorted.iter().copied() {
-        world_blended_unsorted.push(validate_planned_draw(
+        let planned = validate_planned_draw(
             primitives,
             draws,
             &mut seen,
             primitive_index,
             SceneDrawPhase::WorldBlended,
-        )?);
+        )?;
+        if planned.pipeline == ScenePipelineClass::WorldHud {
+            if hud.is_some() {
+                return Err(SceneDrawPlanError::InvalidChromeSchedule);
+            }
+            hud = Some(SceneHudMarker {
+                primitive_index,
+                authored_order: planned.authored_order,
+            });
+        }
+        world_blended_unsorted.push(planned);
     }
 
     let mut prefix: [Option<ScenePlannedDraw>; CHROME_PREFIX_BINDINGS.len()] =
         std::array::from_fn(|_| None);
-    let mut hud = None;
     let mut suffix: [Option<ScenePlannedDraw>; CHROME_SUFFIX_BINDINGS.len()] =
         std::array::from_fn(|_| None);
     let mut previous_authored_order: Option<u32> = None;
@@ -846,7 +854,7 @@ pub(super) fn validate_scene_draw_plan(
         )?;
         let primitive = primitives[primitive_index as usize];
         if let Some(previous) = previous_authored_order {
-            if previous.checked_add(1) != Some(primitive.authored_order) {
+            if previous >= primitive.authored_order {
                 return Err(SceneDrawPlanError::InvalidChromeSchedule);
             }
         }
@@ -858,13 +866,7 @@ pub(super) fn validate_scene_draw_plan(
             {
                 prefix[position] = Some(planned);
             }
-            2 if planned.pipeline == ScenePipelineClass::SealedHudHook => {
-                hud = Some(SceneHudMarker {
-                    primitive_index,
-                    authored_order: primitive.authored_order,
-                });
-            }
-            3 if planned.pipeline == ScenePipelineClass::ChromeAnalytic
+            2 if planned.pipeline == ScenePipelineClass::ChromeAnalytic
                 && primitive.binding_index == CHROME_SUFFIX_BINDINGS[0] =>
             {
                 suffix[0] = Some(planned);
@@ -879,9 +881,9 @@ pub(super) fn validate_scene_draw_plan(
     Ok(SceneDrawPlan {
         opaque,
         world_blended_unsorted,
+        hud: hud.ok_or(SceneDrawPlanError::InvalidChromeSchedule)?,
         chrome: SceneChromePlan {
             prefix: prefix.map(|value| value.expect("validated chrome prefix is complete")),
-            hud: hud.ok_or(SceneDrawPlanError::InvalidChromeSchedule)?,
             suffix: suffix.map(|value| value.expect("validated chrome suffix is complete")),
         },
     })
@@ -918,11 +920,9 @@ fn validate_planned_draw(
                 | ScenePipelineClass::WorldMultiplyGlyphMask
                 | ScenePipelineClass::WorldSourceOverGlyphMask
                 | ScenePipelineClass::WorldAdditiveGlyph
+                | ScenePipelineClass::WorldHud
         ),
-        SceneDrawPhase::Chrome => matches!(
-            pipeline,
-            ScenePipelineClass::ChromeAnalytic | ScenePipelineClass::SealedHudHook
-        ),
+        SceneDrawPhase::Chrome => pipeline == ScenePipelineClass::ChromeAnalytic,
     };
     if !valid_phase {
         return Err(SceneDrawPlanError::InvalidPhaseClass);
@@ -2300,7 +2300,7 @@ pub(super) struct SceneBasePipelines {
     pub(super) world_additive_glyph: wgpu::RenderPipeline,
     pub(super) world_additive_analytic_reserved: wgpu::RenderPipeline,
     pub(super) chrome_analytic: wgpu::RenderPipeline,
-    pub(super) chrome_hud: wgpu::RenderPipeline,
+    pub(super) world_hud: wgpu::RenderPipeline,
     pub(super) aperture_composite: wgpu::RenderPipeline,
     pub(super) aperture_surface: wgpu::RenderPipeline,
     pub(super) final_surface: wgpu::RenderPipeline,
@@ -2322,8 +2322,8 @@ impl SceneBasePipelines {
             ScenePipelineClass::WorldAdditiveAnalyticReserved => {
                 &self.world_additive_analytic_reserved
             }
+            ScenePipelineClass::WorldHud => &self.world_hud,
             ScenePipelineClass::ChromeAnalytic => &self.chrome_analytic,
-            ScenePipelineClass::SealedHudHook => &self.chrome_hud,
         }
     }
 }
@@ -2607,9 +2607,9 @@ fn create_scene_base_pipelines(
         "glorp-scene-chrome-analytic",
         ScenePipelineClass::ChromeAnalytic,
     );
-    let hud_contract = scene_pipeline_contract(ScenePipelineClass::SealedHudHook);
-    let chrome_hud = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("glorp-scene-chrome-hud"),
+    let hud_contract = scene_pipeline_contract(ScenePipelineClass::WorldHud);
+    let world_hud = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("glorp-scene-world-hud"),
         layout: Some(&hud_pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -2618,7 +2618,13 @@ fn create_scene_base_pipelines(
             buffers: &[],
         },
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: SceneTextureContract::DEPTH,
+            depth_write_enabled: hud_contract.depth_write_enabled,
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
@@ -2720,7 +2726,7 @@ fn create_scene_base_pipelines(
         world_additive_glyph,
         world_additive_analytic_reserved,
         chrome_analytic,
-        chrome_hud,
+        world_hud,
         aperture_composite,
         aperture_surface,
         final_surface,
@@ -2994,11 +3000,11 @@ impl GpuSceneCandidate {
             .saturating_add(self.draw_plan.world_blended_unsorted.len())
             .saturating_add(self.draw_plan.chrome.prefix.len())
             .saturating_add(self.draw_plan.chrome.suffix.len());
-        // The renderer also issues one fixed HUD hook, aperture composite, and
-        // final surface pass for every direct-scene submission.
+        // The world count already includes the sealed HUD marker. The renderer
+        // also issues aperture composite and final surface draws.
         u64::try_from(scene_draws)
             .unwrap_or(u64::MAX)
-            .saturating_add(3)
+            .saturating_add(2)
     }
 }
 
@@ -3006,36 +3012,38 @@ pub(super) fn encode_sensitive_hud_hook(
     encoder: &mut wgpu::CommandEncoder,
     staging_belt: &mut wgpu::util::StagingBelt,
     target: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
     shared: &SceneGpuShared,
     candidate: &mut GpuSceneCandidate,
     prepared: &super::hud::SensitivePreparedHudFrame,
 ) -> Result<(), super::hud::HudGpuStagingError> {
     let bindings = super::hud::HudDrawBindings::new(
-        &shared.pipelines.chrome_hud,
+        &shared.pipelines.world_hud,
         &candidate.scene_bind_group,
         &candidate.atlas_bind_group,
     );
     candidate
         .hud
-        .encode_sensitive(staging_belt, encoder, target, bindings, prepared)
+        .encode_sensitive(staging_belt, encoder, target, depth, bindings, prepared)
 }
 
 pub(super) fn encode_redacted_hud_hook(
     encoder: &mut wgpu::CommandEncoder,
     staging_belt: &mut wgpu::util::StagingBelt,
     target: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
     shared: &SceneGpuShared,
     candidate: &mut GpuSceneCandidate,
     prepared: &super::hud::CaptureSafePreparedHudFrame,
 ) -> Result<(), super::hud::HudGpuStagingError> {
     let bindings = super::hud::HudDrawBindings::new(
-        &shared.pipelines.chrome_hud,
+        &shared.pipelines.world_hud,
         &candidate.scene_bind_group,
         &candidate.atlas_bind_group,
     );
     candidate
         .hud
-        .encode_redacted_capture(staging_belt, encoder, target, bindings, prepared)
+        .encode_redacted_capture(staging_belt, encoder, target, depth, bindings, prepared)
 }
 
 #[derive(Clone, Copy)]
@@ -3057,17 +3065,25 @@ impl PreparedCaptureHud<'_> {
         encoder: &mut wgpu::CommandEncoder,
         staging_belt: &mut wgpu::util::StagingBelt,
         target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
         shared: &SceneGpuShared,
         candidate: &mut GpuSceneCandidate,
     ) -> Result<(), super::hud::HudGpuStagingError> {
         match self {
-            Self::Redacted(prepared) => {
-                encode_redacted_hud_hook(encoder, staging_belt, target, shared, candidate, prepared)
-            }
+            Self::Redacted(prepared) => encode_redacted_hud_hook(
+                encoder,
+                staging_belt,
+                target,
+                depth,
+                shared,
+                candidate,
+                prepared,
+            ),
             Self::Sensitive(prepared) => encode_sensitive_hud_hook(
                 encoder,
                 staging_belt,
                 target,
+                depth,
                 shared,
                 candidate,
                 prepared,
@@ -4252,31 +4268,14 @@ impl SceneRenderer {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("glorp-scene-activation-encoder"),
             });
-            encode_scene_world(&mut encoder, targets, shared, candidate);
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-activation-chrome-prefix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.prefix,
-            );
-            encode_sensitive_hud_hook(
+            encode_scene_with_sealed_hud(
                 &mut encoder,
                 &mut self.staging_belt,
-                &targets.raw_scene_view,
+                targets,
                 shared,
                 candidate,
-                prepared_hud,
+                PreparedCaptureHud::Sensitive(prepared_hud),
             )?;
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-activation-chrome-suffix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.suffix,
-            );
             encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
             self.staging_belt.finish();
             Ok::<_, super::hud::HudGpuStagingError>(encoder.finish())
@@ -4594,31 +4593,14 @@ impl SceneRenderer {
             } else {
                 Duration::ZERO
             };
-            encode_scene_world(&mut encoder, targets, shared, candidate);
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-lifetime-chrome-prefix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.prefix,
-            );
-            encode_sensitive_hud_hook(
+            encode_scene_with_sealed_hud(
                 &mut encoder,
                 &mut self.staging_belt,
-                &targets.raw_scene_view,
+                targets,
                 shared,
                 candidate,
-                prepared_hud,
+                PreparedCaptureHud::Sensitive(prepared_hud),
             )?;
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-lifetime-chrome-suffix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.suffix,
-            );
             encode_aperture_composite(&mut encoder, targets, shared, candidate);
             let encode_elapsed = encode_started_at
                 .elapsed()
@@ -4854,31 +4836,14 @@ impl SceneRenderer {
             } else {
                 Duration::ZERO
             };
-            encode_scene_world(&mut encoder, targets, shared, candidate);
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-active-chrome-prefix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.prefix,
-            );
-            encode_sensitive_hud_hook(
+            encode_scene_with_sealed_hud(
                 &mut encoder,
                 &mut self.staging_belt,
-                &targets.raw_scene_view,
+                targets,
                 shared,
                 candidate,
-                prepared_hud,
+                PreparedCaptureHud::Sensitive(prepared_hud),
             )?;
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-active-chrome-suffix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.suffix,
-            );
             encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
             let encode_elapsed = encode_started_at
                 .elapsed()
@@ -5134,32 +5099,14 @@ impl SceneRenderer {
                     )
                 })
                 .unwrap_or(0);
-            encode_scene_world(&mut encoder, targets, shared, candidate);
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-chrome-prefix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.prefix,
-            );
-            // This is the only HUD draw in the general scene schedule. The hook
-            // rechecks generation immediately before its one fixed upload.
-            prepared_hud.encode(
+            encode_scene_with_sealed_hud(
                 &mut encoder,
                 &mut self.staging_belt,
-                &targets.raw_scene_view,
+                targets,
                 shared,
                 candidate,
+                prepared_hud,
             )?;
-            encode_scene_draws_without_depth(
-                &mut encoder,
-                "glorp-scene-chrome-suffix",
-                &targets.raw_scene_view,
-                shared,
-                candidate,
-                &candidate.draw_plan.chrome.suffix,
-            );
             encode_aperture_composite(&mut encoder, targets, shared, candidate);
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
@@ -5423,14 +5370,46 @@ fn encode_scene_delta_copies(
     copies
 }
 
-fn encode_scene_world(
+fn encode_scene_with_sealed_hud(
+    encoder: &mut wgpu::CommandEncoder,
+    staging_belt: &mut wgpu::util::StagingBelt,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &mut GpuSceneCandidate,
+    prepared_hud: PreparedCaptureHud<'_>,
+) -> Result<(), super::hud::HudGpuStagingError> {
+    let hud_order_position = candidate
+        .blended_order
+        .active_draw_indices()
+        .iter()
+        .position(|draw_index| {
+            candidate.draw_plan.world_blended_unsorted[usize::from(*draw_index)].primitive_index
+                == candidate.draw_plan.hud.primitive_index
+        })
+        .expect("validated transparent order contains the sealed world HUD marker");
+    encode_scene_world_prefix(encoder, targets, shared, candidate, hud_order_position);
+    prepared_hud.encode(
+        encoder,
+        staging_belt,
+        &targets.raw_scene_view,
+        &targets.depth_view,
+        shared,
+        candidate,
+    )?;
+    encode_scene_world_suffix(encoder, targets, shared, candidate, hud_order_position);
+    encode_scene_chrome(encoder, &targets.raw_scene_view, shared, candidate);
+    Ok(())
+}
+
+fn encode_scene_world_prefix(
     encoder: &mut wgpu::CommandEncoder,
     targets: &SceneTargets,
     shared: &SceneGpuShared,
     candidate: &GpuSceneCandidate,
+    hud_order_position: usize,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("glorp-scene-world"),
+        label: Some("glorp-scene-world-prefix"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &targets.raw_scene_view,
             depth_slice: None,
@@ -5444,7 +5423,7 @@ fn encode_scene_world(
             view: &targets.depth_view,
             depth_ops: Some(wgpu::Operations {
                 load: wgpu::LoadOp::Clear(1.0),
-                store: wgpu::StoreOp::Discard,
+                store: wgpu::StoreOp::Store,
             }),
             stencil_ops: None,
         }),
@@ -5456,22 +5435,57 @@ fn encode_scene_world(
     }
     for run in BlendedDrawRuns::new(
         &candidate.draw_plan.world_blended_unsorted,
-        candidate.blended_order.active_draw_indices(),
+        &candidate.blended_order.active_draw_indices()[..hud_order_position],
     ) {
         encode_blended_run(&mut pass, shared, &run);
     }
 }
 
-fn encode_scene_draws_without_depth<const N: usize>(
+fn encode_scene_world_suffix(
     encoder: &mut wgpu::CommandEncoder,
-    label: &'static str,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+    hud_order_position: usize,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-world-suffix"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.raw_scene_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    bind_scene_geometry(&mut pass, candidate);
+    for run in BlendedDrawRuns::new(
+        &candidate.draw_plan.world_blended_unsorted,
+        &candidate.blended_order.active_draw_indices()[hud_order_position + 1..],
+    ) {
+        encode_blended_run(&mut pass, shared, &run);
+    }
+}
+
+fn encode_scene_chrome(
+    encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::TextureView,
     shared: &SceneGpuShared,
     candidate: &GpuSceneCandidate,
-    draws: &[ScenePlannedDraw; N],
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some(label),
+        label: Some("glorp-scene-chrome"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: target,
             depth_slice: None,
@@ -5484,7 +5498,13 @@ fn encode_scene_draws_without_depth<const N: usize>(
         ..Default::default()
     });
     bind_scene_geometry(&mut pass, candidate);
-    for draw in draws {
+    for draw in candidate
+        .draw_plan
+        .chrome
+        .prefix
+        .iter()
+        .chain(candidate.draw_plan.chrome.suffix.iter())
+    {
         encode_planned_draw(&mut pass, shared, draw);
     }
 }
@@ -5666,6 +5686,38 @@ mod tests {
         let order = PersistentBlendOrder::new(&templates, IDENTITY_MATRIX, &worlds).unwrap();
 
         assert_eq!(order.committed_draw_indices(), &[2, 3, 1, 0]);
+
+        let crossing = BlendedDrawTemplates::from_slice(&[
+            BlendedDrawTemplate::new(0, 0, 10, 0),
+            BlendedDrawTemplate::new(1, 1, 20, 1),
+        ])
+        .unwrap();
+        let boundary = crate::round::depth::COMPANION_STATISTICS_Z;
+        let tied = PersistentBlendOrder::new(
+            &crossing,
+            IDENTITY_MATRIX,
+            &[translated_z(boundary), translated_z(boundary)],
+        )
+        .unwrap();
+        assert_eq!(
+            tied.committed_draw_indices(),
+            &[0, 1],
+            "authored order keeps the sealed HUD after the pet at equality"
+        );
+        let crossed = PersistentBlendOrder::new(
+            &crossing,
+            IDENTITY_MATRIX,
+            &[
+                translated_z(f32::from_bits(boundary.to_bits() + 1)),
+                translated_z(boundary),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            crossed.committed_draw_indices(),
+            &[1, 0],
+            "the next f32 places the pet after the sealed HUD"
+        );
     }
 
     #[test]
@@ -5816,7 +5868,7 @@ mod tests {
             &upload.frame_bytes,
         )
         .unwrap();
-        assert_eq!(order.committed_draw_indices(), &[5, 0, 1, 2, 3, 4]);
+        assert_eq!(order.committed_draw_indices(), &[6, 0, 1, 2, 3, 4, 5]);
 
         let to = crate::presentation::companion_scene::AppliedRevisions::new(4, 6);
         let mut content = ContentDelta::empty();
@@ -5846,10 +5898,10 @@ mod tests {
                 true,
             )
             .unwrap();
-        assert_eq!(order.pending_draw_indices(), &[4, 5, 0, 1, 2, 3]);
+        assert_eq!(order.pending_draw_indices(), &[5, 6, 0, 1, 2, 3, 4]);
         state.reset_pending();
         order.discard_pending();
-        assert_eq!(order.committed_draw_indices(), &[5, 0, 1, 2, 3, 4]);
+        assert_eq!(order.committed_draw_indices(), &[6, 0, 1, 2, 3, 4, 5]);
 
         stage_prepared_scene_delta(&mut state, &prepared).unwrap();
         order
@@ -5862,7 +5914,7 @@ mod tests {
         cpu.commit_prepared(prepared);
         state.commit_pending();
         order.commit_pending();
-        assert_eq!(order.committed_draw_indices(), &[4, 5, 0, 1, 2, 3]);
+        assert_eq!(order.committed_draw_indices(), &[5, 6, 0, 1, 2, 3, 4]);
     }
 
     /// CPU-side reference vectors for the family-aware WGSL glyph placement
@@ -6448,7 +6500,7 @@ mod tests {
         }
 
         let copies = inner.find("encode_scene_delta_copies(").unwrap();
-        let first_draw = inner.find("encode_scene_world(").unwrap();
+        let first_draw = inner.find("encode_scene_with_sealed_hud(").unwrap();
         let finish = inner.find("self.staging_belt.finish();").unwrap();
         let submit = inner.find("queue.submit([encoder.finish()])").unwrap();
         let recall = inner.find("self.staging_belt.recall();").unwrap();
@@ -6647,9 +6699,9 @@ mod tests {
                 ChromeAnalytic,
             ),
             (
-                pipeline_primitive(4, 6, 1, 3, 3, 2, 8, 0),
+                pipeline_primitive(4, 1, 1, 3, 2, 1, 8, 0),
                 sealed_hud_draw(),
-                SealedHudHook,
+                WorldHud,
             ),
         ];
         for (primitive, draw, expected) in &cases {
@@ -6673,7 +6725,7 @@ mod tests {
             pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 10),
             pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 3),
             pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 6),
-            pipeline_primitive(4, 6, 1, 3, 3, 2, 8, 0),
+            pipeline_primitive(4, 1, 1, 3, 2, 1, 8, 0),
             pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 7),
         ];
         let mut draws = vec![
@@ -6699,8 +6751,8 @@ mod tests {
             draws,
             ScenePhaseTable {
                 opaque_cutout: vec![0],
-                world_blended_unsorted: vec![1, 2, 3, 4],
-                chrome_authored: vec![5, 6, 7, 8],
+                world_blended_unsorted: vec![1, 2, 3, 4, 7],
+                chrome_authored: vec![5, 6, 8],
             },
         )
     }
@@ -6730,18 +6782,20 @@ mod tests {
                 (2, ScenePipelineClass::WorldSourceOverAnalytic),
                 (3, ScenePipelineClass::WorldSourceOverAnalytic),
                 (4, ScenePipelineClass::WorldSourceOverAnalytic),
+                (7, ScenePipelineClass::WorldHud),
             ],
         );
         assert_eq!(
             plan.chrome.prefix.map(|draw| draw.primitive_index),
             [5, 6],
-            "status and trouble stay before the sealed HUD hook",
+            "status and trouble remain the canonical chrome prefix",
         );
-        assert_eq!(plan.chrome.hud.primitive_index, 7);
+        assert_eq!(plan.hud.primitive_index, 7);
+        assert_eq!(plan.hud.authored_order, 7);
         assert_eq!(
             plan.chrome.suffix.map(|draw| draw.primitive_index),
             [8],
-            "dim is the only post-HUD chrome draw",
+            "dim remains the final authored screen-space draw",
         );
     }
 
@@ -6756,6 +6810,47 @@ mod tests {
                 Err(expected),
             );
         };
+
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases
+            .world_blended_unsorted
+            .retain(|primitive_index| *primitive_index != 7);
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::MissingPrimitive,
+        );
+
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases.world_blended_unsorted.push(7);
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::DuplicatePrimitive,
+        );
+
+        let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
+        phases
+            .world_blended_unsorted
+            .retain(|primitive_index| *primitive_index != 7);
+        phases.chrome_authored[2] = 7;
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::InvalidPhaseClass,
+        );
+
+        let (mut primitives, draws, phases) = canonical_draw_plan_fixture();
+        primitives[7].instance_group = 0;
+        assert_invalid(
+            &primitives,
+            &draws,
+            &phases,
+            SceneDrawPlanError::InvalidPipelineClass,
+        );
 
         let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
         phases.chrome_authored.remove(2);
@@ -6776,7 +6871,7 @@ mod tests {
         );
 
         let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
-        phases.chrome_authored.swap(3, 2);
+        phases.chrome_authored.swap(2, 1);
         assert_invalid(
             &primitives,
             &draws,
@@ -6933,7 +7028,7 @@ mod tests {
         let mut nonsealed_hud = pipeline_draw(PrimitiveSource::Instances(InstanceSource::Hud));
         nonsealed_hud.instance_range = 0..1;
         assert_eq!(
-            scene_pipeline_class(pipeline_primitive(4, 6, 1, 3, 3, 2, 8, 0), &nonsealed_hud,),
+            scene_pipeline_class(pipeline_primitive(4, 1, 1, 3, 2, 1, 8, 0), &nonsealed_hud,),
             None,
             "HUD must remain the sealed zero-instance hook",
         );
@@ -7056,11 +7151,11 @@ mod tests {
                 None,
             ),
             (
-                SealedHudHook,
+                WorldHud,
                 "vs_hud",
                 "fs_hud",
                 Some(SceneBlendContract::SourceOver),
-                None,
+                Some(false),
             ),
         ];
         for (class, vertex_entry, fragment_entry, blend, depth_write_enabled) in cases {
@@ -7571,11 +7666,13 @@ mod tests {
         let mut fixture = SceneFixture::valid();
         let alias = |value: &str| CanonicalAlias::new(value).unwrap();
         let unlit_alias = alias("material.scene-unlit-analytic");
+        let glyph_alias = alias("material.scene-unlit-glyph");
         let multiply_alias = alias("material.scene-multiply");
         let chrome_alias = alias("material.scene-chrome");
         let analytic_resource_alias = alias("resource.scene-analytic");
         let hud_resource_alias = alias("resource.scene-hud-atlas");
         let unlit = MaterialId::from_alias(&unlit_alias);
+        let glyph = MaterialId::from_alias(&glyph_alias);
         let multiply = MaterialId::from_alias(&multiply_alias);
         let chrome = MaterialId::from_alias(&chrome_alias);
         let analytic_resource = ResourceId::from_alias(&analytic_resource_alias);
@@ -7585,6 +7682,11 @@ mod tests {
                 id: unlit,
                 alias: unlit_alias,
                 kind: MaterialKind::UnlitAnalytic,
+            },
+            MaterialTemplate {
+                id: glyph,
+                alias: glyph_alias,
+                kind: MaterialKind::UnlitGlyphSprite,
             },
             MaterialTemplate {
                 id: multiply,
@@ -7688,14 +7790,14 @@ mod tests {
             PrimitiveTemplate {
                 node,
                 kind: PrimitiveKind::InstanceQuad,
-                material: chrome,
+                material: glyph,
                 resource: Some(hud_resource),
                 blend: WorldBlend::PremultipliedAlpha,
-                depth: DepthBehavior::ScreenNoDepth,
+                depth: DepthBehavior::WorldReadOnly,
                 binding: PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
                 authored_order: 7,
                 local_geometry: bounds,
-                space: PrimitiveSpace::Screen,
+                space: PrimitiveSpace::World,
             },
             analytic(
                 7,
@@ -8959,14 +9061,14 @@ mod tests {
         assert!(surface_encoder.contains("&targets.aperture_bind_group"));
 
         let world_encoder = rust_source
-            .split("fn encode_scene_world(")
+            .split("fn encode_scene_world_prefix(")
             .nth(1)
             .unwrap()
-            .split("fn encode_scene_draws_without_depth")
+            .split("fn encode_scene_world_suffix(")
             .next()
             .unwrap();
         assert!(world_encoder.contains("load: wgpu::LoadOp::Clear(1.0)"));
-        assert!(world_encoder.contains("store: wgpu::StoreOp::Discard"));
+        assert!(world_encoder.contains("store: wgpu::StoreOp::Store"));
     }
 
     #[test]
@@ -9131,7 +9233,7 @@ mod tests {
             "glyph_entry_index: u32",
             "role: u32",
             "visible: u32",
-            "padding: u32",
+            "scene_z: f32",
             "@group(3) @binding(0) var<storage, read> hud_glyph_buffer",
             "fn vs_hud(",
             "@builtin(vertex_index) vertex_index: u32",
@@ -9158,6 +9260,8 @@ mod tests {
             .find("vec4<f32>(2.0, 2.0, 0.0, 1.0)")
             .expect("off-clip output");
         assert!(invisible < off_clip);
+        assert!(vertex.contains("vec4<f32>(point_position, instance.scene_z, 1.0)"));
+        assert!(vertex.contains("frame_buffer.globals.projection * frame_buffer.globals.view"));
 
         let fragment = SCENE_SHADER_SOURCE
             .split("fn fs_hud(")
@@ -10792,10 +10896,7 @@ mod tests {
                 ScenePipelineClass::ChromeAnalytic,
                 &shared.pipelines.chrome_analytic,
             ),
-            (
-                ScenePipelineClass::SealedHudHook,
-                &shared.pipelines.chrome_hud,
-            ),
+            (ScenePipelineClass::WorldHud, &shared.pipelines.world_hud),
         ] {
             assert!(std::ptr::eq(shared.pipelines.for_class(class), expected));
         }
@@ -12689,8 +12790,8 @@ mod tests {
         assert_eq!(upload.primitives.len(), 22);
         assert_eq!(upload.draws.len(), 22);
         assert_eq!(upload.phases.opaque_cutout.len(), 1);
-        assert_eq!(upload.phases.world_blended_unsorted.len(), 17);
-        assert_eq!(upload.phases.chrome_authored.len(), 4);
+        assert_eq!(upload.phases.world_blended_unsorted.len(), 18);
+        assert_eq!(upload.phases.chrome_authored.len(), 3);
         assert_eq!(
             upload
                 .draws
@@ -12918,8 +13019,8 @@ mod tests {
                 ),
                 (
                     20,
-                    SceneDrawPhase::Chrome,
-                    ScenePipelineClass::SealedHudHook,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldHud,
                     PrimitiveSource::Instances(InstanceSource::Hud),
                     0,
                     20
@@ -12943,7 +13044,7 @@ mod tests {
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyphMask), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldAdditiveGlyph), 2);
         assert_eq!(class_count(ScenePipelineClass::ChromeAnalytic), 3);
-        assert_eq!(class_count(ScenePipelineClass::SealedHudHook), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldHud), 1);
         assert_eq!(
             class_count(ScenePipelineClass::WorldAdditiveAnalyticReserved),
             0,
@@ -12974,7 +13075,7 @@ mod tests {
         );
         assert_eq!(bindings_for(ScenePipelineClass::WorldAdditiveGlyph), [0, 0],);
         assert_eq!(bindings_for(ScenePipelineClass::ChromeAnalytic), [3, 6, 7],);
-        assert_eq!(bindings_for(ScenePipelineClass::SealedHudHook), [0]);
+        assert_eq!(bindings_for(ScenePipelineClass::WorldHud), [0]);
 
         let source_count = |source| {
             upload
@@ -13136,7 +13237,7 @@ mod tests {
                 .iter()
                 .map(|draw| draw.primitive_index)
                 .collect::<Vec<_>>(),
-            (1..=17).collect::<Vec<_>>(),
+            (1..=17).chain([20]).collect::<Vec<_>>(),
         );
         assert_eq!(
             candidate
@@ -13148,7 +13249,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [18, 19],
         );
-        assert_eq!(candidate.draw_plan.chrome.hud.primitive_index, 20);
+        assert_eq!(candidate.draw_plan.hud.primitive_index, 20);
         assert_eq!(candidate.draw_plan.chrome.suffix[0].primitive_index, 21);
 
         let prepared_hud = candidate
@@ -13255,8 +13356,8 @@ mod tests {
             ("prop 0", &[5]),
             ("prop 1", &[6]),
             ("pet particles", &[12]),
-            ("gauges", &[15]),
-            ("status", &[16]),
+            ("gauges", &[15, 16, 17]),
+            ("status", &[18]),
         ];
         for (label, primitive_indices) in active_layer_omissions {
             candidate.draw_plan = baseline_plan.clone();
@@ -13323,7 +13424,7 @@ mod tests {
             )
             .expect("dimmed production frame renders");
         let dimmed_plan = dimmed_candidate.draw_plan.clone();
-        for (label, primitive_index) in [("trouble", 17), ("dim", 19)] {
+        for (label, primitive_index) in [("trouble", 19), ("dim", 21)] {
             dimmed_candidate.draw_plan = dimmed_plan.clone();
             suppress(&mut dimmed_candidate.draw_plan, primitive_index);
             let without_layer = renderer
@@ -13842,6 +13943,21 @@ mod tests {
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glorp-hud-hook-test-depth"),
+            size: wgpu::Extent3d {
+                width: EXTENT,
+                height: EXTENT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SceneTextureContract::DEPTH,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("glorp-hud-hook-test-encoder"),
         });
@@ -13857,6 +13973,14 @@ mod tests {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
         }
@@ -13865,6 +13989,7 @@ mod tests {
                 &mut encoder,
                 staging_belt,
                 &view,
+                &depth_view,
                 shared,
                 candidate,
                 prepared,
@@ -13873,6 +13998,7 @@ mod tests {
                 &mut encoder,
                 staging_belt,
                 &view,
+                &depth_view,
                 shared,
                 candidate,
                 prepared,
@@ -14074,10 +14200,26 @@ mod tests {
             view_formats: &[],
         });
         let failed_view = failed_target.create_view(&wgpu::TextureViewDescriptor::default());
+        let failed_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glorp-rejected-hud-stage-depth"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SceneTextureContract::DEPTH,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let failed_depth_view = failed_depth.create_view(&wgpu::TextureViewDescriptor::default());
         let error = encode_sensitive_hud_hook(
             &mut failed_encoder,
             &mut belt,
             &failed_view,
+            &failed_depth_view,
             &shared,
             &mut candidate,
             &mismatched,
