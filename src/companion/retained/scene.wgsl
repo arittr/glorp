@@ -575,6 +575,8 @@ fn expected_analytic_shape(analytic_id: u32) -> u32 {
         case 6u: { return 7u; }
         case 7u: { return 8u; }
         case 8u: { return 9u; }
+        case 9u: { return 6u; }
+        case 10u: { return 6u; }
         default: { return NONE_U32; }
     }
 }
@@ -585,7 +587,7 @@ fn valid_analytic_role(
     content: AnalyticContentGpuValue,
 ) -> bool {
     let expected_shape = expected_analytic_shape(analytic_id);
-    return analytic_id < 9u
+    return analytic_id < 11u
         && expected_shape != NONE_U32
         && (analytic.flags & 1u) != 0u
         && (content.flags & 1u) != 0u
@@ -1189,57 +1191,73 @@ fn fs_gauges(
     if ((analytic.flags & 0x00011100u) != 0x00011100u) {
         return vec4<f32>(0.0);
     }
-    // The packed order is xp, daily, daily-overage, pace. Geometry lane order
-    // remains xp, daily, pace.
-    let xp = gauge_arc_color(input, content, analytic, 0u, frame_buffer.globals.gauges.x);
-    let daily = gauge_arc_color(input, content, analytic, 1u, frame_buffer.globals.gauges.y);
-    let pace = gauge_arc_color(input, content, analytic, 2u, frame_buffer.globals.gauges.w);
-    let daily_geometry = gauge_lane_geometry(analytic, 1u);
-    let daily_excess = max(frame_buffer.globals.gauges.z, 0.0);
-    let completed_rollovers = floor(daily_excess);
-    let current_fraction = daily_excess - completed_rollovers;
-    let first_rollover = packed_rgba8_linear(content.payload[1].z);
-    let rollover_contract = packed_rgba8_unorm(content.payload[1].w);
-    var completed_overage = vec4<f32>(0.0);
-    if (completed_rollovers >= 1.0) {
-        let completed_coverage = round_arc_coverage(
-            input.point_position,
-            analytic.payload[0].xy,
-            daily_geometry.x,
-            daily_geometry.y,
-            daily_geometry.z,
-            daily_geometry.w,
-        );
-        completed_overage = analytic_premultiply(
-            daily_rollover_color(first_rollover, rollover_contract, completed_rollovers),
-            completed_coverage,
-            input.opacity,
-            input.saturation,
-        );
+    // Paint payload order remains xp, daily, daily-overage, pace. Geometry
+    // lane order remains xp, daily, pace. Each retained semantic emits only
+    // its own annulus so the three world primitives cannot triple-render it.
+    switch input.analytic_id {
+        case 5u: {
+            return gauge_arc_color(
+                input, content, analytic, 2u, frame_buffer.globals.gauges.w,
+            );
+        }
+        case 9u: {
+            let daily = gauge_arc_color(
+                input, content, analytic, 1u, frame_buffer.globals.gauges.y,
+            );
+            let daily_geometry = gauge_lane_geometry(analytic, 1u);
+            let daily_excess = max(frame_buffer.globals.gauges.z, 0.0);
+            let completed_rollovers = floor(daily_excess);
+            let current_fraction = daily_excess - completed_rollovers;
+            let first_rollover = packed_rgba8_linear(content.payload[1].z);
+            let rollover_contract = packed_rgba8_unorm(content.payload[1].w);
+            var completed_overage = vec4<f32>(0.0);
+            if (completed_rollovers >= 1.0) {
+                let completed_coverage = round_arc_coverage(
+                    input.point_position,
+                    analytic.payload[0].xy,
+                    daily_geometry.x,
+                    daily_geometry.y,
+                    daily_geometry.z,
+                    daily_geometry.w,
+                );
+                completed_overage = analytic_premultiply(
+                    daily_rollover_color(first_rollover, rollover_contract, completed_rollovers),
+                    completed_coverage,
+                    input.opacity,
+                    input.saturation,
+                );
+            }
+            var current_overage = vec4<f32>(0.0);
+            if (current_fraction > 0.0) {
+                let current_coverage = round_arc_coverage(
+                    input.point_position,
+                    analytic.payload[0].xy,
+                    daily_geometry.x,
+                    daily_geometry.y,
+                    daily_geometry.z,
+                    daily_geometry.w * clamp(current_fraction, 0.0, 1.0),
+                );
+                current_overage = analytic_premultiply(
+                    daily_rollover_color(
+                        first_rollover,
+                        rollover_contract,
+                        completed_rollovers + 1.0,
+                    ),
+                    current_coverage,
+                    input.opacity,
+                    input.saturation,
+                );
+            }
+            let overage = over_premultiplied(current_overage, completed_overage);
+            return over_premultiplied(overage, daily);
+        }
+        case 10u: {
+            return gauge_arc_color(
+                input, content, analytic, 0u, frame_buffer.globals.gauges.x,
+            );
+        }
+        default: { return vec4<f32>(0.0); }
     }
-    var current_overage = vec4<f32>(0.0);
-    if (current_fraction > 0.0) {
-        let current_coverage = round_arc_coverage(
-            input.point_position,
-            analytic.payload[0].xy,
-            daily_geometry.x,
-            daily_geometry.y,
-            daily_geometry.z,
-            daily_geometry.w * clamp(current_fraction, 0.0, 1.0),
-        );
-        current_overage = analytic_premultiply(
-            daily_rollover_color(
-                first_rollover,
-                rollover_contract,
-                completed_rollovers + 1.0,
-            ),
-            current_coverage,
-            input.opacity,
-            input.saturation,
-        );
-    }
-    let overage = over_premultiplied(current_overage, completed_overage);
-    return over_premultiplied(pace, over_premultiplied(overage, over_premultiplied(daily, xp)));
 }
 
 fn fs_trouble(
@@ -1301,6 +1319,8 @@ fn fs_analytic(input: SceneVertexOutput) -> @location(0) vec4<f32> {
         case 6u: { output = fs_trouble(input, content, analytic); }
         case 7u: { output = fs_dim(input, content, analytic); }
         case 8u: { output = fs_prop_shadows(input, content); }
+        case 9u: { output = fs_gauges(input, content, analytic); }
+        case 10u: { output = fs_gauges(input, content, analytic); }
         default: { discard; }
     }
     if (output.a <= 0.0) {

@@ -189,7 +189,7 @@ fn scene_pipeline_class(
         && primitive.blend == 3
         && primitive.depth == 2
         && primitive.space == 1
-        && primitive.binding_index == 4
+        && matches!(primitive.binding_index, 4 | 5 | 9 | 10)
         && draw.source == PrimitiveSource::Analytic
     {
         return Some(WorldSourceOverAnalytic);
@@ -199,7 +199,7 @@ fn scene_pipeline_class(
         && primitive.blend == 3
         && primitive.depth == 3
         && primitive.space == 2
-        && matches!(primitive.binding_index, 3 | 5 | 6 | 7)
+        && matches!(primitive.binding_index, 3 | 6 | 7)
         && draw.source == PrimitiveSource::Analytic
     {
         return Some(ChromeAnalytic);
@@ -440,8 +440,8 @@ pub(super) struct SceneHudMarker {
 /// submit private HUD instances through the ordinary storage-buffer path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SceneChromePlan {
-    /// Gauges, status, trouble.
-    pub(super) prefix: [ScenePlannedDraw; 3],
+    /// Status and trouble.
+    pub(super) prefix: [ScenePlannedDraw; 2],
     pub(super) hud: SceneHudMarker,
     /// Dim overlay.
     pub(super) suffix: [ScenePlannedDraw; 1],
@@ -796,7 +796,7 @@ pub(super) fn validate_scene_draw_plan(
     draws: &[SceneDrawRecord],
     phases: &ScenePhaseTable,
 ) -> Result<SceneDrawPlan, SceneDrawPlanError> {
-    const CHROME_PREFIX_BINDINGS: [u32; 3] = [5, 3, 6];
+    const CHROME_PREFIX_BINDINGS: [u32; 2] = [3, 6];
     const CHROME_SUFFIX_BINDINGS: [u32; 1] = [7];
     const CHROME_DRAW_COUNT: usize =
         CHROME_PREFIX_BINDINGS.len() + 1 + CHROME_SUFFIX_BINDINGS.len();
@@ -852,19 +852,19 @@ pub(super) fn validate_scene_draw_plan(
         }
         previous_authored_order = Some(primitive.authored_order);
         match position {
-            0..=2
+            0..=1
                 if planned.pipeline == ScenePipelineClass::ChromeAnalytic
                     && primitive.binding_index == CHROME_PREFIX_BINDINGS[position] =>
             {
                 prefix[position] = Some(planned);
             }
-            3 if planned.pipeline == ScenePipelineClass::SealedHudHook => {
+            2 if planned.pipeline == ScenePipelineClass::SealedHudHook => {
                 hud = Some(SceneHudMarker {
                     primitive_index,
                     authored_order: primitive.authored_order,
                 });
             }
-            4 if planned.pipeline == ScenePipelineClass::ChromeAnalytic
+            3 if planned.pipeline == ScenePipelineClass::ChromeAnalytic
                 && primitive.binding_index == CHROME_SUFFIX_BINDINGS[0] =>
             {
                 suffix[0] = Some(planned);
@@ -5786,7 +5786,7 @@ mod tests {
                 blend: WorldBlend::PremultipliedAlpha,
                 depth: DepthBehavior::WorldReadOnly,
                 binding: PrimitiveBinding::Analytic(AnalyticParamId(4)),
-                authored_order: 7,
+                authored_order: 9,
                 local_geometry: bounds,
                 space: PrimitiveSpace::World,
             },
@@ -5800,7 +5800,7 @@ mod tests {
                 binding: PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(
                     PetArtFilter::Particles,
                 )),
-                authored_order: 8,
+                authored_order: 10,
                 local_geometry: bounds,
                 space: PrimitiveSpace::World,
             },
@@ -5816,7 +5816,7 @@ mod tests {
             &upload.frame_bytes,
         )
         .unwrap();
-        assert_eq!(order.committed_draw_indices(), &[2, 0, 1]);
+        assert_eq!(order.committed_draw_indices(), &[5, 0, 1, 2, 3, 4]);
 
         let to = crate::presentation::companion_scene::AppliedRevisions::new(4, 6);
         let mut content = ContentDelta::empty();
@@ -5846,10 +5846,10 @@ mod tests {
                 true,
             )
             .unwrap();
-        assert_eq!(order.pending_draw_indices(), &[1, 2, 0]);
+        assert_eq!(order.pending_draw_indices(), &[4, 5, 0, 1, 2, 3]);
         state.reset_pending();
         order.discard_pending();
-        assert_eq!(order.committed_draw_indices(), &[2, 0, 1]);
+        assert_eq!(order.committed_draw_indices(), &[5, 0, 1, 2, 3, 4]);
 
         stage_prepared_scene_delta(&mut state, &prepared).unwrap();
         order
@@ -5862,7 +5862,7 @@ mod tests {
         cpu.commit_prepared(prepared);
         state.commit_pending();
         order.commit_pending();
-        assert_eq!(order.committed_draw_indices(), &[1, 2, 0]);
+        assert_eq!(order.committed_draw_indices(), &[4, 5, 0, 1, 2, 3]);
     }
 
     /// CPU-side reference vectors for the family-aware WGSL glyph placement
@@ -6607,6 +6607,21 @@ mod tests {
                 WorldSourceOverAnalytic,
             ),
             (
+                pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 5),
+                pipeline_draw(PrimitiveSource::Analytic),
+                WorldSourceOverAnalytic,
+            ),
+            (
+                pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 9),
+                pipeline_draw(PrimitiveSource::Analytic),
+                WorldSourceOverAnalytic,
+            ),
+            (
+                pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 10),
+                pipeline_draw(PrimitiveSource::Analytic),
+                WorldSourceOverAnalytic,
+            ),
+            (
                 pipeline_primitive(4, 5, 1, 5, 2, 1, 7, 0),
                 pipeline_draw(PrimitiveSource::Instances(Ambient)),
                 WorldAdditiveGlyph,
@@ -6618,11 +6633,6 @@ mod tests {
             ),
             (
                 pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 3),
-                pipeline_draw(PrimitiveSource::Analytic),
-                ChromeAnalytic,
-            ),
-            (
-                pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 5),
                 pipeline_draw(PrimitiveSource::Analytic),
                 ChromeAnalytic,
             ),
@@ -6658,7 +6668,9 @@ mod tests {
         let mut primitives = vec![
             pipeline_primitive(2, 2, 3, 1, 1, 1, 0, 0),
             pipeline_primitive(2, 4, 3, 4, 2, 1, 0, 2),
-            pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 5),
+            pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 5),
+            pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 9),
+            pipeline_primitive(2, 2, 3, 3, 2, 1, 0, 10),
             pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 3),
             pipeline_primitive(2, 6, 3, 3, 3, 2, 0, 6),
             pipeline_primitive(4, 6, 1, 3, 3, 2, 8, 0),
@@ -6669,6 +6681,8 @@ mod tests {
             pipeline_draw(PrimitiveSource::Instances(
                 InstanceSource::FloorShadowGlyphMask,
             )),
+            pipeline_draw(PrimitiveSource::Analytic),
+            pipeline_draw(PrimitiveSource::Analytic),
             pipeline_draw(PrimitiveSource::Analytic),
             pipeline_draw(PrimitiveSource::Analytic),
             pipeline_draw(PrimitiveSource::Analytic),
@@ -6685,8 +6699,8 @@ mod tests {
             draws,
             ScenePhaseTable {
                 opaque_cutout: vec![0],
-                world_blended_unsorted: vec![1],
-                chrome_authored: vec![2, 3, 4, 5, 6],
+                world_blended_unsorted: vec![1, 2, 3, 4],
+                chrome_authored: vec![5, 6, 7, 8],
             },
         )
     }
@@ -6707,24 +6721,26 @@ mod tests {
             }]
         );
         assert_eq!(
-            plan.world_blended_unsorted,
-            vec![ScenePlannedDraw {
-                primitive_index: 1,
-                pipeline: ScenePipelineClass::WorldMultiplyGlyphMask,
-                index_range: 0..6,
-                instance_range: 0..130,
-                authored_order: 1,
-            }]
+            plan.world_blended_unsorted
+                .iter()
+                .map(|draw| (draw.primitive_index, draw.pipeline))
+                .collect::<Vec<_>>(),
+            [
+                (1, ScenePipelineClass::WorldMultiplyGlyphMask),
+                (2, ScenePipelineClass::WorldSourceOverAnalytic),
+                (3, ScenePipelineClass::WorldSourceOverAnalytic),
+                (4, ScenePipelineClass::WorldSourceOverAnalytic),
+            ],
         );
         assert_eq!(
             plan.chrome.prefix.map(|draw| draw.primitive_index),
-            [2, 3, 4],
-            "gauges, status, and trouble stay before the sealed HUD hook",
+            [5, 6],
+            "status and trouble stay before the sealed HUD hook",
         );
-        assert_eq!(plan.chrome.hud.primitive_index, 5);
+        assert_eq!(plan.chrome.hud.primitive_index, 7);
         assert_eq!(
             plan.chrome.suffix.map(|draw| draw.primitive_index),
-            [6],
+            [8],
             "dim is the only post-HUD chrome draw",
         );
     }
@@ -6742,7 +6758,7 @@ mod tests {
         };
 
         let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
-        phases.chrome_authored.remove(3);
+        phases.chrome_authored.remove(2);
         assert_invalid(
             &primitives,
             &draws,
@@ -6751,7 +6767,7 @@ mod tests {
         );
 
         let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
-        phases.chrome_authored.insert(3, 5);
+        phases.chrome_authored.insert(2, 7);
         assert_invalid(
             &primitives,
             &draws,
@@ -6760,7 +6776,7 @@ mod tests {
         );
 
         let (primitives, draws, mut phases) = canonical_draw_plan_fixture();
-        phases.chrome_authored.swap(4, 3);
+        phases.chrome_authored.swap(3, 2);
         assert_invalid(
             &primitives,
             &draws,
@@ -7198,14 +7214,24 @@ mod tests {
         let candidate = compile_fixture(&fixture);
         let atlas = two_weight_atlas_for('^', candidate.generation_key.resources);
         let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
-        let record = PackedMirrorLayout::frame_offset(FrameMirrorFamily::Analytics)
-            + 5 * std::mem::size_of::<super::super::compiler::AnalyticFrameGpuValue>();
-        let payload = &upload.frame_bytes[record + 32..record + 32 + 16 * 4];
-        let actual = payload
-            .chunks_exact(4)
-            .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
-            .collect::<Vec<_>>();
-        assert_eq!(&actual[..expected.len()], &expected);
+        for (slot, semantic) in [
+            (5, AnalyticSemantic::GaugePace),
+            (9, AnalyticSemantic::GaugeDaily),
+            (10, AnalyticSemantic::GaugeXp),
+        ] {
+            assert_eq!(
+                fixture.frame.analytic_slots[slot].value.unwrap().semantic,
+                semantic,
+            );
+            let record = PackedMirrorLayout::frame_offset(FrameMirrorFamily::Analytics)
+                + slot * std::mem::size_of::<super::super::compiler::AnalyticFrameGpuValue>();
+            let payload = &upload.frame_bytes[record + 32..record + 32 + 16 * 4];
+            let actual = payload
+                .chunks_exact(4)
+                .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(&actual[..expected.len()], &expected, "{semantic:?}");
+        }
         for reconstruction in [
             "analytic.payload[0].z,\n                analytic.payload[0].w,\n                analytic.payload[1].x,\n                analytic.payload[1].y",
             "analytic.payload[1].z,\n                analytic.payload[1].w,\n                analytic.payload[2].x,\n                analytic.payload[2].y",
@@ -7229,6 +7255,29 @@ mod tests {
             .split("fn fs_trouble(")
             .next()
             .unwrap();
+        assert!(gauge.contains("switch input.analytic_id"));
+        let pace = gauge
+            .split("case 5u:")
+            .nth(1)
+            .unwrap()
+            .split("case 9u:")
+            .next()
+            .unwrap();
+        assert!(pace.contains("gauge_arc_color"));
+        assert!(pace.contains("2u"));
+        assert!(pace.contains("frame_buffer.globals.gauges.w"));
+        assert!(!pace.contains("daily_excess"));
+
+        let daily = gauge
+            .split("case 9u:")
+            .nth(1)
+            .unwrap()
+            .split("case 10u:")
+            .next()
+            .unwrap();
+        assert!(daily.contains("gauge_arc_color"));
+        assert!(daily.contains("1u"));
+        assert!(daily.contains("frame_buffer.globals.gauges.y"));
         for required in [
             "floor(daily_excess)",
             "daily_excess - completed_rollovers",
@@ -7236,10 +7285,22 @@ mod tests {
             "completed_rollovers + 1.0",
         ] {
             assert!(
-                gauge.contains(required),
-                "missing gauge rollover step: {required}"
+                daily.contains(required),
+                "missing daily rollover step: {required}"
             );
         }
+
+        let xp = gauge
+            .split("case 10u:")
+            .nth(1)
+            .unwrap()
+            .split("default:")
+            .next()
+            .unwrap();
+        assert!(xp.contains("gauge_arc_color"));
+        assert!(xp.contains("0u"));
+        assert!(xp.contains("frame_buffer.globals.gauges.x"));
+        assert!(!xp.contains("daily_excess"));
     }
 
     fn two_weight_atlas(scalar: char) -> super::super::resources::PreparedSceneAtlas {
@@ -7438,11 +7499,27 @@ mod tests {
             ),
             analytic(
                 5,
-                chrome,
+                unlit,
                 WorldBlend::PremultipliedAlpha,
-                DepthBehavior::ScreenNoDepth,
-                PrimitiveSpace::Screen,
+                DepthBehavior::WorldReadOnly,
+                PrimitiveSpace::World,
                 2,
+            ),
+            analytic(
+                9,
+                unlit,
+                WorldBlend::PremultipliedAlpha,
+                DepthBehavior::WorldReadOnly,
+                PrimitiveSpace::World,
+                3,
+            ),
+            analytic(
+                10,
+                unlit,
+                WorldBlend::PremultipliedAlpha,
+                DepthBehavior::WorldReadOnly,
+                PrimitiveSpace::World,
+                4,
             ),
             analytic(
                 3,
@@ -7450,7 +7527,7 @@ mod tests {
                 WorldBlend::PremultipliedAlpha,
                 DepthBehavior::ScreenNoDepth,
                 PrimitiveSpace::Screen,
-                3,
+                5,
             ),
             analytic(
                 6,
@@ -7458,7 +7535,7 @@ mod tests {
                 WorldBlend::PremultipliedAlpha,
                 DepthBehavior::ScreenNoDepth,
                 PrimitiveSpace::Screen,
-                4,
+                6,
             ),
             PrimitiveTemplate {
                 node,
@@ -7468,7 +7545,7 @@ mod tests {
                 blend: WorldBlend::PremultipliedAlpha,
                 depth: DepthBehavior::ScreenNoDepth,
                 binding: PrimitiveBinding::Instances(InstanceGroupBinding::Hud),
-                authored_order: 5,
+                authored_order: 7,
                 local_geometry: bounds,
                 space: PrimitiveSpace::Screen,
             },
@@ -7478,13 +7555,13 @@ mod tests {
                 WorldBlend::PremultipliedAlpha,
                 DepthBehavior::ScreenNoDepth,
                 PrimitiveSpace::Screen,
-                6,
+                8,
             ),
         ];
         // Keep the synthetic GPU fixture observable through its final dim pass:
         // binding dim to the fractional-opacity child prevents it from hiding
         // every preceding world, chrome, and HUD contribution.
-        fixture.template.primitives[6].node = fixture.template.nodes[1].id;
+        fixture.template.primitives[8].node = fixture.template.nodes[1].id;
         fixture.frame.nodes[1].opacity = 0.25;
         for slot in &mut fixture.template.static_atlas_recipes {
             slot.recipe = None;
@@ -7976,7 +8053,7 @@ mod tests {
         let mut analytic = SceneFixture::valid();
         analytic.template.primitives[0].kind = PrimitiveKind::AnalyticShape;
         analytic.template.primitives[0].binding =
-            PrimitiveBinding::Analytic(AnalyticSemantic::Gauges.id());
+            PrimitiveBinding::Analytic(AnalyticSemantic::GaugePace.id());
         analytic.template.materials[0].kind = MaterialKind::UnlitAnalytic;
         analytic.template.resources[0].kind = ResourceKind::AnalyticGeometry;
         analytic.template.primitives[0].authored_order = 91;
@@ -10385,16 +10462,17 @@ mod tests {
             .map(|draw| draw.primitive_index)
             .collect::<Vec<_>>();
         assert!(!world_indices.is_empty());
-        let gauge_index = upload
+        let gauge_indices = upload
             .draws
             .iter()
             .enumerate()
-            .find_map(|(index, draw)| {
+            .filter_map(|(index, draw)| {
                 (draw.source == PrimitiveSource::Analytic
-                    && upload.primitives[index].binding_index == 5)
-                    .then_some(u32::try_from(index).unwrap())
+                    && matches!(upload.primitives[index].binding_index, 5 | 9 | 10))
+                .then_some(u32::try_from(index).unwrap())
             })
-            .expect("gauge analytic draw exists");
+            .collect::<Vec<_>>();
+        assert_eq!(gauge_indices.len(), 3);
 
         let mut renderer = SceneRenderer::new(&device, &queue, &shared);
         let mut render_variant =
@@ -10423,10 +10501,13 @@ mod tests {
                     )
                     .unwrap()
             };
-        let chrome = render_variant(&world_indices, &hud);
-        let mut world_and_chrome = world_indices;
-        world_and_chrome.push(gauge_index);
-        let without_chrome = render_variant(&world_and_chrome, &zero_hud);
+        let non_gauge_world = world_indices
+            .iter()
+            .copied()
+            .filter(|index| !gauge_indices.contains(index))
+            .collect::<Vec<_>>();
+        let chrome = render_variant(&non_gauge_world, &hud);
+        let without_chrome = render_variant(&world_indices, &zero_hud);
 
         let changed_mask = |with: &SceneRenderOutcome,
                             without: &SceneRenderOutcome,
@@ -10705,7 +10786,7 @@ mod tests {
             .expect("production projection includes one grounded prop");
         let authored_strength = 0.24;
         snapshot.frame.prop_instances[shadow_slot].visible = true;
-        snapshot.frame.prop_instances[shadow_slot].origin_points = [80.0, 300.0];
+        snapshot.frame.prop_instances[shadow_slot].origin_points = [120.0, 260.0];
         snapshot.frame.prop_instances[shadow_slot].motion_offset_points = [0.0; 2];
         snapshot.frame.prop_instances[shadow_slot].opacity = 1.0;
         snapshot.frame.prop_instances[shadow_slot].footprint_points = [360.0 / 44.0, 360.0 / 18.0];
@@ -10790,6 +10871,7 @@ mod tests {
                 &hud,
             )
             .expect("glyph-isolation control renders");
+        candidate.draw_plan = baseline_plan.clone();
         for draw in &mut candidate.draw_plan.opaque {
             draw.instance_range = 0..0;
         }
@@ -12456,18 +12538,18 @@ mod tests {
         let upload = prepare_scene_upload(&cpu, &atlas).expect("production scene upload prepares");
 
         assert_eq!(cpu.logical_viewport_points(), [360.0, 360.0]);
-        assert_eq!(upload.primitives.len(), 20);
-        assert_eq!(upload.draws.len(), 20);
+        assert_eq!(upload.primitives.len(), 22);
+        assert_eq!(upload.draws.len(), 22);
         assert_eq!(upload.phases.opaque_cutout.len(), 1);
-        assert_eq!(upload.phases.world_blended_unsorted.len(), 14);
-        assert_eq!(upload.phases.chrome_authored.len(), 5);
+        assert_eq!(upload.phases.world_blended_unsorted.len(), 17);
+        assert_eq!(upload.phases.chrome_authored.len(), 4);
         assert_eq!(
             upload
                 .draws
                 .iter()
                 .map(|draw| draw.authored_order)
                 .collect::<Vec<_>>(),
-            (0..20).collect::<Vec<_>>(),
+            (0..22).collect::<Vec<_>>(),
         );
 
         let classified = upload
@@ -12648,34 +12730,34 @@ mod tests {
                 ),
                 (
                     15,
-                    SceneDrawPhase::Chrome,
-                    ScenePipelineClass::ChromeAnalytic,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverAnalytic,
                     PrimitiveSource::Analytic,
                     5,
                     15
                 ),
                 (
                     16,
-                    SceneDrawPhase::Chrome,
-                    ScenePipelineClass::ChromeAnalytic,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverAnalytic,
                     PrimitiveSource::Analytic,
-                    3,
+                    9,
                     16
                 ),
                 (
                     17,
-                    SceneDrawPhase::Chrome,
-                    ScenePipelineClass::ChromeAnalytic,
+                    SceneDrawPhase::WorldBlended,
+                    ScenePipelineClass::WorldSourceOverAnalytic,
                     PrimitiveSource::Analytic,
-                    6,
+                    10,
                     17
                 ),
                 (
                     18,
                     SceneDrawPhase::Chrome,
-                    ScenePipelineClass::SealedHudHook,
-                    PrimitiveSource::Instances(InstanceSource::Hud),
-                    0,
+                    ScenePipelineClass::ChromeAnalytic,
+                    PrimitiveSource::Analytic,
+                    3,
                     18
                 ),
                 (
@@ -12683,20 +12765,36 @@ mod tests {
                     SceneDrawPhase::Chrome,
                     ScenePipelineClass::ChromeAnalytic,
                     PrimitiveSource::Analytic,
-                    7,
+                    6,
                     19
+                ),
+                (
+                    20,
+                    SceneDrawPhase::Chrome,
+                    ScenePipelineClass::SealedHudHook,
+                    PrimitiveSource::Instances(InstanceSource::Hud),
+                    0,
+                    20
+                ),
+                (
+                    21,
+                    SceneDrawPhase::Chrome,
+                    ScenePipelineClass::ChromeAnalytic,
+                    PrimitiveSource::Analytic,
+                    7,
+                    21
                 ),
             ],
         );
         let class_count = |class| classified.iter().filter(|actual| **actual == class).count();
         assert_eq!(class_count(ScenePipelineClass::WorldOpaqueAnalytic), 1);
-        assert_eq!(class_count(ScenePipelineClass::WorldSourceOverAnalytic), 1);
+        assert_eq!(class_count(ScenePipelineClass::WorldSourceOverAnalytic), 4);
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyph), 8);
         assert_eq!(class_count(ScenePipelineClass::WorldMultiplyAnalytic), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldMultiplyGlyphMask), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldSourceOverGlyphMask), 1);
         assert_eq!(class_count(ScenePipelineClass::WorldAdditiveGlyph), 2);
-        assert_eq!(class_count(ScenePipelineClass::ChromeAnalytic), 4);
+        assert_eq!(class_count(ScenePipelineClass::ChromeAnalytic), 3);
         assert_eq!(class_count(ScenePipelineClass::SealedHudHook), 1);
         assert_eq!(
             class_count(ScenePipelineClass::WorldAdditiveAnalyticReserved),
@@ -12715,7 +12813,7 @@ mod tests {
         assert_eq!(bindings_for(ScenePipelineClass::WorldOpaqueAnalytic), [0],);
         assert_eq!(
             bindings_for(ScenePipelineClass::WorldSourceOverAnalytic),
-            [4],
+            [4, 5, 9, 10],
         );
         assert_eq!(bindings_for(ScenePipelineClass::WorldMultiplyAnalytic), [8],);
         assert_eq!(
@@ -12727,10 +12825,7 @@ mod tests {
             [1],
         );
         assert_eq!(bindings_for(ScenePipelineClass::WorldAdditiveGlyph), [0, 0],);
-        assert_eq!(
-            bindings_for(ScenePipelineClass::ChromeAnalytic),
-            [5, 3, 6, 7],
-        );
+        assert_eq!(bindings_for(ScenePipelineClass::ChromeAnalytic), [3, 6, 7],);
         assert_eq!(bindings_for(ScenePipelineClass::SealedHudHook), [0]);
 
         let source_count = |source| {
@@ -12740,7 +12835,7 @@ mod tests {
                 .filter(|draw| draw.source == source)
                 .count()
         };
-        assert_eq!(source_count(PrimitiveSource::Analytic), 7);
+        assert_eq!(source_count(PrimitiveSource::Analytic), 9);
         assert_eq!(
             source_count(PrimitiveSource::Instances(InstanceSource::RoomGlyphs)),
             1,
@@ -12893,7 +12988,7 @@ mod tests {
                 .iter()
                 .map(|draw| draw.primitive_index)
                 .collect::<Vec<_>>(),
-            (1..=14).collect::<Vec<_>>(),
+            (1..=17).collect::<Vec<_>>(),
         );
         assert_eq!(
             candidate
@@ -12903,10 +12998,10 @@ mod tests {
                 .iter()
                 .map(|draw| draw.primitive_index)
                 .collect::<Vec<_>>(),
-            [15, 16, 17],
+            [18, 19],
         );
-        assert_eq!(candidate.draw_plan.chrome.hud.primitive_index, 18);
-        assert_eq!(candidate.draw_plan.chrome.suffix[0].primitive_index, 19);
+        assert_eq!(candidate.draw_plan.chrome.hud.primitive_index, 20);
+        assert_eq!(candidate.draw_plan.chrome.suffix[0].primitive_index, 21);
 
         let prepared_hud = candidate
             .hud
@@ -13447,15 +13542,15 @@ mod tests {
             )
             .unwrap();
 
-        candidate
-            .draw_plan
-            .world_blended_unsorted
-            .retain(|draw| draw.pipeline != ScenePipelineClass::WorldMultiplyGlyphMask);
-        assert_eq!(
-            baseline_plan.world_blended_unsorted.len(),
-            candidate.draw_plan.world_blended_unsorted.len() + 1,
-        );
-        let without_floor = renderer
+        for draw in &mut candidate.draw_plan.world_blended_unsorted {
+            if matches!(
+                upload.primitives[draw.primitive_index as usize].binding_index,
+                5 | 9 | 10
+            ) {
+                draw.instance_range = 0..0;
+            }
+        }
+        let without_gauges = renderer
             .render_offscreen(
                 &device,
                 &queue,
@@ -13467,8 +13562,8 @@ mod tests {
             .unwrap();
         candidate.draw_plan = baseline_plan.clone();
         assert!(
-            without_floor.rgba != baseline.rgba,
-            "floor omission was inert"
+            without_gauges.rgba != baseline.rgba,
+            "world-gauge omission was inert"
         );
         assert_eq!(candidate.draw_plan, baseline_plan);
 
@@ -13524,8 +13619,9 @@ mod tests {
         let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
 
         let mut malformed_upload = upload.clone();
-        malformed_upload.primitives[3].binding_index = 5;
-        malformed_upload.primitives[3].frame_base = 5;
+        let first_chrome = usize::try_from(malformed_upload.phases.chrome_authored[0]).unwrap();
+        malformed_upload.primitives[first_chrome].binding_index = 6;
+        malformed_upload.primitives[first_chrome].frame_base = 6;
         assert!(matches!(
             materialize_gpu_candidate(&device, &queue, &shared, &malformed_upload, &atlas),
             Err(SceneGpuError::InvalidDrawPlan(

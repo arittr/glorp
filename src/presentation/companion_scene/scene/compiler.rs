@@ -1117,8 +1117,22 @@ fn build_template(
         ("world.foreground", Some("scene.root"), 0.0),
         ("world.props.foreground", Some("world.foreground"), 0.0),
         ("world.tank.foreground", Some("world.foreground"), 0.0),
+        (
+            "world.gauge.pace",
+            Some("scene.root"),
+            crate::round::depth::CompanionGaugeLane::Pace.scene_z(),
+        ),
+        (
+            "world.gauge.daily",
+            Some("scene.root"),
+            crate::round::depth::CompanionGaugeLane::Daily.scene_z(),
+        ),
+        (
+            "world.gauge.xp",
+            Some("scene.root"),
+            crate::round::depth::CompanionGaugeLane::Xp.scene_z(),
+        ),
         ("chrome.screen", Some("scene.root"), 0.0),
-        ("chrome.gauges", Some("chrome.screen"), 0.0),
         ("chrome.status", Some("chrome.screen"), 0.0),
         ("chrome.trouble", Some("chrome.screen"), 0.0),
         ("chrome.hud", Some("chrome.screen"), 0.0),
@@ -1440,16 +1454,22 @@ fn build_template(
             PrimitiveSpace::World,
         )?;
     }
-    push(
-        "chrome.gauges",
-        PrimitiveKind::AnalyticShape,
-        "material.screen-chrome",
-        "resource.analytic-geometry",
-        WorldBlend::PremultipliedAlpha,
-        DepthBehavior::ScreenNoDepth,
-        PrimitiveBinding::Analytic(AnalyticSemantic::Gauges.id()),
-        PrimitiveSpace::Screen,
-    )?;
+    for (alias, semantic) in [
+        ("world.gauge.pace", AnalyticSemantic::GaugePace),
+        ("world.gauge.daily", AnalyticSemantic::GaugeDaily),
+        ("world.gauge.xp", AnalyticSemantic::GaugeXp),
+    ] {
+        push(
+            alias,
+            PrimitiveKind::AnalyticShape,
+            "material.unlit-analytic",
+            "resource.analytic-geometry",
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveBinding::Analytic(semantic.id()),
+            PrimitiveSpace::World,
+        )?;
+    }
     push(
         "chrome.status",
         PrimitiveKind::AnalyticShape,
@@ -1756,7 +1776,9 @@ fn analytic_paint(
         AnalyticSemantic::PropShadows => AnalyticPaint::PropShadowMultiply {
             color_srgb8: crate::presentation::companion_effects::bed_shadow_srgb8(biome),
         },
-        AnalyticSemantic::Gauges => unreachable!("gauges use the closed gauge paint set"),
+        AnalyticSemantic::GaugePace | AnalyticSemantic::GaugeDaily | AnalyticSemantic::GaugeXp => {
+            unreachable!("gauges use the closed gauge paint set")
+        }
     }
 }
 
@@ -1791,7 +1813,7 @@ fn project_analytic_content_with_biome(
         value: None,
     }));
     for semantic in AnalyticSemantic::ALL {
-        let paint = if semantic == AnalyticSemantic::Gauges {
+        let paint = if semantic.gauge_lane().is_some() {
             AnalyticPaint::PerimeterGaugeSet {
                 xp: GaugeLanePaint {
                     track_srgba8: crate::presentation::companion_effects::srgba8(
@@ -1973,6 +1995,30 @@ fn project_analytic_frame_slots_for_geometry(
     let aura_radius = crate::presentation::companion_effects::mood_aura_radius(f64::from(
         pet.body_radii[0] * 2.0,
     )) as f32;
+    let gauge_layout = crate::presentation::companion_effects::perimeter_gauge_layout(
+        f64::from(radius),
+        crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
+    );
+    let gauge_lane =
+        |lane: crate::presentation::companion_effects::GaugeLaneLayout| GaugeLaneGeometry {
+            radius_points: lane.radius as f32,
+            stroke_width_points: lane.stroke_width as f32,
+            track_start_degrees: lane.track_start_degrees as f32,
+            track_sweep_degrees: lane.track_sweep_degrees as f32,
+            cap: GaugeLineCap::Round,
+        };
+    let gauge_geometry = AnalyticGeometry::PerimeterGaugeSet {
+        center_points: center,
+        xp: gauge_lane(gauge_layout.xp),
+        daily: gauge_lane(gauge_layout.daily),
+        pace: gauge_lane(gauge_layout.pace),
+    };
+    let gauge_frame = |semantic| AnalyticFrame {
+        semantic,
+        shape: AnalyticShape::PerimeterGaugeSet,
+        rect_points: room,
+        geometry: gauge_geometry,
+    };
     let values = [
         AnalyticFrame {
             semantic: AnalyticSemantic::RoomBackground,
@@ -2030,31 +2076,7 @@ fn project_analytic_frame_slots_for_geometry(
                 feather_points: 4.0,
             },
         },
-        {
-            let layout = crate::presentation::companion_effects::perimeter_gauge_layout(
-                f64::from(radius),
-                crate::presentation::companion_effects::COMPANION_GAUGE_GAP_DEGREES,
-            );
-            let lane =
-                |lane: crate::presentation::companion_effects::GaugeLaneLayout| GaugeLaneGeometry {
-                    radius_points: lane.radius as f32,
-                    stroke_width_points: lane.stroke_width as f32,
-                    track_start_degrees: lane.track_start_degrees as f32,
-                    track_sweep_degrees: lane.track_sweep_degrees as f32,
-                    cap: GaugeLineCap::Round,
-                };
-            AnalyticFrame {
-                semantic: AnalyticSemantic::Gauges,
-                shape: AnalyticShape::PerimeterGaugeSet,
-                rect_points: room,
-                geometry: AnalyticGeometry::PerimeterGaugeSet {
-                    center_points: center,
-                    xp: lane(layout.xp),
-                    daily: lane(layout.daily),
-                    pace: lane(layout.pace),
-                },
-            }
-        },
+        gauge_frame(AnalyticSemantic::GaugePace),
         AnalyticFrame {
             semantic: AnalyticSemantic::Trouble,
             shape: AnalyticShape::TroubleBeacon,
@@ -2082,6 +2104,8 @@ fn project_analytic_frame_slots_for_geometry(
             rect_points: room,
             geometry: AnalyticGeometry::PropShadowField,
         },
+        gauge_frame(AnalyticSemantic::GaugeDaily),
+        gauge_frame(AnalyticSemantic::GaugeXp),
     ];
     for value in values {
         let id = value.semantic.id();

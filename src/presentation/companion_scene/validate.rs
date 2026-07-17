@@ -1279,10 +1279,13 @@ fn analytic_binding_semantics_match(
             DepthBehavior::WorldReadOnly,
             PrimitiveSpace::World,
         ),
-        AnalyticSemantic::StatusHalo
-        | AnalyticSemantic::Gauges
-        | AnalyticSemantic::Trouble
-        | AnalyticSemantic::Dim => (
+        AnalyticSemantic::GaugePace | AnalyticSemantic::GaugeDaily | AnalyticSemantic::GaugeXp => (
+            MaterialKind::UnlitAnalytic,
+            WorldBlend::PremultipliedAlpha,
+            DepthBehavior::WorldReadOnly,
+            PrimitiveSpace::World,
+        ),
+        AnalyticSemantic::StatusHalo | AnalyticSemantic::Trouble | AnalyticSemantic::Dim => (
             MaterialKind::ScreenChrome,
             WorldBlend::PremultipliedAlpha,
             DepthBehavior::ScreenNoDepth,
@@ -1355,7 +1358,9 @@ fn validate_companion_instance_sources(
         ("world.prop.shadows", AnalyticSemantic::PropShadows),
         ("chrome.status", AnalyticSemantic::StatusHalo),
         ("pet.aura.mood", AnalyticSemantic::MoodAura),
-        ("chrome.gauges", AnalyticSemantic::Gauges),
+        ("world.gauge.pace", AnalyticSemantic::GaugePace),
+        ("world.gauge.daily", AnalyticSemantic::GaugeDaily),
+        ("world.gauge.xp", AnalyticSemantic::GaugeXp),
         ("chrome.trouble", AnalyticSemantic::Trouble),
         ("chrome.dim", AnalyticSemantic::Dim),
     ];
@@ -1738,7 +1743,7 @@ fn validate_analytic_paint(
             per_ring_alpha_u8 > 0
         }
         (
-            AnalyticSemantic::Gauges,
+            AnalyticSemantic::GaugePace | AnalyticSemantic::GaugeDaily | AnalyticSemantic::GaugeXp,
             AnalyticPaint::PerimeterGaugeSet {
                 xp,
                 daily,
@@ -2113,7 +2118,7 @@ fn validate_analytic_frame(
                 && feather_points >= 0.0
         }
         (
-            AnalyticSemantic::Gauges,
+            AnalyticSemantic::GaugePace | AnalyticSemantic::GaugeDaily | AnalyticSemantic::GaugeXp,
             AnalyticGeometry::PerimeterGaugeSet { center_points, xp, daily, pace },
         ) => {
             let expected_center = [
@@ -2783,7 +2788,7 @@ mod tests {
         assert_eq!(
             validate_analytic_frame(
                 AnalyticFrame {
-                    semantic: AnalyticSemantic::Gauges,
+                    semantic: AnalyticSemantic::GaugePace,
                     shape: AnalyticShape::PerimeterGaugeSet,
                     rect_points: [0.0, 0.0, 4.0, 4.0],
                     geometry: AnalyticGeometry::PerimeterGaugeSet {
@@ -3162,10 +3167,15 @@ mod tests {
                 primitive.depth = DepthBehavior::WorldReadOnly;
                 primitive.space = PrimitiveSpace::World;
             }
-            AnalyticSemantic::StatusHalo
-            | AnalyticSemantic::Gauges
-            | AnalyticSemantic::Trouble
-            | AnalyticSemantic::Dim => {
+            AnalyticSemantic::GaugePace
+            | AnalyticSemantic::GaugeDaily
+            | AnalyticSemantic::GaugeXp => {
+                template.materials[0].kind = MaterialKind::UnlitAnalytic;
+                primitive.blend = WorldBlend::PremultipliedAlpha;
+                primitive.depth = DepthBehavior::WorldReadOnly;
+                primitive.space = PrimitiveSpace::World;
+            }
+            AnalyticSemantic::StatusHalo | AnalyticSemantic::Trouble | AnalyticSemantic::Dim => {
                 template.materials[0].kind = MaterialKind::ScreenChrome;
                 primitive.blend = WorldBlend::PremultipliedAlpha;
                 primitive.depth = DepthBehavior::ScreenNoDepth;
@@ -3263,8 +3273,10 @@ mod tests {
                     AnalyticSemantic::MoodAura
                 }
                 AnalyticSemantic::MoodAura => AnalyticSemantic::FloorProjection,
+                AnalyticSemantic::GaugePace
+                | AnalyticSemantic::GaugeDaily
+                | AnalyticSemantic::GaugeXp => AnalyticSemantic::StatusHalo,
                 AnalyticSemantic::StatusHalo
-                | AnalyticSemantic::Gauges
                 | AnalyticSemantic::Trouble
                 | AnalyticSemantic::Dim => AnalyticSemantic::WallShadow,
             };

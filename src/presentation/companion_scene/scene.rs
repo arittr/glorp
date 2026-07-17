@@ -673,23 +673,27 @@ pub enum AnalyticSemantic {
     FloorProjection,
     StatusHalo,
     MoodAura,
-    Gauges,
+    GaugePace,
     Trouble,
     Dim,
     PropShadows,
+    GaugeDaily,
+    GaugeXp,
 }
 
 impl AnalyticSemantic {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::RoomBackground,
         Self::WallShadow,
         Self::FloorProjection,
         Self::StatusHalo,
         Self::MoodAura,
-        Self::Gauges,
+        Self::GaugePace,
         Self::Trouble,
         Self::Dim,
         Self::PropShadows,
+        Self::GaugeDaily,
+        Self::GaugeXp,
     ];
 
     pub const fn id(self) -> AnalyticParamId {
@@ -699,10 +703,12 @@ impl AnalyticSemantic {
             Self::FloorProjection => 2,
             Self::StatusHalo => 3,
             Self::MoodAura => 4,
-            Self::Gauges => 5,
+            Self::GaugePace => 5,
             Self::Trouble => 6,
             Self::Dim => 7,
             Self::PropShadows => 8,
+            Self::GaugeDaily => 9,
+            Self::GaugeXp => 10,
         })
     }
 
@@ -713,10 +719,26 @@ impl AnalyticSemantic {
             Self::FloorProjection => AnalyticShape::PetFloorProjection,
             Self::StatusHalo => AnalyticShape::StatusBeacon,
             Self::MoodAura => AnalyticShape::PetAura,
-            Self::Gauges => AnalyticShape::PerimeterGaugeSet,
+            Self::GaugePace | Self::GaugeDaily | Self::GaugeXp => AnalyticShape::PerimeterGaugeSet,
             Self::Trouble => AnalyticShape::TroubleBeacon,
             Self::Dim => AnalyticShape::SurfaceOverlay,
             Self::PropShadows => AnalyticShape::PropShadowField,
+        }
+    }
+
+    pub const fn gauge_lane(self) -> Option<crate::round::depth::CompanionGaugeLane> {
+        match self {
+            Self::GaugePace => Some(crate::round::depth::CompanionGaugeLane::Pace),
+            Self::GaugeDaily => Some(crate::round::depth::CompanionGaugeLane::Daily),
+            Self::GaugeXp => Some(crate::round::depth::CompanionGaugeLane::Xp),
+            Self::RoomBackground
+            | Self::WallShadow
+            | Self::FloorProjection
+            | Self::StatusHalo
+            | Self::MoodAura
+            | Self::Trouble
+            | Self::Dim
+            | Self::PropShadows => None,
         }
     }
 }
@@ -3381,6 +3403,18 @@ mod tests {
             nodes["pet.projection.floor"].base_transform.translation[2],
             -1.70
         );
+        assert_eq!(
+            nodes["world.gauge.pace"].base_transform.translation[2],
+            crate::round::depth::COMPANION_GAUGE_PACE_Z,
+        );
+        assert_eq!(
+            nodes["world.gauge.daily"].base_transform.translation[2],
+            crate::round::depth::COMPANION_GAUGE_DAILY_Z,
+        );
+        assert_eq!(
+            nodes["world.gauge.xp"].base_transform.translation[2],
+            crate::round::depth::COMPANION_GAUGE_XP_Z,
+        );
         assert_eq!(built.frame.gauges, [0.0, 0.125, 0.375, 0.75]);
         let mut orders = built
             .template
@@ -4288,6 +4322,10 @@ mod tests {
 
         assert_eq!(MAX_STATIC_ATLAS_RECIPES, 8);
         assert_eq!(MAX_ANALYTIC_PARAMS, 16);
+        assert_eq!(AnalyticSemantic::ALL.len(), 11);
+        assert_eq!(AnalyticSemantic::GaugePace.id(), AnalyticParamId(5));
+        assert_eq!(AnalyticSemantic::GaugeDaily.id(), AnalyticParamId(9));
+        assert_eq!(AnalyticSemantic::GaugeXp.id(), AnalyticParamId(10));
         assert_eq!(
             built.template.static_atlas_recipes.len(),
             MAX_STATIC_ATLAS_RECIPES
@@ -4304,10 +4342,12 @@ mod tests {
             AnalyticSemantic::FloorProjection,
             AnalyticSemantic::StatusHalo,
             AnalyticSemantic::MoodAura,
-            AnalyticSemantic::Gauges,
+            AnalyticSemantic::GaugePace,
             AnalyticSemantic::Trouble,
             AnalyticSemantic::Dim,
             AnalyticSemantic::PropShadows,
+            AnalyticSemantic::GaugeDaily,
+            AnalyticSemantic::GaugeXp,
         ];
         assert_eq!(built.template.analytic_templates.len(), MAX_ANALYTIC_PARAMS);
         for (slot, semantic) in expected.into_iter().enumerate() {
@@ -4336,6 +4376,44 @@ mod tests {
                 .find(|primitive| primitive.node == node)
                 .unwrap()
         };
+        for (alias, semantic_id, z) in [
+            ("world.gauge.pace", AnalyticParamId(5), 1.55),
+            ("world.gauge.daily", AnalyticParamId(9), 1.65),
+            ("world.gauge.xp", AnalyticParamId(10), 1.75),
+        ] {
+            let gauge = primitive(alias);
+            assert_eq!(gauge.binding, PrimitiveBinding::Analytic(semantic_id));
+            assert_eq!(gauge.blend, WorldBlend::PremultipliedAlpha);
+            assert_eq!(gauge.depth, DepthBehavior::WorldReadOnly);
+            assert_eq!(gauge.space, PrimitiveSpace::World);
+            assert_eq!(
+                built
+                    .template
+                    .materials
+                    .iter()
+                    .find(|material| material.id == gauge.material)
+                    .unwrap()
+                    .kind,
+                MaterialKind::UnlitAnalytic,
+            );
+            assert_eq!(
+                built
+                    .template
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == gauge.node)
+                    .unwrap()
+                    .base_transform
+                    .translation[2],
+                z,
+            );
+        }
+        assert!(!built
+            .template
+            .nodes
+            .iter()
+            .any(|node| node.alias.as_str() == "chrome.gauges"));
+
         assert_eq!(
             primitive("world.room.glyphs").binding,
             PrimitiveBinding::Instances(InstanceGroupBinding::RoomGlyphs)
@@ -4425,13 +4503,19 @@ mod tests {
         assert!(order("pet.projection.floor") < order("world.ambient"));
         assert!(order("world.ambient") < order("pet.shadow.wall"));
         assert!(order("pet.shadow.wall") < order("pet.body"));
+        let gauge_orders = [
+            order("world.gauge.pace"),
+            order("world.gauge.daily"),
+            order("world.gauge.xp"),
+        ];
+        assert!(gauge_orders.windows(2).all(|pair| pair[0] + 1 == pair[1]));
         let chrome_orders = [
-            order("chrome.gauges"),
             order("chrome.status"),
             order("chrome.trouble"),
             order("chrome.hud"),
             order("chrome.dim"),
         ];
+        assert_eq!(gauge_orders[2] + 1, chrome_orders[0]);
         assert!(chrome_orders.windows(2).all(|pair| pair[0] + 1 == pair[1]));
 
         let wall_order = order("pet.shadow.wall");
@@ -4475,7 +4559,7 @@ mod tests {
     }
 
     #[test]
-    fn production_projection_closes_all_nine_analytic_roles_with_y_up_geometry() {
+    fn production_projection_closes_all_eleven_analytic_roles_with_y_up_geometry() {
         let snapshot = snapshot_for(Species::Fuzz, Stage::S3);
         let built = build_scene_generation(&snapshot, generation_key(41)).unwrap();
 
@@ -4518,6 +4602,22 @@ mod tests {
             built.content().analytic_slots[5].value.unwrap().paint,
             AnalyticPaint::PerimeterGaugeSet { .. }
         ));
+        assert_eq!(
+            built.content().analytic_slots[5].value.unwrap().paint,
+            built.content().analytic_slots[9].value.unwrap().paint,
+        );
+        assert_eq!(
+            built.content().analytic_slots[5].value.unwrap().paint,
+            built.content().analytic_slots[10].value.unwrap().paint,
+        );
+        assert!(
+            built.frame().analytic_slots[5].value.unwrap().geometry
+                == built.frame().analytic_slots[9].value.unwrap().geometry
+        );
+        assert!(
+            built.frame().analytic_slots[5].value.unwrap().geometry
+                == built.frame().analytic_slots[10].value.unwrap().geometry
+        );
     }
 
     #[test]
@@ -4528,6 +4628,9 @@ mod tests {
             420.0 / f32::from(snapshot.topology.glyph_grid.columns);
         let built = build_scene_generation(&snapshot, generation_key(47)).unwrap();
 
+        assert_eq!(AnalyticSemantic::GaugePace.id(), AnalyticParamId(5));
+        assert_eq!(AnalyticSemantic::GaugeDaily.id(), AnalyticParamId(9));
+        assert_eq!(AnalyticSemantic::GaugeXp.id(), AnalyticParamId(10));
         let frame = built.frame().analytic_slots[5].value.unwrap();
         let expected = crate::presentation::companion_effects::perimeter_gauge_layout(
             179.0,

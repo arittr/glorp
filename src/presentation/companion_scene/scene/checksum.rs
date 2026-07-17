@@ -842,7 +842,19 @@ fn static_atlas_semantic_tag(value: StaticAtlasSemantic) -> u8 {
     }
 }
 fn analytic_semantic_tag(value: AnalyticSemantic) -> u8 {
-    value.id().0 + 1
+    match value {
+        AnalyticSemantic::RoomBackground => 1,
+        AnalyticSemantic::WallShadow => 2,
+        AnalyticSemantic::FloorProjection => 3,
+        AnalyticSemantic::StatusHalo => 4,
+        AnalyticSemantic::MoodAura => 5,
+        AnalyticSemantic::GaugePace => 6,
+        AnalyticSemantic::Trouble => 7,
+        AnalyticSemantic::Dim => 8,
+        AnalyticSemantic::PropShadows => 9,
+        AnalyticSemantic::GaugeDaily => 10,
+        AnalyticSemantic::GaugeXp => 11,
+    }
 }
 fn analytic_shape_tag(value: AnalyticShape) -> u8 {
     match value {

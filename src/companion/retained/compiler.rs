@@ -3321,7 +3321,19 @@ fn ambient_kind_tag(value: AmbientContentKind) -> u32 {
 }
 
 fn analytic_semantic_tag(value: AnalyticSemantic) -> u32 {
-    u32::from(value.id().0) + 1
+    match value {
+        AnalyticSemantic::RoomBackground => 1,
+        AnalyticSemantic::WallShadow => 2,
+        AnalyticSemantic::FloorProjection => 3,
+        AnalyticSemantic::StatusHalo => 4,
+        AnalyticSemantic::MoodAura => 5,
+        AnalyticSemantic::GaugePace => 6,
+        AnalyticSemantic::Trouble => 7,
+        AnalyticSemantic::Dim => 8,
+        AnalyticSemantic::PropShadows => 9,
+        AnalyticSemantic::GaugeDaily => 10,
+        AnalyticSemantic::GaugeXp => 11,
+    }
 }
 
 fn analytic_shape_tag(value: AnalyticShape) -> u32 {
@@ -3871,13 +3883,26 @@ mod tests {
         assert_eq!(frame.ambient.capacity(), 64);
         assert_eq!(frame.analytics.capacity(), 16);
         assert_eq!(frame.lights.capacity(), 2);
+
+        let production = compile_projected_full_scene_for_render_test(0);
+        assert_eq!(production.primitive_count(), 22);
+        assert_eq!(production.phases.opaque_cutout.len(), 1);
+        assert_eq!(production.phases.world_blended_unsorted.len(), 17);
+        assert_eq!(production.phases.chrome_authored.len(), 4);
     }
 
     #[test]
-    fn analytic_packers_preserve_all_eight_closed_roles_exactly() {
+    fn analytic_packers_preserve_all_eleven_closed_roles_exactly() {
         let lane = |base: u8| GaugeLanePaint {
             track_srgba8: [base, base + 1, base + 2, base + 3],
             fill_srgba8: [base + 4, base + 5, base + 6, base + 7],
+        };
+        let gauge_paint = AnalyticPaint::PerimeterGaugeSet {
+            xp: lane(32),
+            daily: lane(40),
+            pace: lane(48),
+            daily_overage_srgba8: [56, 57, 58, 59],
+            daily_rollover_contract_unorm8: [64, 65, 66, 67],
         };
         let paints = [
             AnalyticPaint::ApertureDepth {
@@ -3897,15 +3922,22 @@ mod tests {
                 ring_count: 30,
                 per_ring_alpha_u8: 31,
             },
-            AnalyticPaint::PerimeterGaugeSet {
-                xp: lane(32),
-                daily: lane(40),
-                pace: lane(48),
-                daily_overage_srgba8: [56, 57, 58, 59],
-                daily_rollover_contract_unorm8: [64, 65, 66, 67],
-            },
+            gauge_paint,
             AnalyticPaint::TroubleBeacon { color_srgba8: [60, 61, 62, 63] },
             AnalyticPaint::DimOverlay { color_srgb8: [64, 65, 66] },
+            AnalyticPaint::PropShadowMultiply { color_srgb8: [68, 69, 70] },
+            gauge_paint,
+            gauge_paint,
+        ];
+        let expected_gauge_paint = [
+            packed_rgba([32, 33, 34, 35]),
+            packed_rgba([36, 37, 38, 39]),
+            packed_rgba([40, 41, 42, 43]),
+            packed_rgba([44, 45, 46, 47]),
+            packed_rgba([48, 49, 50, 51]),
+            packed_rgba([52, 53, 54, 55]),
+            packed_rgba([56, 57, 58, 59]),
+            packed_rgba([64, 65, 66, 67]),
         ];
         let expected_paints = [
             [
@@ -3931,32 +3963,25 @@ mod tests {
                 0,
             ],
             [packed_rgb([27, 28, 29]), 30, 31, 0, 0, 0, 0, 0],
-            [
-                packed_rgba([32, 33, 34, 35]),
-                packed_rgba([36, 37, 38, 39]),
-                packed_rgba([40, 41, 42, 43]),
-                packed_rgba([44, 45, 46, 47]),
-                packed_rgba([48, 49, 50, 51]),
-                packed_rgba([52, 53, 54, 55]),
-                packed_rgba([56, 57, 58, 59]),
-                packed_rgba([64, 65, 66, 67]),
-            ],
+            expected_gauge_paint,
             [packed_rgba([60, 61, 62, 63]), 0, 0, 0, 0, 0, 0, 0],
             [packed_rgb([64, 65, 66]), 0, 0, 0, 0, 0, 0, 0],
+            [packed_rgb([68, 69, 70]), 0, 0, 0, 0, 0, 0, 0],
+            expected_gauge_paint,
+            expected_gauge_paint,
         ];
-        for (index, ((semantic, paint), expected)) in AnalyticSemantic::ALL
+        for ((semantic, paint), expected) in AnalyticSemantic::ALL
             .into_iter()
             .zip(paints)
             .zip(expected_paints)
-            .enumerate()
         {
             let packed = pack_analytic_content(AnalyticContentSlot {
                 id: semantic.id(),
                 value: Some(AnalyticContent { semantic, shape: semantic.shape(), paint }),
             });
-            assert_eq!(packed.id, index as u32);
-            assert_eq!(packed.semantic, index as u32 + 1);
-            assert_eq!(packed.shape, index as u32 + 1);
+            assert_eq!(packed.id, u32::from(semantic.id().0));
+            assert_eq!(packed.semantic, analytic_semantic_tag(semantic));
+            assert_eq!(packed.shape, analytic_shape_tag(semantic.shape()));
             assert_eq!(packed.flags, 1);
             assert_eq!(packed.payload, expected);
         }
@@ -3967,6 +3992,12 @@ mod tests {
             track_start_degrees: base + 2.0,
             track_sweep_degrees: base + 3.0,
             cap: GaugeLineCap::Round,
+        };
+        let gauge_geometry = AnalyticGeometry::PerimeterGaugeSet {
+            center_points: [22.0, 23.0],
+            xp: lane_geometry(24.0),
+            daily: lane_geometry(28.0),
+            pace: lane_geometry(32.0),
         };
         let geometries = [
             AnalyticGeometry::ApertureRadial {
@@ -3995,18 +4026,20 @@ mod tests {
                 ring_count: 20,
                 feather_points: 21.0,
             },
-            AnalyticGeometry::PerimeterGaugeSet {
-                center_points: [22.0, 23.0],
-                xp: lane_geometry(24.0),
-                daily: lane_geometry(28.0),
-                pace: lane_geometry(32.0),
-            },
+            gauge_geometry,
             AnalyticGeometry::TroubleBeacon {
                 center_points: [36.0, 37.0],
                 radius_points: 38.0,
                 thickness_points: 39.0,
             },
             AnalyticGeometry::SurfaceOverlay,
+            AnalyticGeometry::PropShadowField,
+            gauge_geometry,
+            gauge_geometry,
+        ];
+        let expected_gauge_geometry = [
+            22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0,
+            0.0, 0.0,
         ];
         let expected_geometry = [
             [
@@ -4024,14 +4057,14 @@ mod tests {
             [
                 17.0, 18.0, 19.0, 20.0, 21.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             ],
-            [
-                22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0,
-                0.0, 0.0,
-            ],
+            expected_gauge_geometry,
             [
                 36.0, 37.0, 38.0, 39.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             ],
             [0.0; 16],
+            [0.0; 16],
+            expected_gauge_geometry,
+            expected_gauge_geometry,
         ];
         for (index, ((semantic, geometry), expected)) in AnalyticSemantic::ALL
             .into_iter()
@@ -4049,10 +4082,10 @@ mod tests {
                     geometry,
                 }),
             });
-            assert_eq!(packed.id, index as u32);
-            assert_eq!(packed.semantic, index as u32 + 1);
-            assert_eq!(packed.shape, index as u32 + 1);
-            let expected_flags = if semantic == AnalyticSemantic::Gauges {
+            assert_eq!(packed.id, u32::from(semantic.id().0));
+            assert_eq!(packed.semantic, analytic_semantic_tag(semantic));
+            assert_eq!(packed.shape, analytic_shape_tag(semantic.shape()));
+            let expected_flags = if semantic.gauge_lane().is_some() {
                 0x1_1101
             } else {
                 1
