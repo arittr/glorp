@@ -489,6 +489,58 @@ impl HudInteractionDrawPlan {
     }
 }
 
+/// Closed composite selection for the private pet-only coverage and rim passes.
+/// The retained scene owns exactly one body and one particle draw; accepting any
+/// other primitive here would let wall/floor silhouettes leak into the rim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PetCompositeDrawPlan {
+    body: ScenePlannedDraw,
+    particles: ScenePlannedDraw,
+}
+
+fn prepare_pet_composite_draw_plan(
+    draw_plan: &SceneDrawPlan,
+    primitives: &[PrimitiveGpuValue],
+) -> Result<PetCompositeDrawPlan, SceneDrawPlanError> {
+    let mut body = None;
+    let mut particles = None;
+    for draw in &draw_plan.world_blended_unsorted {
+        let primitive = *primitives
+            .get(draw.primitive_index as usize)
+            .ok_or(SceneDrawPlanError::InvalidHudInteractionPlan)?;
+        match (
+            draw.pipeline,
+            expected_draw_source(primitive).map(|(source, _)| source),
+        ) {
+            (
+                ScenePipelineClass::WorldSourceOverGlyph,
+                Some(PrimitiveSource::Instances(InstanceSource::PetBody)),
+            ) => {
+                if body.replace(draw.clone()).is_some() {
+                    return Err(SceneDrawPlanError::InvalidHudInteractionPlan);
+                }
+            }
+            (
+                ScenePipelineClass::WorldAdditiveGlyph,
+                Some(PrimitiveSource::Instances(InstanceSource::PetParticles)),
+            ) if particles.replace(draw.clone()).is_some() => {
+                return Err(SceneDrawPlanError::InvalidHudInteractionPlan);
+            }
+            (
+                ScenePipelineClass::WorldAdditiveGlyph,
+                Some(PrimitiveSource::Instances(InstanceSource::PetParticles)),
+            ) => {}
+            _ => {}
+        }
+    }
+    let body = body.ok_or(SceneDrawPlanError::InvalidHudInteractionPlan)?;
+    let particles = particles.ok_or(SceneDrawPlanError::InvalidHudInteractionPlan)?;
+    if body.authored_order >= particles.authored_order {
+        return Err(SceneDrawPlanError::InvalidHudInteractionPlan);
+    }
+    Ok(PetCompositeDrawPlan { body, particles })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct BlendedDrawKey {
     camera_depth: f32,
@@ -1767,6 +1819,14 @@ impl SceneTargetTextureUsages {
         wgpu::TextureUsages::RENDER_ATTACHMENT
             .union(wgpu::TextureUsages::TEXTURE_BINDING)
             .union(wgpu::TextureUsages::COPY_SRC);
+    #[cfg(not(test))]
+    pub(super) const PET_BODY_COVERAGE: wgpu::TextureUsages =
+        wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+    #[cfg(test)]
+    pub(super) const PET_BODY_COVERAGE: wgpu::TextureUsages =
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            .union(wgpu::TextureUsages::TEXTURE_BINDING)
+            .union(wgpu::TextureUsages::COPY_SRC);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1789,6 +1849,7 @@ impl SceneTextureContract {
     pub(super) const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
     pub(super) const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
     pub(super) const STATISTICS_COVERAGE: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+    pub(super) const PET_BODY_COVERAGE: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
     pub(super) const SAMPLE_COUNT: u32 = 1;
 
     pub(super) fn validate_with(
@@ -2228,9 +2289,9 @@ pub(super) struct SceneGpuSharedFacts {
 
 impl SceneGpuSharedFacts {
     pub(super) const EXPECTED: Self = Self {
-        bind_group_layouts: 5,
+        bind_group_layouts: 8,
         samplers: 1,
-        pipelines: 16,
+        pipelines: 20,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -2252,10 +2313,10 @@ pub(super) struct GpuSceneCandidateFacts {
 
 impl GpuSceneCandidateFacts {
     pub(super) const EXPECTED: Self = Self {
-        buffers: 12,
+        buffers: 13,
         textures: 2,
         texture_views: 2,
-        bind_groups: 4,
+        bind_groups: 7,
         static_uploads: 10,
     };
 
@@ -2276,6 +2337,66 @@ impl SceneBufferUsages {
     pub(super) const PRIMITIVE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE;
     pub(super) const SCENE_CONTENT: wgpu::BufferUsages = Self::NODE;
     pub(super) const GLYPH_ENTRY: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE;
+    pub(super) const SPATIAL_CUE: wgpu::BufferUsages =
+        wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SpatialCueGpuValue {
+    statistics_offset_points: [f32; 2],
+    statistics_softness_points: f32,
+    statistics_opacity: f32,
+    rim_radius_pixels: f32,
+    rim_idle_alpha: f32,
+    rim_activity_alpha_bonus: f32,
+    rim_enabled: u32,
+}
+
+impl SpatialCueGpuValue {
+    fn from_private_mirrors(
+        content: super::compiler::ContentGlobalsGpuValue,
+        frame: FrameGlobalsGpuValue,
+        key: SceneTargetKey,
+    ) -> Option<Self> {
+        let statistics = crate::presentation::companion_effects::statistics_rear_shadow_style(
+            content.glyph_cell_extent_points,
+        )?;
+        if frame
+            .viewport_points
+            .into_iter()
+            .any(|value| !value.is_finite() || value <= 0.0)
+            || !frame.activity_opacity.is_finite()
+            || key.extent.width == 0
+            || key.extent.height == 0
+        {
+            return None;
+        }
+        let pixels_per_point = key.extent.width as f32 / frame.viewport_points[0];
+        let value = Self {
+            statistics_offset_points: statistics.offset_y_up_points,
+            statistics_softness_points: statistics.softness_points,
+            statistics_opacity: statistics.opacity,
+            rim_radius_pixels: crate::presentation::companion_effects::PET_RIM_RADIUS_POINTS
+                * pixels_per_point,
+            rim_idle_alpha: crate::presentation::companion_effects::PET_RIM_IDLE_ALPHA,
+            rim_activity_alpha_bonus:
+                crate::presentation::companion_effects::PET_RIM_ACTIVITY_ALPHA_BONUS,
+            rim_enabled: u32::from(crate::presentation::companion_effects::PET_RIM_ENABLED),
+        };
+        [
+            value.statistics_offset_points[0],
+            value.statistics_offset_points[1],
+            value.statistics_softness_points,
+            value.statistics_opacity,
+            value.rim_radius_pixels,
+            value.rim_idle_alpha,
+            value.rim_activity_alpha_bonus,
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+        .then_some(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2287,9 +2408,9 @@ pub(super) struct SceneTargetFacts {
 
 impl SceneTargetFacts {
     pub(super) const EXPECTED: Self = Self {
-        textures: 4,
-        texture_views: 4,
-        bind_groups: 3,
+        textures: 5,
+        texture_views: 5,
+        bind_groups: 5,
     };
 
     pub(super) const fn persistent_owned_handles(self) -> u8 {
@@ -2388,6 +2509,11 @@ pub(super) struct SceneBasePipelines {
     pub(super) world_additive_analytic_reserved: wgpu::RenderPipeline,
     pub(super) chrome_analytic: wgpu::RenderPipeline,
     pub(super) world_hud: wgpu::RenderPipeline,
+    pub(super) hud_coverage: wgpu::RenderPipeline,
+    pub(super) pet_body_coverage: wgpu::RenderPipeline,
+    pub(super) statistics_rear_shadow: wgpu::RenderPipeline,
+    pub(super) pet_rim: wgpu::RenderPipeline,
+    pub(super) pet_rim_statistics_reveal: wgpu::RenderPipeline,
     pub(super) hud_interaction_body: wgpu::RenderPipeline,
     pub(super) hud_interaction_particles: wgpu::RenderPipeline,
     pub(super) aperture_composite: wgpu::RenderPipeline,
@@ -2431,6 +2557,9 @@ pub(super) struct SceneGpuShared {
     pub(super) final_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) hud_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) statistics_coverage_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) spatial_cue_coverage_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) spatial_cue_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) spatial_cue_interaction_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) linear_sampler: wgpu::Sampler,
     pub(super) pipelines: SceneBasePipelines,
 }
@@ -2537,6 +2666,61 @@ impl SceneGpuShared {
                     count: None,
                 }],
             });
+        let spatial_cue_coverage_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glorp-scene-spatial-cue-coverage-layout"),
+                entries: &[
+                    unfilterable_texture_layout_entry(0),
+                    unfilterable_texture_layout_entry(1),
+                ],
+            });
+        let spatial_cue_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glorp-scene-spatial-cue-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                            SpatialCueGpuValue,
+                        >() as u64),
+                    },
+                    count: None,
+                }],
+            });
+        let spatial_cue_interaction_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glorp-scene-spatial-cue-interaction-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                super::hud::HUD_INTERACTION_GPU_BYTES,
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                SpatialCueGpuValue,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("glorp-scene-linear-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -2551,6 +2735,9 @@ impl SceneGpuShared {
             &final_bind_group_layout,
             &hud_bind_group_layout,
             &statistics_coverage_bind_group_layout,
+            &spatial_cue_coverage_bind_group_layout,
+            &spatial_cue_bind_group_layout,
+            &spatial_cue_interaction_bind_group_layout,
         );
         Self {
             device_epoch,
@@ -2561,6 +2748,9 @@ impl SceneGpuShared {
             final_bind_group_layout,
             hud_bind_group_layout,
             statistics_coverage_bind_group_layout,
+            spatial_cue_coverage_bind_group_layout,
+            spatial_cue_bind_group_layout,
+            spatial_cue_interaction_bind_group_layout,
             linear_sampler,
             pipelines,
         }
@@ -2596,6 +2786,20 @@ fn filterable_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn unfilterable_texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // The closed GPU layouts are explicit setup dependencies.
 fn create_scene_base_pipelines(
     device: &wgpu::Device,
     scene_layout: &wgpu::BindGroupLayout,
@@ -2603,6 +2807,9 @@ fn create_scene_base_pipelines(
     final_layout: &wgpu::BindGroupLayout,
     hud_layout: &wgpu::BindGroupLayout,
     statistics_coverage_layout: &wgpu::BindGroupLayout,
+    spatial_cue_coverage_layout: &wgpu::BindGroupLayout,
+    spatial_cue_layout: &wgpu::BindGroupLayout,
+    spatial_cue_interaction_layout: &wgpu::BindGroupLayout,
 ) -> SceneBasePipelines {
     const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
         0 => Float32x3,
@@ -2647,6 +2854,17 @@ fn create_scene_base_pipelines(
         ],
         immediate_size: 0,
     });
+    let hud_coverage_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glorp-scene-hud-coverage-pipeline-layout"),
+            bind_group_layouts: &[
+                Some(scene_layout),
+                Some(atlas_layout),
+                None,
+                Some(hud_layout),
+            ],
+            immediate_size: 0,
+        });
     let hud_interaction_pipeline_layout =
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("glorp-scene-hud-interaction-pipeline-layout"),
@@ -2655,6 +2873,28 @@ fn create_scene_base_pipelines(
                 Some(atlas_layout),
                 Some(statistics_coverage_layout),
                 Some(hud_layout),
+            ],
+            immediate_size: 0,
+        });
+    let spatial_cue_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glorp-scene-spatial-cue-pipeline-layout"),
+            bind_group_layouts: &[
+                Some(scene_layout),
+                None,
+                Some(spatial_cue_coverage_layout),
+                Some(spatial_cue_layout),
+            ],
+            immediate_size: 0,
+        });
+    let spatial_cue_interaction_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glorp-scene-spatial-cue-interaction-pipeline-layout"),
+            bind_group_layouts: &[
+                Some(scene_layout),
+                None,
+                Some(spatial_cue_coverage_layout),
+                Some(spatial_cue_interaction_layout),
             ],
             immediate_size: 0,
         });
@@ -2764,22 +3004,141 @@ fn create_scene_base_pipelines(
             module: &shader,
             entry_point: Some(hud_contract.fragment_entry),
             compilation_options: Default::default(),
-            targets: &[
-                Some(wgpu::ColorTargetState {
-                    format: SceneTextureContract::INTERMEDIATE,
-                    blend: hud_contract.blend.map(scene_blend_state),
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-                Some(wgpu::ColorTargetState {
-                    format: SceneTextureContract::STATISTICS_COVERAGE,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-            ],
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SceneTextureContract::INTERMEDIATE,
+                blend: hud_contract.blend.map(scene_blend_state),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         multiview_mask: None,
         cache: None,
     });
+    let hud_coverage = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("glorp-scene-hud-coverage"),
+        layout: Some(&hud_coverage_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some(hud_contract.vertex_entry),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_hud_coverage"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SceneTextureContract::STATISTICS_COVERAGE,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let pet_body_coverage = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("glorp-scene-pet-body-coverage"),
+        layout: Some(&scene_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_world_glyph"),
+            compilation_options: Default::default(),
+            buffers: &[Some(vertex_layout.clone())],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_pet_body_coverage"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SceneTextureContract::PET_BODY_COVERAGE,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let spatial_cue_pipeline =
+        |label: &'static str, fragment_entry: &'static str, blend: SceneBlendContract| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&spatial_cue_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_final"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: SceneTextureContract::DEPTH,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fragment_entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: SceneTextureContract::INTERMEDIATE,
+                        blend: Some(scene_blend_state(blend)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+    let statistics_rear_shadow = spatial_cue_pipeline(
+        "glorp-scene-statistics-rear-shadow",
+        "fs_statistics_rear_shadow",
+        SceneBlendContract::Multiply,
+    );
+    let pet_rim = spatial_cue_pipeline(
+        "glorp-scene-pet-rim",
+        "fs_pet_rim",
+        SceneBlendContract::SourceOver,
+    );
+    let pet_rim_statistics_reveal =
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glorp-scene-pet-rim-statistics-reveal"),
+            layout: Some(&spatial_cue_interaction_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_final"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SceneTextureContract::DEPTH,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_pet_rim_statistics_reveal"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SceneTextureContract::INTERMEDIATE,
+                    blend: Some(scene_blend_state(SceneBlendContract::SourceOver)),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
     let hud_interaction_pipeline = |label: &'static str,
                                     vertex_entry: &'static str,
                                     fragment_entry: &'static str,
@@ -2916,6 +3275,11 @@ fn create_scene_base_pipelines(
         world_additive_analytic_reserved,
         chrome_analytic,
         world_hud,
+        hud_coverage,
+        pet_body_coverage,
+        statistics_rear_shadow,
+        pet_rim,
+        pet_rim_statistics_reveal,
         hud_interaction_body,
         hud_interaction_particles,
         aperture_composite,
@@ -3160,12 +3524,17 @@ pub(super) struct GpuSceneCandidate {
     pub(super) primitive_buffer: wgpu::Buffer,
     pub(super) scene_content_buffer: wgpu::Buffer,
     pub(super) glyph_entry_buffer: wgpu::Buffer,
+    spatial_cue_buffer: wgpu::Buffer,
     pub(super) coverage_texture: wgpu::Texture,
     pub(super) coverage_view: wgpu::TextureView,
     pub(super) color_texture: wgpu::Texture,
     pub(super) color_view: wgpu::TextureView,
     pub(super) scene_bind_group: wgpu::BindGroup,
     pub(super) atlas_bind_group: wgpu::BindGroup,
+    spatial_cue_bind_group: wgpu::BindGroup,
+    /// [sensitive, independently redacted]. The sealed interaction scalar is
+    /// selected nominally with the capture projection and never read back.
+    spatial_cue_interaction_bind_groups: [wgpu::BindGroup; 2],
     pub(super) hud: super::hud::GpuHudResources,
     pub(super) generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     pub(super) source_revisions: crate::presentation::companion_scene::AppliedRevisions,
@@ -3176,6 +3545,7 @@ pub(super) struct GpuSceneCandidate {
     /// schedule directly and perform no full validation or heap allocation.
     pub(super) draw_plan: SceneDrawPlan,
     pub(super) hud_interaction_plan: Option<HudInteractionDrawPlan>,
+    pet_composite_plan: PetCompositeDrawPlan,
     blended_order: PersistentBlendOrder,
 }
 
@@ -3204,6 +3574,14 @@ impl GpuSceneCandidate {
             .saturating_add(2)
             .saturating_add(if hud_interaction_enabled { 3 } else { 0 })
     }
+
+    #[cfg(test)]
+    pub(super) fn committed_frame_globals_for_test(&self) -> super::compiler::FrameGlobalsGpuValue {
+        bytemuck::pod_read_unaligned(
+            &self.generation_state.frame.committed
+                [..std::mem::size_of::<super::compiler::FrameGlobalsGpuValue>()],
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3219,6 +3597,7 @@ pub(super) fn encode_sensitive_hud_hook(
     phase: super::hud::HudDrawPhase,
 ) -> Result<(), super::hud::HudGpuStagingError> {
     let bindings = super::hud::HudDrawBindings::new(
+        &shared.pipelines.hud_coverage,
         &shared.pipelines.world_hud,
         &candidate.scene_bind_group,
         &candidate.atlas_bind_group,
@@ -3248,6 +3627,7 @@ pub(super) fn encode_redacted_hud_hook(
     phase: super::hud::HudDrawPhase,
 ) -> Result<(), super::hud::HudGpuStagingError> {
     let bindings = super::hud::HudDrawBindings::new(
+        &shared.pipelines.hud_coverage,
         &shared.pipelines.world_hud,
         &candidate.scene_bind_group,
         &candidate.atlas_bind_group,
@@ -3323,6 +3703,17 @@ impl PreparedCaptureHud<'_> {
         }
     }
 
+    const fn statistics_rear_shadow_enabled(self) -> bool {
+        matches!(self, Self::Sensitive(_))
+    }
+
+    /// Both live and redacted HUD preparations replay the non-sensitive rim
+    /// crossing when their independently prepared interaction is enabled. The
+    /// redacted variant binds only the static capture interaction scalar.
+    const fn pet_rim_statistics_reveal_enabled(self) -> bool {
+        self.statistics_interaction().enabled()
+    }
+
     fn bind_interaction<'pass>(
         self,
         pass: &mut wgpu::RenderPass<'pass>,
@@ -3332,6 +3723,18 @@ impl PreparedCaptureHud<'_> {
             Self::Redacted(_) => hud.bind_redacted_interaction(pass),
             Self::Sensitive(_) => hud.bind_sensitive_interaction(pass),
         }
+    }
+
+    fn bind_spatial_cue_interaction<'pass>(
+        self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        candidate: &'pass GpuSceneCandidate,
+    ) {
+        let bind_group = match self {
+            Self::Sensitive(_) => &candidate.spatial_cue_interaction_bind_groups[0],
+            Self::Redacted(_) => &candidate.spatial_cue_interaction_bind_groups[1],
+        };
+        pass.set_bind_group(3, bind_group, &[]);
     }
 }
 
@@ -3451,14 +3854,13 @@ pub(super) fn materialize_gpu_candidate(
     if shared.device_identity != *device {
         return Err(SceneGpuError::ActualDeviceMismatch);
     }
-    validate_gpu_candidate_preflight(shared, upload, atlas)?;
     let draw_plan = validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases)
         .map_err(SceneGpuError::InvalidDrawPlan)?;
-    // Some deterministic unit fixtures intentionally omit the pet group. Keep
-    // those ordinary-depth candidates usable, while the interaction band
-    // still fails closed below unless the exact three-draw plan exists.
     let hud_interaction_plan =
         prepare_hud_interaction_draw_plan(&draw_plan, &upload.primitives).ok();
+    let pet_composite_plan = prepare_pet_composite_draw_plan(&draw_plan, &upload.primitives)
+        .map_err(SceneGpuError::InvalidDrawPlan)?;
+    validate_gpu_candidate_preflight(shared, upload, atlas)?;
     let prepared_hud_atlas = super::hud::PreparedHudAtlas::from_scene_atlas(atlas)
         .map_err(|_| SceneGpuError::InvalidHudAtlas)?;
     let generation_state = GpuSceneGenerationState::from_upload(upload);
@@ -3517,6 +3919,12 @@ pub(super) fn materialize_gpu_candidate(
             "glorp-scene-glyph-entries",
             bytemuck::cast_slice(&upload.glyph_entries),
             SceneBufferUsages::GLYPH_ENTRY,
+        );
+        let spatial_cue_buffer = create_initial_buffer(
+            device,
+            "glorp-scene-spatial-cue",
+            bytemuck::bytes_of(&SpatialCueGpuValue::zeroed()),
+            SceneBufferUsages::SPATIAL_CUE,
         );
         let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("glorp-scene-storage-bind-group"),
@@ -3597,10 +4005,20 @@ pub(super) fn materialize_gpu_candidate(
                 },
             ],
         });
+        let spatial_cue_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glorp-scene-spatial-cue-bind-group"),
+            layout: &shared.spatial_cue_bind_group_layout,
+            entries: &[buffer_bind_group_entry(2, &spatial_cue_buffer)],
+        });
         let hud = super::hud::GpuHudResources::create_unscoped(
             device,
             &shared.hud_bind_group_layout,
             prepared_hud_atlas,
+        );
+        let spatial_cue_interaction_bind_groups = hud.create_spatial_cue_interaction_bind_groups(
+            device,
+            &shared.spatial_cue_interaction_bind_group_layout,
+            &spatial_cue_buffer,
         );
         GpuSceneCandidate {
             device_identity: device.clone(),
@@ -3613,12 +4031,15 @@ pub(super) fn materialize_gpu_candidate(
             primitive_buffer,
             scene_content_buffer,
             glyph_entry_buffer,
+            spatial_cue_buffer,
             coverage_texture,
             coverage_view,
             color_texture,
             color_view,
             scene_bind_group,
             atlas_bind_group,
+            spatial_cue_bind_group,
+            spatial_cue_interaction_bind_groups,
             hud,
             generation_key: upload.generation_key,
             source_revisions: upload.source_revisions,
@@ -3627,6 +4048,7 @@ pub(super) fn materialize_gpu_candidate(
             generation_state,
             draw_plan,
             hud_interaction_plan,
+            pet_composite_plan,
             blended_order,
         }
     })
@@ -4154,6 +4576,10 @@ pub(super) struct SceneTargets {
     pub(super) statistics_coverage_texture: wgpu::Texture,
     pub(super) statistics_coverage_view: wgpu::TextureView,
     pub(super) statistics_coverage_bind_group: wgpu::BindGroup,
+    pub(super) pet_body_coverage_texture: wgpu::Texture,
+    pub(super) pet_body_coverage_view: wgpu::TextureView,
+    pub(super) pet_body_coverage_bind_group: wgpu::BindGroup,
+    pub(super) spatial_cue_coverage_bind_group: wgpu::BindGroup,
     pub(super) aperture_bind_group: wgpu::BindGroup,
     pub(super) final_bind_group: wgpu::BindGroup,
 }
@@ -4233,6 +4659,42 @@ impl SceneTargets {
                         resource: wgpu::BindingResource::TextureView(&statistics_coverage_view),
                     }],
                 });
+            let pet_body_coverage_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("glorp-scene-pet-body-coverage"),
+                size: key.extent,
+                mip_level_count: 1,
+                sample_count: key.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: SceneTextureContract::PET_BODY_COVERAGE,
+                usage: SceneTargetTextureUsages::PET_BODY_COVERAGE,
+                view_formats: &[],
+            });
+            let pet_body_coverage_view =
+                pet_body_coverage_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let pet_body_coverage_bind_group =
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("glorp-scene-pet-body-coverage-bind-group"),
+                    layout: &shared.statistics_coverage_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&pet_body_coverage_view),
+                    }],
+                });
+            let spatial_cue_coverage_bind_group =
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("glorp-scene-spatial-cue-coverage-bind-group"),
+                    layout: &shared.spatial_cue_coverage_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&statistics_coverage_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&pet_body_coverage_view),
+                        },
+                    ],
+                });
             let aperture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("glorp-scene-aperture-bind-group"),
                 layout: &shared.final_bind_group_layout,
@@ -4270,6 +4732,10 @@ impl SceneTargets {
                 statistics_coverage_texture,
                 statistics_coverage_view,
                 statistics_coverage_bind_group,
+                pet_body_coverage_texture,
+                pet_body_coverage_view,
+                pet_body_coverage_bind_group,
+                spatial_cue_coverage_bind_group,
                 aperture_bind_group,
                 final_bind_group,
             }
@@ -4411,6 +4877,7 @@ enum SceneRenderTestFault {
     MappedRangeFailure,
     NormalizeShortBuffer,
     OmitHudInteractionOverlay,
+    OmitPetRimStatisticsReveal,
 }
 
 /// Persistent offscreen execution state for scene-v2. Device and queue remain
@@ -4554,6 +5021,8 @@ impl SceneRenderer {
                 PreparedCaptureHud::Sensitive(prepared_hud),
                 #[cfg(test)]
                 false,
+                #[cfg(test)]
+                false,
             )?;
             encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
             self.staging_belt.finish();
@@ -4618,6 +5087,7 @@ impl SceneRenderer {
         candidate: &mut GpuSceneCandidate,
         content_delta: &crate::presentation::companion_scene::scene::ContentDelta,
         frame_delta: &crate::presentation::companion_scene::scene::FrameDelta,
+        private_spatial_frame: super::compiler::PrivateSpatialFrame,
         request: SceneRenderRequest,
         prepared_hud: &super::hud::SensitivePreparedHudFrame,
         surface_view: &wgpu::TextureView,
@@ -4651,7 +5121,7 @@ impl SceneRenderer {
             ));
         }
         let prepared = cpu
-            .prepare_deltas(content_delta, frame_delta)
+            .prepare_deltas_with_private(content_delta, frame_delta, private_spatial_frame)
             .map_err(SceneRenderError::DeltaPreparation)?;
         let dirty = prepared.dirty_spans();
         if dirty.from != candidate.source_revisions || dirty.to != request.version.applied {
@@ -4708,6 +5178,7 @@ impl SceneRenderer {
         candidate: &mut GpuSceneCandidate,
         content_delta: &crate::presentation::companion_scene::scene::ContentDelta,
         frame_delta: &crate::presentation::companion_scene::scene::FrameDelta,
+        private_spatial_frame: super::compiler::PrivateSpatialFrame,
         request: SceneRenderRequest,
         prepared_hud: &super::hud::SensitivePreparedHudFrame,
     ) -> Result<
@@ -4740,7 +5211,7 @@ impl SceneRenderer {
             ));
         }
         let prepared = cpu
-            .prepare_deltas(content_delta, frame_delta)
+            .prepare_deltas_with_private(content_delta, frame_delta, private_spatial_frame)
             .map_err(SceneRenderError::DeltaPreparation)?;
         let dirty = prepared.dirty_spans();
         if dirty.from != candidate.source_revisions || dirty.to != request.version.applied {
@@ -4879,6 +5350,8 @@ impl SceneRenderer {
                 shared,
                 candidate,
                 PreparedCaptureHud::Sensitive(prepared_hud),
+                #[cfg(test)]
+                false,
                 #[cfg(test)]
                 false,
             )?;
@@ -5126,6 +5599,8 @@ impl SceneRenderer {
                 PreparedCaptureHud::Sensitive(prepared_hud),
                 #[cfg(test)]
                 false,
+                #[cfg(test)]
+                false,
             )?;
             encode_aperture_surface(&mut encoder, surface_view, targets, shared, candidate);
             let encode_elapsed = encode_started_at
@@ -5368,6 +5843,9 @@ impl SceneRenderer {
         #[cfg(test)]
         let omit_hud_interaction_overlay =
             test_fault == SceneRenderTestFault::OmitHudInteractionOverlay;
+        #[cfg(test)]
+        let omit_pet_rim_statistics_reveal =
+            test_fault == SceneRenderTestFault::OmitPetRimStatisticsReveal;
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -5394,6 +5872,8 @@ impl SceneRenderer {
                 prepared_hud,
                 #[cfg(test)]
                 omit_hud_interaction_overlay,
+                #[cfg(test)]
+                omit_pet_rim_statistics_reveal,
             )?;
             encode_aperture_composite(&mut encoder, targets, shared, candidate);
             encoder.copy_texture_to_buffer(
@@ -5658,6 +6138,126 @@ fn encode_scene_delta_copies(
     copies
 }
 
+fn private_spatial_cue_value(
+    candidate: &GpuSceneCandidate,
+    key: SceneTargetKey,
+) -> Option<SpatialCueGpuValue> {
+    let content = bytemuck::pod_read_unaligned::<super::compiler::ContentGlobalsGpuValue>(
+        &candidate.generation_state.content_globals.pending
+            [..std::mem::size_of::<super::compiler::ContentGlobalsGpuValue>()],
+    );
+    let frame = bytemuck::pod_read_unaligned::<FrameGlobalsGpuValue>(
+        &candidate.generation_state.frame.pending[..std::mem::size_of::<FrameGlobalsGpuValue>()],
+    );
+    SpatialCueGpuValue::from_private_mirrors(content, frame, key)
+}
+
+fn stage_private_spatial_cue(
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+    candidate: &GpuSceneCandidate,
+    key: SceneTargetKey,
+) -> Result<(), super::hud::HudGpuStagingError> {
+    let value = private_spatial_cue_value(candidate, key)
+        .ok_or(super::hud::HudGpuStagingError::InvalidPrivateSpatialCue)?;
+    let size = wgpu::BufferSize::new(std::mem::size_of::<SpatialCueGpuValue>() as u64)
+        .expect("fixed spatial cue uniform is nonempty");
+    let mut view = staging_belt.write_buffer(encoder, &candidate.spatial_cue_buffer, 0, size);
+    view.copy_from_slice(bytemuck::bytes_of(&value));
+    Ok(())
+}
+
+fn encode_pet_body_coverage(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+) {
+    let plan = &candidate.pet_composite_plan;
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-pet-body-coverage"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.pet_body_coverage_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        ..Default::default()
+    });
+    bind_scene_geometry(&mut pass, candidate);
+    pass.set_pipeline(&shared.pipelines.pet_body_coverage);
+    pass.draw_indexed(
+        plan.body.index_range.clone(),
+        0,
+        plan.body.instance_range.clone(),
+    );
+}
+
+fn encode_statistics_rear_shadow(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-statistics-rear-shadow"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.raw_scene_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    pass.set_pipeline(&shared.pipelines.statistics_rear_shadow);
+    pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
+    pass.set_bind_group(2, &targets.spatial_cue_coverage_bind_group, &[]);
+    pass.set_bind_group(3, &candidate.spatial_cue_bind_group, &[]);
+    pass.draw(0..3, 0..1);
+}
+
+fn encode_pet_rim_in_pass(
+    pass: &mut wgpu::RenderPass<'_>,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+) {
+    pass.set_pipeline(&shared.pipelines.pet_rim);
+    pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
+    pass.set_bind_group(2, &targets.spatial_cue_coverage_bind_group, &[]);
+    pass.set_bind_group(3, &candidate.spatial_cue_bind_group, &[]);
+    pass.draw(0..3, 0..1);
+}
+
+fn encode_pet_rim_statistics_reveal_in_pass<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &'pass GpuSceneCandidate,
+    prepared_hud: PreparedCaptureHud<'_>,
+) {
+    pass.set_pipeline(&shared.pipelines.pet_rim_statistics_reveal);
+    pass.set_bind_group(0, &candidate.scene_bind_group, &[]);
+    pass.set_bind_group(2, &targets.spatial_cue_coverage_bind_group, &[]);
+    prepared_hud.bind_spatial_cue_interaction(pass, candidate);
+    pass.draw(0..3, 0..1);
+}
+
 fn encode_scene_with_sealed_hud(
     encoder: &mut wgpu::CommandEncoder,
     staging_belt: &mut wgpu::util::StagingBelt,
@@ -5666,6 +6266,7 @@ fn encode_scene_with_sealed_hud(
     candidate: &mut GpuSceneCandidate,
     prepared_hud: PreparedCaptureHud<'_>,
     #[cfg(test)] omit_hud_interaction_overlay: bool,
+    #[cfg(test)] omit_pet_rim_statistics_reveal: bool,
 ) -> Result<(), super::hud::HudGpuStagingError> {
     let hud_order_position = candidate
         .blended_order
@@ -5679,6 +6280,22 @@ fn encode_scene_with_sealed_hud(
     let interaction_enabled = prepared_hud.statistics_interaction().enabled();
     if interaction_enabled && candidate.hud_interaction_plan.is_none() {
         return Err(super::hud::HudGpuStagingError::InvalidInteractionPlan);
+    }
+    stage_private_spatial_cue(staging_belt, encoder, candidate, targets.key)?;
+    prepared_hud.encode(
+        encoder,
+        staging_belt,
+        &targets.raw_scene_view,
+        &targets.statistics_coverage_view,
+        &targets.depth_view,
+        shared,
+        candidate,
+        super::hud::HudDrawPhase::Coverage,
+    )?;
+    encode_pet_body_coverage(encoder, targets, shared, candidate);
+    encode_scene_room_background(encoder, targets, shared, candidate);
+    if prepared_hud.statistics_rear_shadow_enabled() {
+        encode_statistics_rear_shadow(encoder, targets, shared, candidate);
     }
     encode_scene_world_prefix(
         encoder,
@@ -5716,7 +6333,15 @@ fn encode_scene_with_sealed_hud(
     #[cfg(not(test))]
     let draw_hud_interaction_overlay = true;
     if interaction_enabled && draw_hud_interaction_overlay {
-        encode_hud_interaction_overlay(encoder, targets, shared, candidate, prepared_hud);
+        encode_hud_interaction_overlay(
+            encoder,
+            targets,
+            shared,
+            candidate,
+            prepared_hud,
+            #[cfg(test)]
+            omit_pet_rim_statistics_reveal,
+        );
     }
     encode_scene_world_suffix(
         encoder,
@@ -5730,6 +6355,35 @@ fn encode_scene_with_sealed_hud(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivateSpatialCuePass {
+    HudCoverage,
+    RoomBackground,
+    StatisticsRearShadow,
+    World,
+    PetBodyCoverage,
+    PetRim,
+}
+
+fn private_spatial_cue_passes(
+    statistics_rear_shadow_enabled: bool,
+    pet_rim_enabled: bool,
+) -> Vec<PrivateSpatialCuePass> {
+    let mut passes = vec![PrivateSpatialCuePass::HudCoverage];
+    if pet_rim_enabled {
+        passes.push(PrivateSpatialCuePass::PetBodyCoverage);
+    }
+    passes.push(PrivateSpatialCuePass::RoomBackground);
+    if statistics_rear_shadow_enabled {
+        passes.push(PrivateSpatialCuePass::StatisticsRearShadow);
+    }
+    passes.push(PrivateSpatialCuePass::World);
+    if pet_rim_enabled {
+        passes.push(PrivateSpatialCuePass::PetRim);
+    }
+    passes
+}
+
 fn encode_scene_world_prefix(
     encoder: &mut wgpu::CommandEncoder,
     targets: &SceneTargets,
@@ -5740,6 +6394,61 @@ fn encode_scene_world_prefix(
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("glorp-scene-world-prefix"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.raw_scene_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    bind_scene_geometry(&mut pass, candidate);
+    let order = &candidate.blended_order.active_draw_indices()[..hud_order_position];
+    if exclude_hud_interaction {
+        for draw_index in order {
+            let draw = &candidate.draw_plan.world_blended_unsorted[usize::from(*draw_index)];
+            if !candidate
+                .hud_interaction_plan
+                .as_ref()
+                .expect("enabled HUD interaction has a validated plan")
+                .contains_primitive(draw.primitive_index)
+            {
+                if pet_body_rim_matches(candidate, draw) {
+                    encode_pet_rim_in_pass(&mut pass, targets, shared, candidate);
+                }
+                encode_planned_draw(&mut pass, shared, draw);
+            }
+        }
+    } else {
+        for draw_index in order {
+            let draw = &candidate.draw_plan.world_blended_unsorted[usize::from(*draw_index)];
+            if pet_body_rim_matches(candidate, draw) {
+                encode_pet_rim_in_pass(&mut pass, targets, shared, candidate);
+            }
+            encode_planned_draw(&mut pass, shared, draw);
+        }
+    }
+}
+
+fn encode_scene_room_background(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &SceneTargets,
+    shared: &SceneGpuShared,
+    candidate: &GpuSceneCandidate,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-room-background"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &targets.raw_scene_view,
             depth_slice: None,
@@ -5762,24 +6471,6 @@ fn encode_scene_world_prefix(
     bind_scene_geometry(&mut pass, candidate);
     for draw in &candidate.draw_plan.opaque {
         encode_planned_draw(&mut pass, shared, draw);
-    }
-    let order = &candidate.blended_order.active_draw_indices()[..hud_order_position];
-    if exclude_hud_interaction {
-        for draw_index in order {
-            let draw = &candidate.draw_plan.world_blended_unsorted[usize::from(*draw_index)];
-            if !candidate
-                .hud_interaction_plan
-                .as_ref()
-                .expect("enabled HUD interaction has a validated plan")
-                .contains_primitive(draw.primitive_index)
-            {
-                encode_planned_draw(&mut pass, shared, draw);
-            }
-        }
-    } else {
-        for run in BlendedDrawRuns::new(&candidate.draw_plan.world_blended_unsorted, order) {
-            encode_blended_run(&mut pass, shared, &run);
-        }
     }
 }
 
@@ -5823,12 +6514,19 @@ fn encode_scene_world_suffix(
                 .expect("enabled HUD interaction has a validated plan")
                 .contains_primitive(draw.primitive_index)
             {
+                if pet_body_rim_matches(candidate, draw) {
+                    encode_pet_rim_in_pass(&mut pass, targets, shared, candidate);
+                }
                 encode_planned_draw(&mut pass, shared, draw);
             }
         }
     } else {
-        for run in BlendedDrawRuns::new(&candidate.draw_plan.world_blended_unsorted, order) {
-            encode_blended_run(&mut pass, shared, &run);
+        for draw_index in order {
+            let draw = &candidate.draw_plan.world_blended_unsorted[usize::from(*draw_index)];
+            if pet_body_rim_matches(candidate, draw) {
+                encode_pet_rim_in_pass(&mut pass, targets, shared, candidate);
+            }
+            encode_planned_draw(&mut pass, shared, draw);
         }
     }
 }
@@ -5867,8 +6565,15 @@ fn encode_hud_interaction_sources(
         .expect("enabled HUD interaction has a validated plan")
         .authored
     {
+        if planned.source == HudInteractionSource::PetBody {
+            encode_pet_rim_in_pass(&mut pass, targets, shared, candidate);
+        }
         encode_planned_draw(&mut pass, shared, &planned.draw);
     }
+}
+
+fn pet_body_rim_matches(candidate: &GpuSceneCandidate, draw: &ScenePlannedDraw) -> bool {
+    candidate.pet_composite_plan.body.primitive_index == draw.primitive_index
 }
 
 fn encode_hud_interaction_overlay(
@@ -5877,6 +6582,7 @@ fn encode_hud_interaction_overlay(
     shared: &SceneGpuShared,
     candidate: &GpuSceneCandidate,
     prepared_hud: PreparedCaptureHud<'_>,
+    #[cfg(test)] omit_pet_rim_statistics_reveal: bool,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("glorp-scene-hud-interaction-overlay"),
@@ -5908,6 +6614,32 @@ fn encode_hud_interaction_overlay(
         .expect("enabled HUD interaction has a validated plan")
         .authored
     {
+        if planned.source == HudInteractionSource::PetBody
+            && prepared_hud.pet_rim_statistics_reveal_enabled()
+            && {
+                #[cfg(test)]
+                {
+                    !omit_pet_rim_statistics_reveal
+                }
+                #[cfg(not(test))]
+                {
+                    true
+                }
+            }
+        {
+            encode_pet_rim_statistics_reveal_in_pass(
+                &mut pass,
+                targets,
+                shared,
+                candidate,
+                prepared_hud,
+            );
+            // The full-screen rim samples both private masks; restore the
+            // interaction pipeline's one-texture group before drawing body
+            // geometry through the statistics reveal shader.
+            pass.set_bind_group(2, &targets.statistics_coverage_bind_group, &[]);
+            prepared_hud.bind_interaction(&mut pass, &candidate.hud);
+        }
         let pipeline = match planned.source {
             HudInteractionSource::PetBody => &shared.pipelines.hud_interaction_body,
             HudInteractionSource::PetParticles => &shared.pipelines.hud_interaction_particles,
@@ -6281,7 +7013,7 @@ mod tests {
                 blend: WorldBlend::PremultipliedAlpha,
                 depth: DepthBehavior::WorldReadOnly,
                 binding: PrimitiveBinding::Analytic(AnalyticParamId(5)),
-                authored_order: 9,
+                authored_order: 11,
                 local_geometry: bounds,
                 space: PrimitiveSpace::World,
             },
@@ -6292,10 +7024,8 @@ mod tests {
                 resource: Some(glyph_resource),
                 blend: WorldBlend::Additive,
                 depth: DepthBehavior::WorldReadOnly,
-                binding: PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(
-                    PetArtFilter::Particles,
-                )),
-                authored_order: 10,
+                binding: PrimitiveBinding::Instances(InstanceGroupBinding::Ambient),
+                authored_order: 12,
                 local_geometry: bounds,
                 space: PrimitiveSpace::World,
             },
@@ -6311,7 +7041,7 @@ mod tests {
             &upload.frame_bytes,
         )
         .unwrap();
-        assert_eq!(order.committed_draw_indices(), &[6, 0, 1, 2, 3, 4, 5]);
+        assert_eq!(order.committed_draw_indices(), &[8, 0, 1, 2, 3, 4, 5, 6, 7]);
 
         let to = crate::presentation::companion_scene::AppliedRevisions::new(4, 6);
         let mut content = ContentDelta::empty();
@@ -6341,10 +7071,10 @@ mod tests {
                 true,
             )
             .unwrap();
-        assert_eq!(order.pending_draw_indices(), &[5, 6, 0, 1, 2, 3, 4]);
+        assert_eq!(order.pending_draw_indices(), &[7, 8, 0, 1, 2, 3, 4, 5, 6]);
         state.reset_pending();
         order.discard_pending();
-        assert_eq!(order.committed_draw_indices(), &[6, 0, 1, 2, 3, 4, 5]);
+        assert_eq!(order.committed_draw_indices(), &[8, 0, 1, 2, 3, 4, 5, 6, 7]);
 
         stage_prepared_scene_delta(&mut state, &prepared).unwrap();
         order
@@ -6357,7 +7087,7 @@ mod tests {
         cpu.commit_prepared(prepared);
         state.commit_pending();
         order.commit_pending();
-        assert_eq!(order.committed_draw_indices(), &[5, 6, 0, 1, 2, 3, 4]);
+        assert_eq!(order.committed_draw_indices(), &[7, 8, 0, 1, 2, 3, 4, 5, 6]);
     }
 
     /// CPU-side reference vectors for the family-aware WGSL glyph placement
@@ -6665,7 +7395,7 @@ mod tests {
     #[test]
     fn packed_mirror_layouts_have_frozen_offsets_sizes_and_checked_translation() {
         assert_eq!(PackedMirrorLayout::NODE_BYTES, 12_288);
-        assert_eq!(PackedMirrorLayout::CONTENT_GLOBALS_BYTES, 160);
+        assert_eq!(PackedMirrorLayout::CONTENT_GLOBALS_BYTES, 176);
         assert_eq!(PackedMirrorLayout::SCENE_CONTENT_BYTES, 15_552);
         assert_eq!(PackedMirrorLayout::FRAME_BYTES, 9_664);
         assert_eq!(PackedMirrorLayout::content_globals_offset(), 0);
@@ -6691,8 +7421,8 @@ mod tests {
             [0, 192, 832, 1_856, 5_952, 6_080, 8_128]
         );
         assert_eq!(
-            PackedMirrorLayout::translate_content_globals_span(ByteSpan { offset: 0, len: 160 }),
-            Ok(ByteSpan { offset: 0, len: 160 })
+            PackedMirrorLayout::translate_content_globals_span(ByteSpan { offset: 0, len: 176 }),
+            Ok(ByteSpan { offset: 0, len: 176 })
         );
         for family in [
             ContentMirrorFamily::Pet,
@@ -6725,7 +7455,7 @@ mod tests {
         assert_eq!(
             PackedMirrorLayout::translate_scene_content_span(
                 ContentMirrorFamily::Globals,
-                ByteSpan { offset: 0, len: 160 },
+                ByteSpan { offset: 0, len: 176 },
             ),
             Err(PackedMirrorLayoutError::NonSceneContentFamily)
         );
@@ -6757,23 +7487,23 @@ mod tests {
                 },
                 SceneMutableBufferLayout {
                     staging_offset: 12_288,
-                    len: 160,
+                    len: 176,
                     copy_alignment: 4,
                 },
                 SceneMutableBufferLayout {
-                    staging_offset: 12_448,
+                    staging_offset: 12_464,
                     len: 9_664,
                     copy_alignment: 4,
                 },
                 SceneMutableBufferLayout {
-                    staging_offset: 22_112,
+                    staging_offset: 22_128,
                     len: 15_552,
                     copy_alignment: 4,
                 },
             ],
         );
-        assert_eq!(PackedMirrorLayout::MUTABLE_BUFFER_BYTES, 37_664);
-        assert_eq!(PackedMirrorLayout::FULL_FRAME_STAGING_BYTES, 38_496);
+        assert_eq!(PackedMirrorLayout::MUTABLE_BUFFER_BYTES, 37_680);
+        assert_eq!(PackedMirrorLayout::FULL_FRAME_STAGING_BYTES, 38_512);
         assert!(
             PackedMirrorLayout::FULL_FRAME_STAGING_BYTES
                 <= usize::try_from(SCENE_STAGING_BELT_CHUNK_BYTES).unwrap()
@@ -6785,8 +7515,8 @@ mod tests {
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::ContentGlobals,
                     offset: 0,
-                    len: 160,
-                    span_alignment: 160,
+                    len: 176,
+                    span_alignment: 176,
                 },
                 PackedMirrorFamilyLayout {
                     buffer: SceneMutableBuffer::SceneContent,
@@ -6888,7 +7618,7 @@ mod tests {
         dirty
             .insert_content(
                 ContentMirrorFamily::Globals,
-                ByteSpan { offset: 0, len: 160 },
+                ByteSpan { offset: 0, len: 176 },
             )
             .unwrap();
         dirty
@@ -6904,7 +7634,7 @@ mod tests {
         assert_eq!(dirty.nodes.as_slice(), &[ByteSpan { offset: 96, len: 96 }]);
         assert_eq!(
             dirty.content_globals.as_slice(),
-            &[ByteSpan { offset: 0, len: 160 }]
+            &[ByteSpan { offset: 0, len: 176 }]
         );
         assert_eq!(
             dirty.frame.as_slice(),
@@ -8180,12 +8910,14 @@ mod tests {
         let glyph_alias = alias("material.scene-unlit-glyph");
         let multiply_alias = alias("material.scene-multiply");
         let chrome_alias = alias("material.scene-chrome");
+        let additive_alias = alias("material.scene-additive");
         let analytic_resource_alias = alias("resource.scene-analytic");
         let hud_resource_alias = alias("resource.scene-hud-atlas");
         let unlit = MaterialId::from_alias(&unlit_alias);
         let glyph = MaterialId::from_alias(&glyph_alias);
         let multiply = MaterialId::from_alias(&multiply_alias);
         let chrome = MaterialId::from_alias(&chrome_alias);
+        let additive = MaterialId::from_alias(&additive_alias);
         let analytic_resource = ResourceId::from_alias(&analytic_resource_alias);
         let hud_resource = ResourceId::from_alias(&hud_resource_alias);
         fixture.template.materials = vec![
@@ -8208,6 +8940,11 @@ mod tests {
                 id: chrome,
                 alias: chrome_alias,
                 kind: MaterialKind::ScreenChrome,
+            },
+            MaterialTemplate {
+                id: additive,
+                alias: additive_alias,
+                kind: MaterialKind::AdditiveGlow,
             },
         ];
         fixture.template.resources = vec![
@@ -8318,6 +9055,37 @@ mod tests {
                 PrimitiveSpace::Screen,
                 8,
             ),
+            // The synthetic render fixture keeps its existing world/chrome
+            // controls blank while still satisfying the retained private
+            // pet-coverage contract.
+            PrimitiveTemplate {
+                node,
+                kind: PrimitiveKind::InstanceQuad,
+                material: glyph,
+                resource: Some(hud_resource),
+                blend: WorldBlend::PremultipliedAlpha,
+                depth: DepthBehavior::WorldReadOnly,
+                binding: PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(
+                    PetArtFilter::Body,
+                )),
+                authored_order: 9,
+                local_geometry: bounds,
+                space: PrimitiveSpace::World,
+            },
+            PrimitiveTemplate {
+                node,
+                kind: PrimitiveKind::InstanceQuad,
+                material: additive,
+                resource: Some(hud_resource),
+                blend: WorldBlend::Additive,
+                depth: DepthBehavior::WorldReadOnly,
+                binding: PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(
+                    PetArtFilter::Particles,
+                )),
+                authored_order: 10,
+                local_geometry: bounds,
+                space: PrimitiveSpace::World,
+            },
         ];
         // Keep the synthetic GPU fixture observable through its final dim pass:
         // binding dim to the fractional-opacity child prevents it from hiding
@@ -8381,7 +9149,7 @@ mod tests {
             (0..6)
                 .map(scene_storage_min_binding_size)
                 .collect::<Vec<_>>(),
-            vec![12_288, 160, 9_664, 64, 15_552, 64],
+            vec![12_288, 176, 9_664, 64, 15_552, 64],
         );
     }
 
@@ -8693,7 +9461,7 @@ mod tests {
             std::mem::size_of_val(upload.glyph_entries.as_slice()),
         ];
         assert_eq!(candidate_buffer_lengths.len(), 8);
-        assert_eq!(candidate_buffer_lengths[3], 160);
+        assert_eq!(candidate_buffer_lengths[3], 176);
         assert_eq!(candidate_buffer_lengths[4], 9_664);
         assert_eq!(
             candidate_buffer_lengths[5],
@@ -9605,22 +10373,22 @@ mod tests {
 
     #[test]
     fn gpu_resource_accounting_is_exact_and_not_a_live_global_metric() {
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 5);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.bind_group_layouts, 8);
         assert_eq!(SceneGpuSharedFacts::EXPECTED.samplers, 1);
-        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 16);
-        assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 12);
+        assert_eq!(SceneGpuSharedFacts::EXPECTED.pipelines, 20);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.buffers, 13);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.textures, 2);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.texture_views, 2);
-        assert_eq!(GpuSceneCandidateFacts::EXPECTED.bind_groups, 4);
+        assert_eq!(GpuSceneCandidateFacts::EXPECTED.bind_groups, 7);
         assert_eq!(GpuSceneCandidateFacts::EXPECTED.static_uploads, 10);
-        assert_eq!(SceneTargetFacts::EXPECTED.textures, 4);
-        assert_eq!(SceneTargetFacts::EXPECTED.texture_views, 4);
-        assert_eq!(SceneTargetFacts::EXPECTED.bind_groups, 3);
+        assert_eq!(SceneTargetFacts::EXPECTED.textures, 5);
+        assert_eq!(SceneTargetFacts::EXPECTED.texture_views, 5);
+        assert_eq!(SceneTargetFacts::EXPECTED.bind_groups, 5);
         assert_eq!(
             SceneGpuSharedFacts::EXPECTED.persistent_owned_handles()
                 + GpuSceneCandidateFacts::EXPECTED.persistent_owned_handles()
                 + SceneTargetFacts::EXPECTED.persistent_owned_handles(),
-            53,
+            68,
         );
     }
 
@@ -9776,9 +10544,9 @@ mod tests {
         assert!(vertex.contains("frame_buffer.globals.projection * frame_buffer.globals.view"));
 
         let fragment = SCENE_SHADER_SOURCE
-            .split("fn fs_hud(")
+            .split("fn hud_glyph_coverage(")
             .nth(1)
-            .expect("HUD fragment entry");
+            .expect("HUD coverage entry");
         let visible = fragment.find("input.visible == 0u").expect("visible guard");
         let bounds = fragment
             .find("arrayLength(&glyph_entry_buffer.values)")
@@ -10515,6 +11283,116 @@ mod tests {
             .contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
         assert!(SceneTargetTextureUsages::STATISTICS_COVERAGE
             .contains(wgpu::TextureUsages::TEXTURE_BINDING));
+    }
+
+    #[test]
+    fn pet_body_coverage_target_is_private_fixed_r8() {
+        assert_eq!(
+            SceneTextureContract::PET_BODY_COVERAGE,
+            wgpu::TextureFormat::R8Unorm
+        );
+        assert!(SceneTargetTextureUsages::PET_BODY_COVERAGE
+            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
+        assert!(SceneTargetTextureUsages::PET_BODY_COVERAGE
+            .contains(wgpu::TextureUsages::TEXTURE_BINDING));
+    }
+
+    #[test]
+    fn statistics_shadow_composite_runs_after_room_background_before_world_blends() {
+        assert_eq!(
+            private_spatial_cue_passes(true, true),
+            vec![
+                PrivateSpatialCuePass::HudCoverage,
+                PrivateSpatialCuePass::PetBodyCoverage,
+                PrivateSpatialCuePass::RoomBackground,
+                PrivateSpatialCuePass::StatisticsRearShadow,
+                PrivateSpatialCuePass::World,
+                PrivateSpatialCuePass::PetRim,
+            ]
+        );
+    }
+
+    #[test]
+    fn retained_rim_uses_pet_body_draw_only_and_precedes_the_body() {
+        let candidate = super::super::compiler::compile_projected_full_scene_for_render_test(0);
+        let resources = super::super::resources::CompiledRetainedResources::compile(
+            &super::super::resources::GlyphRepertoireManifest::for_active_pet(
+                crate::round::smooth::CompanionContentIdentity::for_pet(
+                    crate::pet::generation::Species::Fuzz,
+                ),
+                2.0,
+            ),
+        )
+        .unwrap();
+        let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+            resources.atlas(),
+            candidate.generation_key.resources,
+        )
+        .unwrap();
+        let upload = prepare_scene_upload(&candidate, &atlas).unwrap();
+        let draw_plan =
+            validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases).unwrap();
+        let plan = prepare_pet_composite_draw_plan(&draw_plan, &upload.primitives).unwrap();
+        assert_eq!(plan.body.pipeline, ScenePipelineClass::WorldSourceOverGlyph);
+        assert_eq!(
+            plan.particles.pipeline,
+            ScenePipelineClass::WorldAdditiveGlyph
+        );
+        assert!(plan.body.authored_order < plan.particles.authored_order);
+    }
+
+    #[test]
+    fn retained_rim_crosses_statistics_with_body_and_excludes_world_shadow_sources() {
+        let source = include_str!("render.rs");
+        let overlay = source
+            .split("fn encode_hud_interaction_overlay(")
+            .nth(1)
+            .expect("HUD interaction overlay exists")
+            .split("fn encode_scene_chrome(")
+            .next()
+            .expect("HUD interaction overlay has a bounded body");
+        let rim = overlay
+            .find("encode_pet_rim_statistics_reveal_in_pass(")
+            .expect("masked rim reveal is encoded with the body");
+        let body = overlay
+            .find("HudInteractionSource::PetBody =>")
+            .expect("body source remains closed");
+        assert!(
+            rim < body,
+            "masked rim must be drawn before the body center"
+        );
+
+        let reveal = SCENE_SHADER_SOURCE
+            .split("fn fs_pet_rim_statistics_reveal(")
+            .nth(1)
+            .expect("masked rim fragment exists")
+            .split("@fragment")
+            .next()
+            .expect("masked rim fragment has a bounded body");
+        for required in [
+            "textureLoad(scene_sampled_texture",
+            "hud_interaction_buffer.value.reveal_mix",
+            "statistics_coverage * reveal_mix",
+        ] {
+            assert!(
+                reveal.contains(required),
+                "missing rim reveal contract: {required}"
+            );
+        }
+
+        let plan = source
+            .split("fn prepare_pet_composite_draw_plan(")
+            .nth(1)
+            .expect("pet composite plan exists")
+            .split("#[derive(Debug, Clone, Copy, PartialEq)]")
+            .next()
+            .expect("pet composite plan has a bounded body");
+        for forbidden in ["WallShadow", "FloorShadow", "PropGlyphs", "Analytic"] {
+            assert!(
+                !plan.contains(forbidden),
+                "private rim selection must exclude {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -14373,6 +15251,43 @@ mod tests {
             let [width, height] = normal.physical_extent_pixels;
             let hud_coverage = read_statistics_coverage(&device, &queue, &renderer, width, height);
 
+            renderer.inject_test_fault(SceneRenderTestFault::OmitPetRimStatisticsReveal);
+            let without_rim_statistics_reveal = renderer
+                .render_offscreen(
+                    &device,
+                    &queue,
+                    &shared,
+                    &mut candidate,
+                    request.clone(),
+                    &hud,
+                )
+                .unwrap();
+            let rim_statistics_reveal_pixels = normal
+                .rgba
+                .chunks_exact(4)
+                .zip(without_rim_statistics_reveal.rgba.chunks_exact(4))
+                .enumerate()
+                .filter(|(pixel_index, (with_reveal, without_reveal))| {
+                    if with_reveal != without_reveal {
+                        assert_ne!(
+                            hud_coverage[*pixel_index], 0,
+                            "redacted rim reveal must remain within the static statistics mask"
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            if depth > at_start_z {
+                assert!(
+                    rim_statistics_reveal_pixels > 0,
+                    "redacted capture lost the non-sensitive rim crossing at depth={depth}"
+                );
+            } else {
+                assert_eq!(rim_statistics_reveal_pixels, 0);
+            }
+
             renderer.inject_test_fault(SceneRenderTestFault::OmitHudInteractionOverlay);
             let without_overlay = renderer
                 .render_offscreen(
@@ -14417,7 +15332,7 @@ mod tests {
 
             let mut contribution = 0_u64;
             let mut intersection_pixels = 0_usize;
-            for (pixel_index, (((normal, control), pet), no_pet)) in normal
+            for (pixel_index, (((normal, control), _pet), _no_pet)) in normal
                 .rgba
                 .chunks_exact(4)
                 .zip(without_overlay.rgba.chunks_exact(4))
@@ -14425,7 +15340,10 @@ mod tests {
                 .zip(without_pet.rgba.chunks_exact(4))
                 .enumerate()
             {
-                let inside_intersection = hud_coverage[pixel_index] != 0 && pet != no_pet;
+                // The crossing rim extends just beyond the body glyph's
+                // visible color, but remains limited to the independently
+                // prepared redacted statistics coverage.
+                let inside_intersection = hud_coverage[pixel_index] != 0;
                 if inside_intersection {
                     intersection_pixels += 1;
                     contribution = contribution.saturating_add(
@@ -14438,7 +15356,7 @@ mod tests {
                 } else {
                     assert_eq!(
                         normal, control,
-                        "same-depth overlay changed outside HUD/pet intersection: probe={probe_index}, pixel={pixel_index}",
+                        "same-depth overlay changed outside static HUD coverage: probe={probe_index}, pixel={pixel_index}",
                     );
                 }
             }
@@ -15013,6 +15931,118 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn pet_composite_preflight_rejects_missing_wrong_and_duplicate_draws_before_submission() {
+        use crate::pet::generation::Species;
+        use crate::round::smooth::CompanionContentIdentity;
+
+        let (device, queue) = native_device();
+        let cpu = super::super::compiler::compile_projected_full_scene_for_render_test(0);
+        let resources = super::super::resources::CompiledRetainedResources::compile(
+            &super::super::resources::GlyphRepertoireManifest::for_active_pet(
+                CompanionContentIdentity::for_pet(Species::Fuzz),
+                2.0,
+            ),
+        )
+        .unwrap();
+        let atlas = super::super::resources::PreparedSceneAtlas::from_compiled_for_generation(
+            resources.atlas(),
+            cpu.generation_key.resources,
+        )
+        .unwrap();
+        let upload = prepare_scene_upload(&cpu, &atlas).unwrap();
+        let shared = SceneGpuShared::create(&device, upload.generation_key.device).unwrap();
+        let draw_plan =
+            validate_scene_draw_plan(&upload.primitives, &upload.draws, &upload.phases).unwrap();
+        let composite = prepare_pet_composite_draw_plan(&draw_plan, &upload.primitives).unwrap();
+        let body_index = usize::try_from(composite.body.primitive_index).unwrap();
+        let particles_index = usize::try_from(composite.particles.primitive_index).unwrap();
+        let source_over_alternative = draw_plan
+            .world_blended_unsorted
+            .iter()
+            .find(|draw| {
+                draw.pipeline == ScenePipelineClass::WorldSourceOverGlyph
+                    && usize::try_from(draw.primitive_index).unwrap() != body_index
+            })
+            .map(|draw| usize::try_from(draw.primitive_index).unwrap())
+            .expect("production scene has a non-pet source-over glyph draw");
+        let additive_alternative = draw_plan
+            .world_blended_unsorted
+            .iter()
+            .find(|draw| {
+                draw.pipeline == ScenePipelineClass::WorldAdditiveGlyph
+                    && usize::try_from(draw.primitive_index).unwrap() != particles_index
+            })
+            .map(|draw| usize::try_from(draw.primitive_index).unwrap())
+            .expect("production scene has a non-pet additive glyph draw");
+        let replace_draw = |candidate: &mut PreparedSceneUpload, target: usize, source: usize| {
+            let authored_order = candidate.primitives[target].authored_order;
+            candidate.primitives[target] = candidate.primitives[source];
+            candidate.primitives[target].authored_order = authored_order;
+            candidate.draws[target] = candidate.draws[source].clone();
+            candidate.draws[target].authored_order = authored_order;
+        };
+
+        let mut missing_body = upload.clone();
+        replace_draw(&mut missing_body, body_index, source_over_alternative);
+        let mut wrong_body = upload.clone();
+        replace_draw(&mut wrong_body, body_index, particles_index);
+        let mut duplicate_particles = upload.clone();
+        replace_draw(
+            &mut duplicate_particles,
+            additive_alternative,
+            particles_index,
+        );
+
+        let renderer = SceneRenderer::new(&device, &queue, &shared);
+        for (label, malformed) in [
+            ("missing body", missing_body),
+            ("wrong body", wrong_body),
+            ("duplicate particles", duplicate_particles),
+        ] {
+            assert!(
+                validate_scene_draw_plan(
+                    &malformed.primitives,
+                    &malformed.draws,
+                    &malformed.phases
+                )
+                .is_ok(),
+                "{label} must reach the private composite preflight"
+            );
+            assert_eq!(
+                prepare_pet_composite_draw_plan(
+                    &validate_scene_draw_plan(
+                        &malformed.primitives,
+                        &malformed.draws,
+                        &malformed.phases,
+                    )
+                    .unwrap(),
+                    &malformed.primitives,
+                ),
+                Err(SceneDrawPlanError::InvalidHudInteractionPlan),
+                "{label} must be an invalid pet composite"
+            );
+            let error =
+                match materialize_gpu_candidate(&device, &queue, &shared, &malformed, &atlas) {
+                    Ok(_) => panic!("{label} composite materialized"),
+                    Err(error) => error,
+                };
+            assert!(
+                matches!(
+                    error,
+                    SceneGpuError::InvalidDrawPlan(SceneDrawPlanError::InvalidHudInteractionPlan)
+                ),
+                "unexpected {label} materialization error: {error:?}"
+            );
+            assert_eq!(
+                renderer.cache_and_submission_events_for_test(),
+                (0, 0, 0),
+                "{label} must leave the failed render transaction unsubmitted"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[derive(Clone, Copy)]
     enum TestPreparedHud<'prepared> {
         Sensitive(&'prepared super::super::hud::SensitivePreparedHudFrame),
@@ -15103,6 +16133,7 @@ mod tests {
             });
         }
         for phase in [
+            super::super::hud::HudDrawPhase::Coverage,
             super::super::hud::HudDrawPhase::Echo,
             super::super::hud::HudDrawPhase::Primary,
         ] {

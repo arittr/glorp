@@ -24,7 +24,8 @@ use crate::commands::companion_mode::{
     RendererRuntimeState,
 };
 use crate::companion::app::{
-    CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame, SmoothDepthIdentitySource,
+    CompanionGridMetrics, PreparedCompanionFrame, PreparedGaugeFrame, PreparedSpatialCueReview,
+    SmoothDepthIdentitySource,
 };
 use crate::companion::retained::{
     ActiveRetainedHost, CapacityContract, CompanionCapacityInventory, FrameDisposition,
@@ -249,6 +250,9 @@ impl PairedReviewFrame {
             aperture: ApertureIdentity::from_aperture(frame.review_aperture()),
             background: color_channels(frame.review_background()),
             pet_rim_color: color_channels(frame.review_pet_rim_color()),
+            spatial_cues: frame
+                .review_spatial_cues()
+                .map(SpatialCueStyleIdentity::from_prepared),
             dim_overlay: frame.review_dim_overlay(),
             gauges: GaugeIdentity::from_gauges(frame.review_gauges()),
             hud: HudIdentity::from_hud(frame.review_hud()),
@@ -311,6 +315,9 @@ pub struct PairedReviewIdentity {
     pub aperture: ApertureIdentity,
     pub background: [f32; 4],
     pub pet_rim_color: [f32; 4],
+    /// Renderer-neutral spatial style only. Coverage masks, HUD glyphs, and
+    /// projected pixels remain private renderer state.
+    pub spatial_cues: Option<SpatialCueStyleIdentity>,
     pub dim_overlay: bool,
     pub gauges: GaugeIdentity,
     pub hud: HudIdentity,
@@ -323,6 +330,37 @@ pub struct PairedReviewIdentity {
     pub elapsed_ms: u64,
     pub frame_id: u64,
     pub resource_generation: u64,
+}
+
+/// Non-sensitive spatial style agreement between the frozen AppKit and
+/// retained preparations. It deliberately records scalar style and the pet's
+/// prepared pose/facing, never a mask, a sampled coverage count, or a
+/// value-shaped projection.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SpatialCueStyleIdentity {
+    pub statistics_offset_points: [f32; 2],
+    pub statistics_softness_points: f32,
+    pub statistics_opacity: f32,
+    pub rim_enabled: bool,
+    pub rim_radius_points: f32,
+    pub rim_alpha: f32,
+    pub pet_pose_points: [f32; 2],
+    pub pet_facing: i8,
+}
+
+impl SpatialCueStyleIdentity {
+    fn from_prepared(prepared: PreparedSpatialCueReview) -> Self {
+        Self {
+            statistics_offset_points: prepared.statistics_offset_points,
+            statistics_softness_points: prepared.statistics_softness_points,
+            statistics_opacity: prepared.statistics_opacity,
+            rim_enabled: prepared.rim_enabled,
+            rim_radius_points: prepared.rim_radius_points,
+            rim_alpha: prepared.rim_alpha,
+            pet_pose_points: prepared.pet_pose_points,
+            pet_facing: prepared.pet_facing,
+        }
+    }
 }
 
 /// Logical (points) or physical (pixels) frame dimensions.
@@ -1210,6 +1248,35 @@ mod tests {
         let mut changed = frame.clone();
         changed.identity.gauges.pace_fraction = 0.75;
         assert_ne!(frame.checksum, changed.recompute_checksum());
+    }
+
+    #[test]
+    fn paired_review_uses_matching_spatial_cue_parameters_without_serializing_coverage() {
+        let prepared = PreparedSpatialCueReview {
+            statistics_offset_points: [2.25, -7.50],
+            statistics_softness_points: 6.25,
+            statistics_opacity: 0.10,
+            rim_enabled: true,
+            rim_radius_points: 1.25,
+            rim_alpha: 0.16,
+            pet_pose_points: [122.5, 187.0],
+            pet_facing: -1,
+        };
+        let appkit = SpatialCueStyleIdentity::from_prepared(prepared);
+        let retained = SpatialCueStyleIdentity::from_prepared(prepared);
+        assert_eq!(appkit, retained);
+
+        let mut identity = PairedReviewFrame::fixture().identity;
+        identity.spatial_cues = Some(retained);
+        let serialized = serde_json::to_string(&identity).unwrap();
+        for forbidden in ["coverage", "projection", "pixels", "hud_identity"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "paired identity must not serialize private {forbidden}"
+            );
+        }
+        assert!(serialized.contains("statistics_offset_points"));
+        assert!(serialized.contains("pet_facing"));
     }
 
     fn smooth_renderer_identity(

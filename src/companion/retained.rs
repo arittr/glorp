@@ -654,7 +654,11 @@ impl RetainedSceneGenerationState {
             return Err(SceneCandidatePreparationError::StaleCandidate);
         }
         let prepared = cpu
-            .prepare_deltas(rebase.content(), rebase.frame())
+            .prepare_deltas_with_private(
+                rebase.content(),
+                rebase.frame(),
+                compiler::PrivateSpatialFrame::from_snapshot(self.runtime.snapshot()),
+            )
             .map_err(SceneCandidatePreparationError::CpuDelta)?;
         cpu.commit_prepared(prepared);
         let upload = render::prepare_scene_upload(&cpu, &atlas)
@@ -698,7 +702,11 @@ impl RetainedSceneGenerationState {
         }
         let prepared = candidate
             .cpu
-            .prepare_deltas(rebase.content(), rebase.frame())
+            .prepare_deltas_with_private(
+                rebase.content(),
+                rebase.frame(),
+                compiler::PrivateSpatialFrame::from_snapshot(self.runtime.snapshot()),
+            )
             .map_err(SceneCandidatePreparationError::CpuDelta)?;
         candidate.cpu.commit_prepared(prepared);
         let upload = render::prepare_scene_upload(&candidate.cpu, &candidate.atlas)
@@ -763,20 +771,42 @@ impl RetainedSceneGenerationState {
             ));
         }
         let request = render::SceneRenderRequest::new(version, request_extent, backing_scale);
+        let private_spatial_frame =
+            compiler::PrivateSpatialFrame::from_snapshot(lease.source_snapshot());
         let draw_count = active
             .gpu
             .submitted_draw_count(prepared_hud.statistics_interaction().enabled());
         let (dirty_metrics, timings) = if active.version.applied == version.applied {
-            let (_, timings) = renderer.submit_active_to_surface(
-                device,
-                queue,
-                shared,
-                &mut active.gpu,
-                request,
-                prepared_hud,
-                surface_view,
-            )?;
-            (None, timings)
+            if active
+                .cpu
+                .private_spatial_frame_matches(private_spatial_frame)
+            {
+                let (_, timings) = renderer.submit_active_to_surface(
+                    device,
+                    queue,
+                    shared,
+                    &mut active.gpu,
+                    request,
+                    prepared_hud,
+                    surface_view,
+                )?;
+                (None, timings)
+            } else {
+                let (_, dirty_metrics, timings) = renderer.submit_active_to_surface_with_delta(
+                    device,
+                    queue,
+                    shared,
+                    &mut active.cpu,
+                    &mut active.gpu,
+                    lease.content_delta(),
+                    lease.frame_delta(),
+                    private_spatial_frame,
+                    request,
+                    prepared_hud,
+                    surface_view,
+                )?;
+                (Some(dirty_metrics), timings)
+            }
         } else {
             let (_, dirty_metrics, timings) = renderer.submit_active_to_surface_with_delta(
                 device,
@@ -786,6 +816,7 @@ impl RetainedSceneGenerationState {
                 &mut active.gpu,
                 lease.content_delta(),
                 lease.frame_delta(),
+                private_spatial_frame,
                 request,
                 prepared_hud,
                 surface_view,
@@ -830,19 +861,41 @@ impl RetainedSceneGenerationState {
             ));
         }
         let request = render::SceneRenderRequest::new(version, request_extent, backing_scale);
+        let private_spatial_frame =
+            compiler::PrivateSpatialFrame::from_snapshot(lease.source_snapshot());
         let draw_count = active
             .gpu
             .submitted_draw_count(prepared_hud.statistics_interaction().enabled());
         let (submission, dirty_metrics, timings) = if active.version.applied == version.applied {
-            let (submission, timings) = renderer.submit_active_offscreen(
-                device,
-                queue,
-                shared,
-                &mut active.gpu,
-                request,
-                prepared_hud,
-            )?;
-            (submission, None, timings)
+            if active
+                .cpu
+                .private_spatial_frame_matches(private_spatial_frame)
+            {
+                let (submission, timings) = renderer.submit_active_offscreen(
+                    device,
+                    queue,
+                    shared,
+                    &mut active.gpu,
+                    request,
+                    prepared_hud,
+                )?;
+                (submission, None, timings)
+            } else {
+                let (submission, dirty_metrics, timings) = renderer
+                    .submit_active_offscreen_with_delta(
+                        device,
+                        queue,
+                        shared,
+                        &mut active.cpu,
+                        &mut active.gpu,
+                        lease.content_delta(),
+                        lease.frame_delta(),
+                        private_spatial_frame,
+                        request,
+                        prepared_hud,
+                    )?;
+                (submission, Some(dirty_metrics), timings)
+            }
         } else {
             let (submission, dirty_metrics, timings) = renderer
                 .submit_active_offscreen_with_delta(
@@ -853,6 +906,7 @@ impl RetainedSceneGenerationState {
                     &mut active.gpu,
                     lease.content_delta(),
                     lease.frame_delta(),
+                    private_spatial_frame,
                     request,
                     prepared_hud,
                 )?;
@@ -2822,8 +2876,10 @@ mod tests {
         };
 
         let (mut generations, device, queue, shared) = ready_scene_generation();
-        let newer =
-            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(1));
+        let mut newer = super::compiler::projected_full_scene_snapshot_for_render_test(1);
+        newer.frame.activity_opacity = 0.73;
+        newer.frame.reduce_motion = true;
+        let newer = std::sync::Arc::new(newer);
         let prepared = generations.runtime.prepare_snapshot(newer).unwrap();
         let mut effects = generations.runtime.commit_prepared(prepared).unwrap();
         assert!(matches!(
@@ -2844,7 +2900,194 @@ mod tests {
         assert_eq!(candidate.version.applied, desired);
         assert_eq!(candidate.cpu.source_revisions, desired);
         assert_eq!(candidate.gpu.source_revisions, desired);
+        let globals = bytemuck::pod_read_unaligned::<super::compiler::FrameGlobalsGpuValue>(
+            candidate.cpu.frame_upload_sources().globals,
+        );
+        assert_eq!(globals.activity_opacity, 0.73);
+        assert_eq!(globals.reduce_motion, 1);
         assert!(generations.begin_activation().is_ok());
+    }
+
+    #[test]
+    fn materializing_a_rebased_cpu_candidate_uses_current_private_spatial_frame() {
+        use crate::presentation::companion_scene::runtime::{
+            CompanionSceneRuntimeState, ResourceInvalidation,
+        };
+
+        let initial =
+            std::sync::Arc::new(super::compiler::projected_full_scene_snapshot_for_render_test(0));
+        let runtime = CompanionSceneRuntimeState::cold_start(initial).unwrap();
+        let mut generations = RetainedSceneGenerationState::new(runtime);
+        let request = generations
+            .invalidate_resources(ResourceInvalidation::BackingScaleAtlas)
+            .unwrap();
+        complete_scene_request(&mut generations, request, 2.0);
+
+        let mut newer = (**generations.runtime.snapshot()).clone();
+        newer.frame.activity_opacity = 0.41;
+        newer.frame.reduce_motion = true;
+        let prepared = generations
+            .runtime
+            .prepare_snapshot(std::sync::Arc::new(newer))
+            .unwrap();
+        generations.runtime.commit_prepared(prepared).unwrap();
+
+        let (device, queue) = native_device();
+        let shared = super::render::SceneGpuShared::create(
+            &device,
+            generations.pending_identity().unwrap().key().device,
+        )
+        .unwrap();
+        generations
+            .materialize_ready_candidate(&device, &queue, &shared)
+            .unwrap();
+
+        let candidate = generations.ready_candidate.as_ref().unwrap();
+        let globals = bytemuck::pod_read_unaligned::<super::compiler::FrameGlobalsGpuValue>(
+            candidate.cpu.frame_upload_sources().globals,
+        );
+        assert_eq!(globals.activity_opacity, 0.41);
+        assert_eq!(globals.reduce_motion, 1);
+    }
+
+    #[test]
+    fn active_reduce_motion_only_update_refreshes_private_gpu_frame_without_advancing_scene_version(
+    ) {
+        use crate::companion::retained::{
+            FrameDisposition, FrameMilestone, FrameProgress, GpuErrorMailbox,
+        };
+
+        let (mut generations, device, queue, shared) = ready_scene_generation();
+        let attempt = generations.begin_activation().unwrap();
+        let mut first_present = FrameProgress::new(1, attempt.key().resources.0);
+        first_present.mark(FrameMilestone::Prepared).unwrap();
+        first_present.mark(FrameMilestone::Encoded).unwrap();
+        first_present.mark(FrameMilestone::Submitted).unwrap();
+        first_present
+            .finish(FrameDisposition::SurfacePresentCalled)
+            .unwrap();
+        generations.finish_candidate_activation(attempt, first_present, &GpuErrorMailbox::new());
+
+        let mut activity = (**generations.runtime.snapshot()).clone();
+        activity.frame.activity_recent = true;
+        activity.frame.activity_opacity = 0.73;
+        let prepared = generations
+            .runtime
+            .prepare_snapshot(std::sync::Arc::new(activity))
+            .unwrap();
+        generations.runtime.commit_prepared(prepared).unwrap();
+
+        let resource_generation = generations
+            .active
+            .as_ref()
+            .unwrap()
+            .version
+            .generation
+            .resources;
+        let prepared_hud = generations
+            .prepare_active_hud(
+                &crate::round::hud::CompanionHudText {
+                    today_total: "0".into(),
+                    daily_percent: "0%".into(),
+                    pace: "0".into(),
+                },
+                super::hud::HudPreparationGeometry {
+                    gap: crate::round::hud::StatGap {
+                        center_x: 180.0,
+                        baseline_y: 300.0,
+                        max_width: 300.0,
+                    },
+                    aperture_radius: 180.0,
+                    view_width: 360.0,
+                    view_height: 360.0,
+                    hud_font_size: 8.0,
+                    resource_generation,
+                    depth_composition: generations.active_hud_depth_composition().unwrap(),
+                },
+            )
+            .unwrap();
+        let mut renderer = super::render::SceneRenderer::new(&device, &queue, &shared);
+        let surface = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glorp-retained-private-frame-test-surface"),
+            size: wgpu::Extent3d {
+                width: 720,
+                height: 720,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let surface_view = surface.create_view(&wgpu::TextureViewDescriptor::default());
+        let (activity_version, activity_dirty, _, _) = generations
+            .submit_active_to_surface(
+                &mut renderer,
+                &device,
+                &queue,
+                &shared,
+                [720, 720],
+                2.0,
+                &prepared_hud,
+                &surface_view,
+            )
+            .unwrap();
+        assert!(activity_dirty.is_some());
+
+        let artifacts_before_reduce_motion = generations
+            .active
+            .as_ref()
+            .unwrap()
+            .cpu
+            .scene_artifacts()
+            .unwrap();
+        let mut reduce_motion_only = (**generations.runtime.snapshot()).clone();
+        reduce_motion_only.frame.reduce_motion = true;
+        let prepared = generations
+            .runtime
+            .prepare_snapshot(std::sync::Arc::new(reduce_motion_only))
+            .unwrap();
+        generations.runtime.commit_prepared(prepared).unwrap();
+        assert_eq!(
+            generations.runtime.capture_lease().unwrap().version(),
+            activity_version,
+            "reduce motion is private and does not advance the public scene version"
+        );
+
+        let (reduced_version, reduced_dirty, _, _) = generations
+            .submit_active_to_surface(
+                &mut renderer,
+                &device,
+                &queue,
+                &shared,
+                [720, 720],
+                2.0,
+                &prepared_hud,
+                &surface_view,
+            )
+            .unwrap();
+        assert!(
+            reduced_dirty.is_some(),
+            "a private-only update must still stage a GPU transaction"
+        );
+        assert_eq!(reduced_version, activity_version);
+
+        let active = generations.active.as_ref().unwrap();
+        let cpu_globals = bytemuck::pod_read_unaligned::<super::compiler::FrameGlobalsGpuValue>(
+            active.cpu.frame_upload_sources().globals,
+        );
+        let gpu_globals = active.gpu.committed_frame_globals_for_test();
+        assert_eq!(cpu_globals.activity_opacity, 0.73);
+        assert_eq!(cpu_globals.reduce_motion, 1);
+        assert_eq!(gpu_globals.activity_opacity, 0.73);
+        assert_eq!(gpu_globals.reduce_motion, 1);
+        assert_eq!(active.version, activity_version);
+        assert_eq!(
+            active.cpu.scene_artifacts().unwrap(),
+            artifacts_before_reduce_motion
+        );
     }
 
     #[test]

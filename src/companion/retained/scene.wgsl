@@ -64,6 +64,7 @@ struct ContentGlobalsGpuValue {
     glyph_grid_dimensions: vec2<u32>,
     glyph_grid_origin_points: vec2<f32>,
     glyph_cell_extent_points: vec2<f32>,
+    pet_rim_srgba8: u32,
 }
 
 struct FrameGlobalsGpuValue {
@@ -75,7 +76,18 @@ struct FrameGlobalsGpuValue {
     gauges: vec4<f32>,
     dim_amount: f32,
     light_count: u32,
-    padding: vec2<u32>,
+    activity_opacity: f32,
+    reduce_motion: u32,
+}
+
+struct SpatialCueGpuValue {
+    statistics_offset_points: vec2<f32>,
+    statistics_softness_points: f32,
+    statistics_opacity: f32,
+    rim_radius_pixels: f32,
+    rim_idle_alpha: f32,
+    rim_activity_alpha_bonus: f32,
+    rim_enabled: u32,
 }
 
 struct FrameGpuValue {
@@ -164,9 +176,11 @@ struct HudInteractionBuffer {
 @group(1) @binding(2) var atlas_sampler: sampler;
 
 @group(2) @binding(0) var scene_sampled_texture: texture_2d<f32>;
+@group(2) @binding(1) var pet_body_coverage_texture: texture_2d<f32>;
 
 @group(3) @binding(0) var<storage, read> hud_glyph_buffer: HudGlyphBuffer;
 @group(3) @binding(1) var<storage, read> hud_interaction_buffer: HudInteractionBuffer;
+@group(3) @binding(2) var<uniform> spatial_cue: SpatialCueGpuValue;
 
 struct SceneVertexInput {
     @location(0) local_position: vec3<f32>,
@@ -1363,6 +1377,30 @@ fn glyph_fragment_color(input: SceneVertexOutput) -> vec4<f32> {
     return output;
 }
 
+// This deliberately ignores paint RGB: private pet coverage is a silhouette
+// input for the rim, never a second scene-color representation.
+fn glyph_fragment_coverage(input: SceneVertexOutput) -> f32 {
+    if (input.content_index == NONE_U32 || input.content_index >= 462u) {
+        return 0.0;
+    }
+    let content = scene_content_buffer.values[input.content_index];
+    if (content.glyph_entry_index == NONE_U32
+        || content.glyph_entry_index >= arrayLength(&glyph_entry_buffer.values)) {
+        return 0.0;
+    }
+    let entry = glyph_entry_for(input);
+    if ((entry.flags & GLYPH_FLAG_VISIBLE) == 0u) {
+        return 0.0;
+    }
+    let uv = glyph_uv(input, entry);
+    let alpha = select(
+        textureSampleLevel(coverage_texture, atlas_sampler, uv, 0.0).r,
+        textureSampleLevel(color_texture, atlas_sampler, uv, 0.0).a,
+        (entry.flags & GLYPH_FLAG_COLOR) != 0u,
+    );
+    return clamp(alpha * input.opacity, 0.0, 1.0);
+}
+
 @fragment
 fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
     let output = glyph_fragment_color(input);
@@ -1370,6 +1408,15 @@ fn fs_glyph(input: SceneVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
     return output;
+}
+
+@fragment
+fn fs_pet_body_coverage(input: SceneVertexOutput) -> @location(0) f32 {
+    let coverage = glyph_fragment_coverage(input);
+    if (coverage <= 0.0) {
+        discard;
+    }
+    return coverage;
 }
 
 fn hud_interaction_reveal(position: vec4<f32>) -> f32 {
@@ -1532,13 +1579,7 @@ fn vs_hud(
     return output;
 }
 
-struct HudFragmentOutput {
-    @location(0) color: vec4<f32>,
-    @location(1) coverage: f32,
-}
-
-@fragment
-fn fs_hud(input: HudVertexOutput) -> HudFragmentOutput {
+fn hud_glyph_coverage(input: HudVertexOutput) -> f32 {
     if (input.visible == 0u || input.role > 2u) {
         discard;
     }
@@ -1556,6 +1597,12 @@ fn fs_hud(input: HudVertexOutput) -> HudFragmentOutput {
     if (coverage <= 0.0) {
         discard;
     }
+    return coverage;
+}
+
+@fragment
+fn fs_hud(input: HudVertexOutput) -> @location(0) vec4<f32> {
+    let coverage = hud_glyph_coverage(input);
     var straight_srgb = vec4<f32>(0.62, 0.63, 0.77, 1.0);
     if (input.role == 0u) {
         straight_srgb = vec4<f32>(0.93, 0.93, 0.97, 1.0);
@@ -1563,10 +1610,13 @@ fn fs_hud(input: HudVertexOutput) -> HudFragmentOutput {
     let echo_alpha = select(1.0, 0.12, input.is_echo != 0u);
     let alpha = straight_srgb.a * coverage * echo_alpha;
     let linear_rgb = srgb_to_linear(straight_srgb.rgb);
-    return HudFragmentOutput(
-        vec4<f32>(linear_rgb * alpha, alpha),
-        select(coverage, 0.0, input.is_echo != 0u),
-    );
+    return vec4<f32>(linear_rgb * alpha, alpha);
+}
+
+@fragment
+fn fs_hud_coverage(input: HudVertexOutput) -> @location(0) f32 {
+    let coverage = hud_glyph_coverage(input);
+    return coverage;
 }
 
 struct FinalVertexOutput {
@@ -1580,6 +1630,144 @@ fn vs_final(@builtin(vertex_index) vertex_index: u32) -> FinalVertexOutput {
     var output: FinalVertexOutput;
     output.position = vec4<f32>(x, y, 0.0, 1.0);
     return output;
+}
+
+fn inside_scene_aperture(position: vec2<f32>, dimensions: vec2<u32>) -> bool {
+    let aperture = frame_buffer.analytics[0u];
+    let aperture_content = scene_content_buffer.analytics[0u];
+    if (!valid_analytic_role(0u, aperture, aperture_content)
+        || aperture.payload[0].z <= 0.0
+        || any(dimensions == vec2<u32>(0u))) {
+        return false;
+    }
+    let viewport_points = frame_buffer.globals.viewport_points;
+    if (min(viewport_points.x, viewport_points.y) <= 0.0) {
+        return false;
+    }
+    let normalized = position / vec2<f32>(dimensions);
+    let points = vec2<f32>(
+        normalized.x * viewport_points.x,
+        (1.0 - normalized.y) * viewport_points.y,
+    );
+    let pixel_points = max(
+        viewport_points.x / f32(dimensions.x),
+        viewport_points.y / f32(dimensions.y),
+    );
+    return length(points - aperture.payload[0].xy) <= aperture.payload[0].z + pixel_points;
+}
+
+fn packed_srgba8_linear(value: u32) -> vec3<f32> {
+    let srgb = vec3<f32>(
+        f32(value & 0xffu),
+        f32((value >> 8u) & 0xffu),
+        f32((value >> 16u) & 0xffu),
+    ) / 255.0;
+    return srgb_to_linear(srgb);
+}
+
+@fragment
+fn fs_statistics_rear_shadow(input: FinalVertexOutput) -> @location(0) vec4<f32> {
+    let dimensions = textureDimensions(scene_sampled_texture);
+    if (spatial_cue.statistics_opacity <= 0.0
+        || !inside_scene_aperture(input.position.xy, dimensions)) {
+        discard;
+    }
+    let viewport = frame_buffer.globals.viewport_points;
+    if (min(viewport.x, viewport.y) <= 0.0) {
+        discard;
+    }
+    let pixels_per_point = vec2<f32>(dimensions) / viewport;
+    // Point-space is Y-up; texture pixel rows grow down.
+    let offset = vec2<f32>(
+        spatial_cue.statistics_offset_points.x * pixels_per_point.x,
+        -spatial_cue.statistics_offset_points.y * pixels_per_point.y,
+    );
+    let softness = max(1.0, spatial_cue.statistics_softness_points * max(pixels_per_point.x, pixels_per_point.y));
+    let center = input.position.xy - offset;
+    let extent = vec2<i32>(dimensions);
+    var coverage = 0.0;
+    var weight = 0.0;
+    let samples = array<vec3<f32>, 5>(
+        vec3<f32>(0.0, 0.0, 0.40),
+        vec3<f32>(1.0, 0.0, 0.15),
+        vec3<f32>(-1.0, 0.0, 0.15),
+        vec3<f32>(0.0, 1.0, 0.15),
+        vec3<f32>(0.0, -1.0, 0.15),
+    );
+    for (var index = 0u; index < 5u; index = index + 1u) {
+        let sample = samples[index];
+        let pixel = vec2<i32>(round(center + sample.xy * softness));
+        if (all(pixel >= vec2<i32>(0)) && all(pixel < extent)) {
+            coverage = coverage + textureLoad(scene_sampled_texture, pixel, 0).r * sample.z;
+            weight = weight + sample.z;
+        }
+    }
+    let alpha = clamp(coverage / max(weight, 0.0001), 0.0, 1.0)
+        * clamp(spatial_cue.statistics_opacity, 0.0, 0.12);
+    if (alpha <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(vec3<f32>(0.0), alpha);
+}
+
+fn pet_rim_rgba(input: FinalVertexOutput, reveal_mask: f32) -> vec4<f32> {
+    let dimensions = textureDimensions(pet_body_coverage_texture);
+    if (spatial_cue.rim_enabled != 1u
+        || spatial_cue.rim_radius_pixels <= 0.0
+        || !inside_scene_aperture(input.position.xy, dimensions)) {
+        discard;
+    }
+    let extent = vec2<i32>(dimensions);
+    let pixel = vec2<i32>(input.position.xy);
+    if (any(pixel < vec2<i32>(0)) || any(pixel >= extent)) {
+        discard;
+    }
+    let radius = min(spatial_cue.rim_radius_pixels, 4.0);
+    var dilated = 0.0;
+    for (var y = -4; y <= 4; y = y + 1) {
+        for (var x = -4; x <= 4; x = x + 1) {
+            let delta = vec2<f32>(f32(x), f32(y));
+            let neighbor = pixel + vec2<i32>(x, y);
+            if (length(delta) <= radius
+                && all(neighbor >= vec2<i32>(0)) && all(neighbor < extent)) {
+                dilated = max(dilated, textureLoad(pet_body_coverage_texture, neighbor, 0).r);
+            }
+        }
+    }
+    let center = textureLoad(pet_body_coverage_texture, pixel, 0).r;
+    let exterior = clamp(dilated - center, 0.0, 1.0);
+    let activity = select(
+        frame_buffer.globals.activity_opacity,
+        0.0,
+        frame_buffer.globals.reduce_motion != 0u,
+    );
+    let alpha = exterior * clamp(reveal_mask, 0.0, 1.0) * clamp(
+        spatial_cue.rim_idle_alpha + clamp(activity, 0.0, 1.0) * spatial_cue.rim_activity_alpha_bonus,
+        0.0,
+        1.0,
+    );
+    if (alpha <= 0.0) {
+        discard;
+    }
+    let rgb = packed_srgba8_linear(content_globals_buffer.globals.pet_rim_srgba8);
+    return vec4<f32>(rgb * alpha, alpha);
+}
+
+@fragment
+fn fs_pet_rim(input: FinalVertexOutput) -> @location(0) vec4<f32> {
+    return pet_rim_rgba(input, 1.0);
+}
+
+@fragment
+fn fs_pet_rim_statistics_reveal(input: FinalVertexOutput) -> @location(0) vec4<f32> {
+    let dimensions = textureDimensions(scene_sampled_texture);
+    let pixel = vec2<i32>(input.position.xy);
+    if (any(pixel < vec2<i32>(0)) || any(pixel >= vec2<i32>(dimensions))) {
+        discard;
+    }
+    let statistics_coverage = textureLoad(scene_sampled_texture, pixel, 0).r;
+    let reveal_mix = hud_interaction_buffer.value.reveal_mix;
+    return pet_rim_rgba(input, statistics_coverage * reveal_mix);
 }
 
 @fragment

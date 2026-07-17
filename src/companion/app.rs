@@ -149,6 +149,7 @@ pub(super) struct PreparedCompanionFrame {
     aperture: RoundAperture,
     background: RoundColor,
     pet_rim_color: RoundColor,
+    spatial_cue_review: Option<PreparedSpatialCueReview>,
     dim_overlay: bool,
     renderer: PreparedRendererFrame,
     gauges: PreparedGaugeFrame,
@@ -157,6 +158,21 @@ pub(super) struct PreparedCompanionFrame {
     hud_font_size: f64,
     overlay_commands: Vec<RoundDrawCommand>,
     review_sample: Option<crate::companion::review_capture::SmoothReviewFrameSample>,
+}
+
+/// Non-sensitive, renderer-neutral spatial style facts frozen alongside a
+/// paired frame. This excludes every private coverage texture and all
+/// value-shaped HUD projection geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PreparedSpatialCueReview {
+    pub(super) statistics_offset_points: [f32; 2],
+    pub(super) statistics_softness_points: f32,
+    pub(super) statistics_opacity: f32,
+    pub(super) rim_enabled: bool,
+    pub(super) rim_radius_points: f32,
+    pub(super) rim_alpha: f32,
+    pub(super) pet_pose_points: [f32; 2],
+    pub(super) pet_facing: i8,
 }
 
 #[allow(dead_code)] // Consumed by the staged draw preparation in Tasks 4 and 5.
@@ -398,6 +414,10 @@ impl PreparedCompanionFrame {
         self.pet_rim_color
     }
 
+    pub(super) const fn review_spatial_cues(&self) -> Option<PreparedSpatialCueReview> {
+        self.spatial_cue_review
+    }
+
     pub(super) fn review_dim_overlay(&self) -> bool {
         self.dim_overlay
     }
@@ -497,6 +517,7 @@ impl PreparedCompanionFrame {
             aperture,
             background: RoundColor(0.05, 0.06, 0.10, 1.0),
             pet_rim_color: RoundColor(0.30, 0.40, 0.55, 0.80),
+            spatial_cue_review: None,
             dim_overlay: false,
             renderer: PreparedRendererFrame::Pixel {
                 frame: PixelFrame::transparent(PixelViewport::companion_default()),
@@ -951,11 +972,37 @@ fn prepare_companion_frame_at(
         }
         _ => None,
     };
+    let spatial_cue_review = match &renderer {
+        PreparedRendererFrame::Smooth { metrics, plan, .. } => {
+            crate::presentation::companion_effects::statistics_rear_shadow_style([
+                metrics.cell_w as f32,
+                metrics.cell_h as f32,
+            ])
+            .map(|statistics| {
+                let rim = crate::presentation::companion_effects::pet_rim_style(
+                    round_activity_pulse_opacity(scene.halo.activity_pulse),
+                    reduce_motion,
+                );
+                PreparedSpatialCueReview {
+                    statistics_offset_points: statistics.offset_y_up_points,
+                    statistics_softness_points: statistics.softness_points,
+                    statistics_opacity: statistics.opacity,
+                    rim_enabled: rim.enabled,
+                    rim_radius_points: rim.radius_points,
+                    rim_alpha: rim.alpha,
+                    pet_pose_points: [plan.pet.final_anchor.x, plan.pet.final_anchor.y],
+                    pet_facing: scene.pet.facing,
+                }
+            })
+        }
+        PreparedRendererFrame::Pixel { .. } | PreparedRendererFrame::Classic { .. } => None,
+    };
     Ok(PreparedCompanionFrame {
         bounds: prepared_bounds,
         aperture,
         background,
         pet_rim_color: crate::round::hud::mood_rim_color(scene.pet.mood),
+        spatial_cue_review,
         dim_overlay,
         renderer,
         gauges,

@@ -41,6 +41,7 @@ impl HudGpuBufferUsages {
 pub(super) enum HudGpuStagingError {
     ResourceGenerationMismatch,
     InvalidInteractionPlan,
+    InvalidPrivateSpatialCue,
 }
 
 impl fmt::Debug for HudGpuStagingError {
@@ -51,6 +52,9 @@ impl fmt::Debug for HudGpuStagingError {
             }
             Self::InvalidInteractionPlan => {
                 formatter.write_str("HudGpuStagingError::InvalidInteractionPlan")
+            }
+            Self::InvalidPrivateSpatialCue => {
+                formatter.write_str("HudGpuStagingError::InvalidPrivateSpatialCue")
             }
         }
     }
@@ -65,6 +69,9 @@ impl fmt::Display for HudGpuStagingError {
             Self::InvalidInteractionPlan => {
                 formatter.write_str("companion HUD interaction plan is invalid")
             }
+            Self::InvalidPrivateSpatialCue => {
+                formatter.write_str("companion private spatial cue is invalid")
+            }
         }
     }
 }
@@ -76,7 +83,8 @@ impl std::error::Error for HudGpuStagingError {}
 /// Fields are intentionally private: this value can select the retained
 /// resources for an encode, but it cannot expose or replay a raw HUD bind group.
 pub(super) struct HudDrawBindings<'resources> {
-    pipeline: &'resources wgpu::RenderPipeline,
+    coverage_pipeline: &'resources wgpu::RenderPipeline,
+    visible_pipeline: &'resources wgpu::RenderPipeline,
     scene: &'resources wgpu::BindGroup,
     atlas: &'resources wgpu::BindGroup,
 }
@@ -89,17 +97,24 @@ struct HudRenderTarget<'resources> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HudDrawPhase {
+    Coverage,
     Echo,
     Primary,
 }
 
 impl<'resources> HudDrawBindings<'resources> {
     pub(super) fn new(
-        pipeline: &'resources wgpu::RenderPipeline,
+        coverage_pipeline: &'resources wgpu::RenderPipeline,
+        visible_pipeline: &'resources wgpu::RenderPipeline,
         scene: &'resources wgpu::BindGroup,
         atlas: &'resources wgpu::BindGroup,
     ) -> Self {
-        Self { pipeline, scene, atlas }
+        Self {
+            coverage_pipeline,
+            visible_pipeline,
+            scene,
+            atlas,
+        }
     }
 }
 
@@ -556,6 +571,43 @@ impl GpuHudResources {
         pass.set_bind_group(3, &self.redacted_bind_group, &[]);
     }
 
+    /// Creates the two private group-3 variants used by the full-screen rim
+    /// reveal.  The fragment consumes only the sealed interaction scalar and
+    /// the renderer-owned spatial uniform; it never receives HUD records.
+    pub(super) fn create_spatial_cue_interaction_bind_groups(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        spatial_cue_buffer: &wgpu::Buffer,
+    ) -> [wgpu::BindGroup; 2] {
+        let create = |label, interaction_buffer: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: interaction_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: spatial_cue_buffer.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        [
+            create(
+                "glorp-scene-live-spatial-cue-interaction-bind-group",
+                &self.live_interaction_buffer,
+            ),
+            create(
+                "glorp-scene-redacted-spatial-cue-interaction-bind-group",
+                &self.redacted_interaction_buffer,
+            ),
+        ]
+    }
+
     #[cfg(test)]
     pub(super) fn buffer_contract_for_test(&self) -> [(u64, wgpu::BufferUsages); 2] {
         [
@@ -606,7 +658,7 @@ impl GpuHudResources {
             phase,
         );
         #[cfg(test)]
-        if phase == HudDrawPhase::Echo {
+        if phase == HudDrawPhase::Coverage {
             self.sensitive_copies += 1;
             self.copied_bytes += HUD_GPU_BUFFER_BYTES;
         }
@@ -646,7 +698,7 @@ impl GpuHudResources {
             phase,
         );
         #[cfg(test)]
-        if phase == HudDrawPhase::Echo {
+        if phase == HudDrawPhase::Coverage {
             self.redacted_copies += 1;
             self.copied_bytes += HUD_GPU_BUFFER_BYTES;
         }
@@ -772,16 +824,26 @@ fn encode_hud(
     interaction: HudInteractionGpuValue,
     phase: HudDrawPhase,
 ) {
-    if phase == HudDrawPhase::Echo {
+    if phase == HudDrawPhase::Coverage {
         stage_exact_records(staging_belt, encoder, buffer, records);
         stage_interaction(staging_belt, encoder, interaction_buffer, interaction);
     }
-    // The fixed upload and draw stay inseparable while loading the world color
-    // and depth produced by the transparent prefix.
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("glorp-scene-hud-hook"),
-        color_attachments: &[
-            Some(wgpu::RenderPassColorAttachment {
+    let (color_attachments, depth_stencil_attachment, pipeline) = match phase {
+        HudDrawPhase::Coverage => (
+            vec![Some(wgpu::RenderPassColorAttachment {
+                view: target.statistics_coverage,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            None,
+            bindings.coverage_pipeline,
+        ),
+        HudDrawPhase::Echo | HudDrawPhase::Primary => (
+            vec![Some(wgpu::RenderPassColorAttachment {
                 view: target.color,
                 depth_slice: None,
                 resolve_target: None,
@@ -789,39 +851,34 @@ fn encode_hud(
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-            Some(wgpu::RenderPassColorAttachment {
-                view: target.statistics_coverage,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: match phase {
-                        HudDrawPhase::Echo => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        HudDrawPhase::Primary => wgpu::LoadOp::Load,
-                    },
+            })],
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: target.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
-                },
+                }),
+                stencil_ops: None,
             }),
-        ],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: target.depth,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            }),
-            stencil_ops: None,
-        }),
+            bindings.visible_pipeline,
+        ),
+    };
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("glorp-scene-hud-hook"),
+        color_attachments: &color_attachments,
+        depth_stencil_attachment,
         ..Default::default()
     });
-    pass.set_pipeline(bindings.pipeline);
+    pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bindings.scene, &[]);
     pass.set_bind_group(1, bindings.atlas, &[]);
     pass.set_bind_group(3, bind_group, &[]);
-    let vertices = match phase {
-        HudDrawPhase::Echo => 0..6,
-        HudDrawPhase::Primary => 6..12,
-    };
-    pass.draw(vertices, 0..HUD_GPU_DRAW_INSTANCES);
+    match phase {
+        HudDrawPhase::Coverage | HudDrawPhase::Primary => {
+            pass.draw(6..12, 0..HUD_GPU_DRAW_INSTANCES);
+        }
+        HudDrawPhase::Echo => pass.draw(0..6, 0..HUD_GPU_DRAW_INSTANCES),
+    }
 }
 
 /// Private common storage used only while constructing one of the two nominal

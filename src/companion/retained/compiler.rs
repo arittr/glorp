@@ -217,13 +217,17 @@ pub(super) struct AnalyticFrameGpuValue {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 /// GPU-facing content-global upload ABI.
-struct ContentGlobalsGpuValue {
+pub(super) struct ContentGlobalsGpuValue {
     palette_rgba: [[u32; 4]; 8],
     mood: u32,
     weather: u32,
     glyph_grid_dimensions: [u32; 2],
     glyph_grid_origin_points: [f32; 2],
-    glyph_cell_extent_points: [f32; 2],
+    pub(super) glyph_cell_extent_points: [f32; 2],
+    // Renderer-private mood tint for the retained pet rim. It is deliberately
+    // packed into the GPU mirror rather than scene artifacts or diagnostics.
+    pub(super) pet_rim_srgba8: u32,
+    _private_spatial_padding: [u32; 3],
 }
 
 #[repr(C)]
@@ -232,14 +236,16 @@ struct ContentGlobalsGpuValue {
 pub(super) struct FrameGlobalsGpuValue {
     pub(super) view: [[f32; 4]; 4],
     projection: [[f32; 4]; 4],
-    viewport_points: [f32; 2],
+    pub(super) viewport_points: [f32; 2],
     viewport_pixels: [f32; 2],
     aperture: [f32; 4],
     gauges: [f32; 4],
     dim_amount: f32,
     light_count: u32,
-    // Storage-buffer tail padding only; it carries no scene or host semantics.
-    _padding: [u32; 2],
+    // Private retained spatial-cue inputs. They never enter scene artifacts,
+    // checksums, or Debug output.
+    pub(super) activity_opacity: f32,
+    pub(super) reduce_motion: u32,
 }
 
 impl std::fmt::Debug for FrameGlobalsGpuValue {
@@ -666,8 +672,40 @@ pub(super) struct CpuSceneCandidate {
     logical_content: SceneContent,
     accepted: crate::presentation::companion_scene::validate::AcceptedSceneState,
     topology: FixedNodeTopology,
+    private_spatial_frame: PrivateSpatialFrame,
     #[cfg(test)]
     last_node_resolves: usize,
+}
+
+/// Private source timing/accessibility inputs that travel only through the
+/// retained GPU mirror. The public scene contract intentionally omits them.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct PrivateSpatialFrame {
+    activity_opacity: f32,
+    reduce_motion: bool,
+}
+
+impl PrivateSpatialFrame {
+    #[cfg(test)]
+    const NEUTRAL: Self = Self {
+        activity_opacity: 0.0,
+        reduce_motion: false,
+    };
+
+    pub(super) fn from_snapshot(
+        snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
+    ) -> Self {
+        Self {
+            activity_opacity: snapshot.frame.activity_opacity,
+            reduce_motion: snapshot.frame.reduce_motion,
+        }
+    }
+}
+
+impl std::fmt::Debug for PrivateSpatialFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PrivateSpatialFrame(<redacted>)")
+    }
 }
 
 /// Runtime ownership capability. Moving preserves it, cloning creates a new
@@ -839,6 +877,7 @@ pub(super) struct PreparedSceneDelta {
     mirrors: PreparedMirrorDelta,
     prospective_logical_viewport_points: [f32; 2],
     blended_depth_dirty: bool,
+    private_spatial_frame: PrivateSpatialFrame,
 }
 
 impl PreparedSceneDelta {
@@ -1223,13 +1262,14 @@ impl CpuSceneCandidate {
             &frame,
         )
         .map_err(CaptureCandidateError::Validation)?;
-        compile_cpu_parts(
+        compile_cpu_parts_with_private(
             self.generation_key,
             self.source_revisions,
             template,
             &self.logical_content,
             &frame,
             accepted,
+            self.private_spatial_frame,
         )
         .map_err(CaptureCandidateError::Compile)
     }
@@ -1406,6 +1446,19 @@ impl CpuSceneCandidate {
         content_delta: &ContentDelta,
         frame_delta: &FrameDelta,
     ) -> Result<PreparedSceneDelta, MirrorDeltaError> {
+        self.prepare_deltas_with_private(content_delta, frame_delta, self.private_spatial_frame)
+    }
+
+    pub(super) fn private_spatial_frame_matches(&self, frame: PrivateSpatialFrame) -> bool {
+        self.private_spatial_frame == frame
+    }
+
+    pub(super) fn prepare_deltas_with_private(
+        &self,
+        content_delta: &ContentDelta,
+        frame_delta: &FrameDelta,
+        private_spatial_frame: PrivateSpatialFrame,
+    ) -> Result<PreparedSceneDelta, MirrorDeltaError> {
         if content_delta.generation_key != self.generation_key
             || frame_delta.generation_key != self.generation_key
         {
@@ -1441,7 +1494,20 @@ impl CpuSceneCandidate {
             .accepted
             .prepare_frame_delta(frame_delta)
             .map_err(MirrorDeltaError::Validation)?;
-        let mirrors = self.prepare_mirror_delta(content_delta, frame_delta)?;
+        let mut mirrors = self.prepare_mirror_delta(content_delta, frame_delta)?;
+        if private_spatial_frame != self.private_spatial_frame {
+            let mut globals = mirrors
+                .frame_globals
+                .unwrap_or(self.frame.globals.as_slice()[0]);
+            globals.activity_opacity = private_spatial_frame.activity_opacity;
+            globals.reduce_motion = u32::from(private_spatial_frame.reduce_motion);
+            record_single(
+                &self.frame.globals,
+                &mut mirrors.frame_globals,
+                &mut mirrors.dirty.frame_globals,
+                globals,
+            );
+        }
         let blended_depth_dirty = self.blended_depth_dirty(frame_delta, &mirrors);
         let logical_content = PreparedLogicalContentDelta::prepare(content_delta)?;
         let prospective_logical_viewport_points = frame_delta
@@ -1455,6 +1521,7 @@ impl CpuSceneCandidate {
             mirrors,
             prospective_logical_viewport_points,
             blended_depth_dirty,
+            private_spatial_frame,
         })
     }
 
@@ -1470,6 +1537,7 @@ impl CpuSceneCandidate {
             accepted_frame,
             mirrors,
             prospective_logical_viewport_points,
+            private_spatial_frame,
             ..
         } = prepared;
         self.accepted.commit_prepared_frame_delta(accepted_frame);
@@ -1483,6 +1551,7 @@ impl CpuSceneCandidate {
             self.last_node_resolves = node_resolves;
         }
         self.source_revisions = to;
+        self.private_spatial_frame = private_spatial_frame;
         AppliedSceneDelta {
             dirty,
             generation_key: self.generation_key,
@@ -1585,6 +1654,7 @@ impl CpuSceneCandidate {
             }
             if let Some(mood) = content_delta.mood {
                 value.mood = mood_tag(mood);
+                value.pet_rim_srgba8 = mood_rim_srgba8(mood);
             }
             if let Some(weather) = content_delta.weather {
                 value.weather = weather_tag(weather);
@@ -2376,16 +2446,18 @@ fn pack_light(
 pub(super) fn compile_cpu_generation(
     generation: &SceneGenerationData,
 ) -> Result<CpuSceneCandidate, CompileError> {
-    compile_cpu_parts(
+    compile_cpu_parts_with_private(
         generation.generation_key(),
         generation.source_revisions(),
         generation.template(),
         generation.content(),
         generation.frame(),
         generation.accepted_state().clone(),
+        PrivateSpatialFrame::from_snapshot(generation.source_snapshot()),
     )
 }
 
+#[cfg(test)]
 fn compile_cpu_parts(
     generation_key: crate::presentation::companion_scene::SceneGenerationKey,
     source_revisions: crate::presentation::companion_scene::AppliedRevisions,
@@ -2393,6 +2465,26 @@ fn compile_cpu_parts(
     content: &SceneContent,
     frame: &SceneFrame,
     accepted: crate::presentation::companion_scene::validate::AcceptedSceneState,
+) -> Result<CpuSceneCandidate, CompileError> {
+    compile_cpu_parts_with_private(
+        generation_key,
+        source_revisions,
+        template,
+        content,
+        frame,
+        accepted,
+        PrivateSpatialFrame::NEUTRAL,
+    )
+}
+
+fn compile_cpu_parts_with_private(
+    generation_key: crate::presentation::companion_scene::SceneGenerationKey,
+    source_revisions: crate::presentation::companion_scene::AppliedRevisions,
+    template: &SceneTemplate,
+    content: &SceneContent,
+    frame: &SceneFrame,
+    accepted: crate::presentation::companion_scene::validate::AcceptedSceneState,
+    private_spatial_frame: PrivateSpatialFrame,
 ) -> Result<CpuSceneCandidate, CompileError> {
     let logical_content = content.clone();
     if template.nodes.len() > MAX_SCENE_NODES
@@ -2562,7 +2654,7 @@ fn compile_cpu_parts(
     let attachments = compile_attachment_descriptors(template, &index)?;
 
     let content = compile_content_mirrors(template, content)?;
-    let frame = compile_frame_mirrors(template, frame, &index)?;
+    let frame = compile_frame_mirrors(template, frame, &index, private_spatial_frame)?;
     let phases = PhaseLists {
         opaque_cutout,
         world_blended_unsorted,
@@ -2598,6 +2690,7 @@ fn compile_cpu_parts(
         logical_content,
         accepted,
         topology,
+        private_spatial_frame,
         #[cfg(test)]
         last_node_resolves: 0,
     })
@@ -2821,6 +2914,8 @@ fn compile_content_mirrors(
             ],
             glyph_grid_origin_points: template.glyph_grid.y_up_origin_points,
             glyph_cell_extent_points: template.glyph_grid.cell_extent_points,
+            pet_rim_srgba8: mood_rim_srgba8(content.mood),
+            _private_spatial_padding: [0; 3],
         }],
     );
     set_all(
@@ -2897,6 +2992,7 @@ fn compile_frame_mirrors(
     template: &SceneTemplate,
     frame: &SceneFrame,
     index: &DenseSceneIndex,
+    private_spatial_frame: PrivateSpatialFrame,
 ) -> Result<FrameMirrors, CompileError> {
     let mut result = FrameMirrors::zeroed();
     let projection = frame
@@ -2915,7 +3011,8 @@ fn compile_frame_mirrors(
             gauges: frame.gauges,
             dim_amount: frame.dim_amount,
             light_count: u32::try_from(frame.lights.len()).expect("fixed light count fits u32"),
-            _padding: [0; 2],
+            activity_opacity: private_spatial_frame.activity_opacity,
+            reduce_motion: u32::from(private_spatial_frame.reduce_motion),
         }],
     );
 
@@ -3313,6 +3410,23 @@ fn mood_tag(value: MoodContentKind) -> u32 {
         MoodContentKind::Sleepy => 6,
         MoodContentKind::Wilted => 7,
     }
+}
+
+/// The retained renderer needs the same mood tint as the round companion,
+/// but only as an opaque GPU value. Keep the mapping here so WGSL never
+/// duplicates product color constants.
+fn mood_rim_srgba8(value: MoodContentKind) -> u32 {
+    let color = match value {
+        MoodContentKind::Content => crate::presentation::companion_effects::MOOD_CONTENT_SRGBA,
+        MoodContentKind::Happy => crate::presentation::companion_effects::MOOD_HAPPY_SRGBA,
+        MoodContentKind::Ecstatic => crate::presentation::companion_effects::MOOD_ECSTATIC_SRGBA,
+        MoodContentKind::Hungry => crate::presentation::companion_effects::MOOD_HUNGRY_SRGBA,
+        MoodContentKind::Sad => crate::presentation::companion_effects::MOOD_SAD_SRGBA,
+        MoodContentKind::Sleepy => crate::presentation::companion_effects::MOOD_SLEEPY_SRGBA,
+        MoodContentKind::Wilted => crate::presentation::companion_effects::MOOD_WILTED_SRGBA,
+    };
+    let [red, green, blue, alpha] = crate::presentation::companion_effects::srgba8(color);
+    u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16) | (u32::from(alpha) << 24)
 }
 
 fn weather_tag(value: WeatherContentKind) -> u32 {
@@ -3832,7 +3946,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(AnalyticFrameGpuValue, rect_points), 16);
         assert_eq!(std::mem::offset_of!(AnalyticFrameGpuValue, payload), 32);
 
-        assert_eq!(std::mem::size_of::<ContentGlobalsGpuValue>(), 160);
+        assert_eq!(std::mem::size_of::<ContentGlobalsGpuValue>(), 176);
         assert_eq!(std::mem::align_of::<ContentGlobalsGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(ContentGlobalsGpuValue, mood), 128);
         assert_eq!(std::mem::offset_of!(ContentGlobalsGpuValue, weather), 132);
@@ -3848,6 +3962,10 @@ mod tests {
             std::mem::offset_of!(ContentGlobalsGpuValue, glyph_cell_extent_points),
             152
         );
+        assert_eq!(
+            std::mem::offset_of!(ContentGlobalsGpuValue, pet_rim_srgba8),
+            160
+        );
         assert_eq!(std::mem::size_of::<FrameGlobalsGpuValue>(), 192);
         assert_eq!(std::mem::align_of::<FrameGlobalsGpuValue>(), 4);
         assert_eq!(std::mem::offset_of!(FrameGlobalsGpuValue, projection), 64);
@@ -3858,6 +3976,14 @@ mod tests {
         assert_eq!(std::mem::offset_of!(FrameGlobalsGpuValue, aperture), 144);
         assert_eq!(std::mem::offset_of!(FrameGlobalsGpuValue, gauges), 160);
         assert_eq!(std::mem::offset_of!(FrameGlobalsGpuValue, dim_amount), 176);
+        assert_eq!(
+            std::mem::offset_of!(FrameGlobalsGpuValue, activity_opacity),
+            184
+        );
+        assert_eq!(
+            std::mem::offset_of!(FrameGlobalsGpuValue, reduce_motion),
+            188
+        );
     }
 
     #[test]
@@ -5125,7 +5251,14 @@ mod tests {
             before_frame_globals.viewport_pixels
         );
         assert_eq!(after_frame_globals.aperture, before_frame_globals.aperture);
-        assert_eq!(after_frame_globals._padding, before_frame_globals._padding);
+        assert_eq!(
+            after_frame_globals.activity_opacity,
+            before_frame_globals.activity_opacity
+        );
+        assert_eq!(
+            after_frame_globals.reduce_motion,
+            before_frame_globals.reduce_motion
+        );
         assert_eq!(after_frame_globals.light_count, 1);
         assert_eq!(
             candidate.logical_content.day_phase,
@@ -5731,9 +5864,14 @@ mod tests {
                 .unwrap();
             let prop_content_changed = !projected.content.prop_slots.is_empty();
             let prop_paint_changed = !projected.content.prop_paint_slots.is_empty();
-            let dirty = candidate
-                .apply_deltas(&projected.content, &projected.frame)
+            let prepared = candidate
+                .prepare_deltas_with_private(
+                    &projected.content,
+                    &projected.frame,
+                    PrivateSpatialFrame::from_snapshot(&target),
+                )
                 .unwrap();
+            let dirty = candidate.commit_prepared(prepared).dirty;
             neutral
                 .apply_compatible_snapshot(Arc::clone(&target), changes, from, to)
                 .unwrap();
@@ -5893,7 +6031,8 @@ mod tests {
         assert_eq!(after.view, before.view);
         assert_eq!(after.viewport_pixels, before.viewport_pixels);
         assert_eq!(after.aperture, before.aperture);
-        assert_eq!(after._padding, before._padding);
+        assert_eq!(after.activity_opacity, before.activity_opacity);
+        assert_eq!(after.reduce_motion, before.reduce_motion);
     }
 
     #[test]
