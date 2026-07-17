@@ -66,36 +66,54 @@ pub(crate) fn sample_companion_locomotion(
     let elapsed_nanos = seconds_into_segment * NANOS_PER_SECOND + nanos;
     let segment_nanos = LOCOMOTION_SEGMENT_SECS * NANOS_PER_SECOND;
     let segment_phase = elapsed_nanos as f64 / segment_nanos as f64;
+    debug_assert!(elapsed_nanos <= segment_nanos);
+    sample_companion_locomotion_at_segment_phase(
+        identity,
+        segment_index,
+        segment_phase as f32,
+        fallback_facing,
+    )
+}
+
+/// Samples one deterministic leg at an explicit elapsed phase. The round
+/// renderer uses this to redistribute a swim over the visible, clipped path
+/// without changing its route, waypoints, or facing intent.
+pub(crate) fn sample_companion_locomotion_at_segment_phase(
+    identity: u64,
+    segment_index: i64,
+    segment_phase: f32,
+    fallback_facing: i8,
+) -> CompanionLocomotionSample {
+    let segment_phase = segment_phase.clamp(0.0, 1.0);
     let dwell = dwell_seconds(identity, segment_index);
-    let dwell_nanos = dwell * NANOS_PER_SECOND;
+    let dwell_phase = dwell as f32 / LOCOMOTION_SEGMENT_SECS as f32;
     let start = route_target(identity, segment_index);
     let end = route_target(identity, segment_index + 1);
     let facing = facing_for_segment(identity, segment_index, fallback_facing);
 
-    if elapsed_nanos < dwell_nanos {
+    if segment_phase < dwell_phase {
         return CompanionLocomotionSample {
             point: start,
             facing,
             phase: LocomotionPhase::Dwell,
             segment_index,
-            segment_phase: segment_phase as f32,
+            segment_phase,
         };
     }
 
-    let glide_nanos = segment_nanos - dwell_nanos;
-    let glide_phase = (elapsed_nanos - dwell_nanos) as f64 / glide_nanos as f64;
+    let glide_phase = (segment_phase - dwell_phase) / (1.0 - dwell_phase);
     CompanionLocomotionSample {
         point: glide_point(
             identity,
             segment_index,
             start,
             end,
-            swim_progress(glide_phase as f32),
+            swim_progress(glide_phase),
         ),
         facing,
         phase: LocomotionPhase::Glide,
         segment_index,
-        segment_phase: segment_phase as f32,
+        segment_phase,
     }
 }
 
@@ -645,15 +663,10 @@ mod tests {
         let identity = stable_companion_identity("dwell-duration");
         for segment in -24..24 {
             let dwell = dwell_seconds(identity, segment);
-            assert!(
-                (LOCOMOTION_DWELL_MIN_SECS..=LOCOMOTION_DWELL_MAX_SECS).contains(&dwell),
-                "segment {segment} had dwell {dwell}"
-            );
-
+            assert_eq!(dwell, 0);
             let start = segment * LOCOMOTION_SEGMENT_SECS;
             assert_eq!(sample(identity, start).phase, LocomotionPhase::Glide);
-            let glide = LOCOMOTION_SEGMENT_SECS - dwell;
-            assert!(glide == 5, "segment {segment} had a {glide}-second glide");
+            assert_eq!(LOCOMOTION_SEGMENT_SECS - dwell, 5);
         }
     }
 
@@ -951,18 +964,25 @@ mod tests {
                     let samples = (start..=start + 120)
                         .map(|second| sample(identity, second))
                         .collect::<Vec<_>>();
-                    let x_reversals = axis_reversal_count(&samples, |point| point.x);
-                    let y_reversals = axis_reversal_count(&samples, |point| point.y);
-                    assert!(
-                        x_reversals <= 20,
-                        "seed {seed} at minute {minute}, phase {phase} had {x_reversals} X reversals"
-                    );
-                    assert!(
-                        y_reversals <= 20,
-                        "seed {seed} at minute {minute}, phase {phase} had {y_reversals} Y reversals"
-                    );
+                    assert!(axis_reversal_count(&samples, |point| point.x) <= 20);
+                    assert!(axis_reversal_count(&samples, |point| point.y) <= 20);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn every_two_minute_window_has_at_most_twenty_facing_changes() {
+        for seed in 0..16 {
+            let identity = stable_companion_identity(&format!("facing-cadence-{seed}"));
+            let samples = (0..=120)
+                .map(|second| sample(identity, second))
+                .collect::<Vec<_>>();
+            let changes = samples
+                .windows(2)
+                .filter(|pair| pair[0].facing != pair[1].facing)
+                .count();
+            assert!(changes <= 20, "seed {seed} changed facing {changes} times");
         }
     }
 
