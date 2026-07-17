@@ -1,9 +1,9 @@
 //! Deterministic locomotion shared by live companion motion and Preview Lab.
 
-pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 60;
+pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 30;
 pub(crate) const LOCOMOTION_BLOCK_SEGMENTS: usize = 8;
-pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 8;
-pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 18;
+pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 4;
+pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 8;
 pub(crate) const LOCOMOTION_MAX_PLANAR_STEP: f32 = 0.62;
 pub(crate) const LOCOMOTION_MAX_DEPTH_STEP: f32 = 0.67;
 const LOCOMOTION_CONTROL_OFFSET_FRACTION: f32 = 0.12;
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn each_segment_dwells_between_eight_and_eighteen_seconds() {
+    fn each_segment_has_a_brief_dwell_and_a_readable_glide_cadence() {
         let identity = stable_companion_identity("dwell-duration");
         for segment in -24..24 {
             let dwell = dwell_seconds(identity, segment);
@@ -574,6 +574,11 @@ mod tests {
             assert_eq!(
                 sample(identity, start + dwell).phase,
                 LocomotionPhase::Glide
+            );
+            let glide = LOCOMOTION_SEGMENT_SECS - dwell;
+            assert!(
+                (22..=26).contains(&glide),
+                "segment {segment} had a {glide}-second glide"
             );
         }
     }
@@ -860,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn every_phase_aligned_two_minute_window_has_at_most_two_reversals_per_axis() {
+    fn every_phase_aligned_two_minute_window_has_at_most_four_reversals_per_axis() {
         for seed in 0..16 {
             let identity = stable_companion_identity(&format!("two-minute-window-{seed}"));
             for minute in [-9, -1, 0, 7, 15] {
@@ -872,11 +877,11 @@ mod tests {
                     let x_reversals = axis_reversal_count(&samples, |point| point.x);
                     let y_reversals = axis_reversal_count(&samples, |point| point.y);
                     assert!(
-                        x_reversals <= 2,
+                        x_reversals <= 4,
                         "seed {seed} at minute {minute}, phase {phase} had {x_reversals} X reversals"
                     );
                     assert!(
-                        y_reversals <= 2,
+                        y_reversals <= 4,
                         "seed {seed} at minute {minute}, phase {phase} had {y_reversals} Y reversals"
                     );
                 }
@@ -885,9 +890,14 @@ mod tests {
     }
 
     #[test]
-    fn segment_lookup_is_continuous_at_exact_minute_and_unix_zero_boundaries() {
+    fn segment_lookup_is_continuous_at_exact_segment_and_unix_zero_boundaries() {
         let identity = stable_companion_identity("negative-time");
-        for boundary in [0, 60, -60, 120] {
+        for boundary in [
+            0,
+            LOCOMOTION_SEGMENT_SECS,
+            -LOCOMOTION_SEGMENT_SECS,
+            LOCOMOTION_SEGMENT_SECS * 2,
+        ] {
             let before = sample_companion_locomotion(
                 identity,
                 instant(boundary) - Duration::nanoseconds(NANOSECOND),
@@ -899,7 +909,7 @@ mod tests {
                 at.segment_index,
                 boundary.div_euclid(LOCOMOTION_SEGMENT_SECS)
             );
-            assert_close(at.segment_phase, 0.0, "minute boundary phase");
+            assert_close(at.segment_phase, 0.0, "segment boundary phase");
         }
     }
 }
