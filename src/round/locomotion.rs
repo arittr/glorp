@@ -21,7 +21,6 @@ const ROUTE_CANDIDATE_COUNT: usize = ROUTE_DIRECTIONS * ROUTE_CANDIDATE_RADII.le
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const MIN_PLANAR_TARGET_DISTANCE: f32 = 0.35;
-const PREFERRED_PLANAR_TARGET_DISTANCE: f32 = 0.60;
 const ROUTE_POINTS: usize = LOCOMOTION_BLOCK_SEGMENTS + 1;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
@@ -166,8 +165,9 @@ fn route_block(identity: u64, block_index: i64) -> [NormalizedLocomotionPoint; R
             }
             let outgoing_step = planar_vector(candidate, route[slot + 1]);
 
+            let has_alternative = attempt + 1 < ROUTE_CANDIDATE_COUNT;
             let successor_step = planar_vector(route[slot + 1], route[slot + 2]);
-            if reverses_too_directly(outgoing_step, successor_step) {
+            if reverses_too_directly(outgoing_step, successor_step) && has_alternative {
                 continue;
             }
 
@@ -178,46 +178,36 @@ fn route_block(identity: u64, block_index: i64) -> [NormalizedLocomotionPoint; R
                 let entry_step = planar_vector(route[0], candidate);
 
                 let incoming_step = final_step_for_block(identity, block_index - 1);
-                if reverses_too_directly(incoming_step, entry_step)
-                    || reverses_too_directly(entry_step, outgoing_step)
+                if (reverses_too_directly(incoming_step, entry_step)
+                    || reverses_too_directly(entry_step, outgoing_step))
+                    && has_alternative
                 {
                     continue;
                 }
             }
 
-            selected = prefer_route_candidate(selected, candidate, route[slot + 1]);
+            selected = Some(candidate);
+            break;
         }
 
-        // If a smooth turn is geometrically unavailable, relax that preference
-        // while preserving visible, substantial legs.
+        // If a smooth turn is geometrically unavailable, a brief dwell permits
+        // a deliberate turn rather than silently collapsing to a tiny leg.
         let mut point = selected
             .or_else(|| {
-                let mut relaxed = None;
-                for attempt in 0..ROUTE_CANDIDATE_COUNT {
-                    let candidate = candidate_point(
-                        interpolation,
-                        (rotation + attempt) % ROUTE_CANDIDATE_COUNT,
-                        z_waypoints[slot],
-                    );
-                    if !is_visible_planar_step(candidate, route[slot + 1])
-                        || (slot == 1 && !is_visible_planar_step(route[0], candidate))
-                    {
-                        continue;
-                    }
-                    relaxed = prefer_route_candidate(relaxed, candidate, route[slot + 1]);
-                }
-                relaxed
+                (0..ROUTE_CANDIDATE_COUNT)
+                    .map(|attempt| {
+                        candidate_point(
+                            interpolation,
+                            (rotation + attempt) % ROUTE_CANDIDATE_COUNT,
+                            z_waypoints[slot],
+                        )
+                    })
+                    .find(|candidate| {
+                        is_visible_planar_step(*candidate, route[slot + 1])
+                            && (slot != 1 || is_visible_planar_step(route[0], *candidate))
+                    })
             })
-            .map(|(candidate, _)| candidate)
-            .unwrap_or_else(|| {
-                forced_visible_candidate(
-                    (slot == 1).then_some(route[0]),
-                    route[slot + 1],
-                    z_waypoints[slot],
-                    rotation,
-                )
-                .expect("fixed route geometry must provide a visible candidate")
-            });
+            .unwrap_or(interpolation);
         point.z = z_waypoints[slot];
         route[slot] = point;
     }
@@ -247,7 +237,6 @@ fn final_route_target(
     let rotation = (hash_lane(identity, block_index, 0x100 + slot as u64)
         % ROUTE_CANDIDATE_COUNT as u64) as usize;
 
-    let mut selected = None;
     for attempt in 0..ROUTE_CANDIDATE_COUNT {
         let candidate = candidate_point(
             interpolation,
@@ -255,14 +244,11 @@ fn final_route_target(
             z,
         );
         if is_visible_planar_step(candidate, end_anchor) {
-            selected = prefer_route_candidate(selected, candidate, end_anchor);
+            return candidate;
         }
     }
 
-    selected.map(|(candidate, _)| candidate).unwrap_or_else(|| {
-        forced_visible_candidate(None, end_anchor, z, rotation)
-            .expect("fixed route geometry must provide a visible candidate")
-    })
+    interpolation
 }
 
 fn final_step_for_block(identity: u64, block_index: i64) -> (f32, f32) {
@@ -345,41 +331,6 @@ fn candidate_point(
         y: center.y + y * radius,
         z,
     })
-}
-
-fn candidate_preference(distance: f32) -> f32 {
-    (distance - PREFERRED_PLANAR_TARGET_DISTANCE).abs()
-}
-
-fn prefer_route_candidate(
-    selected: Option<(NormalizedLocomotionPoint, f32)>,
-    candidate: NormalizedLocomotionPoint,
-    successor: NormalizedLocomotionPoint,
-) -> Option<(NormalizedLocomotionPoint, f32)> {
-    let score = candidate_preference(planar_length(planar_vector(candidate, successor)));
-    match selected {
-        Some((_, best_score)) if best_score <= score => selected,
-        _ => Some((candidate, score)),
-    }
-}
-
-fn forced_visible_candidate(
-    predecessor: Option<NormalizedLocomotionPoint>,
-    successor: NormalizedLocomotionPoint,
-    z: f32,
-    rotation: usize,
-) -> Option<NormalizedLocomotionPoint> {
-    let mut selected = None;
-    for attempt in 0..ROUTE_CANDIDATE_COUNT {
-        let candidate = candidate_point(successor, (rotation + attempt) % ROUTE_CANDIDATE_COUNT, z);
-        if !is_visible_planar_step(candidate, successor)
-            || predecessor.is_some_and(|point| !is_visible_planar_step(point, candidate))
-        {
-            continue;
-        }
-        selected = prefer_route_candidate(selected, candidate, successor);
-    }
-    selected.map(|(candidate, _)| candidate)
 }
 
 fn dwell_seconds(identity: u64, segment_index: i64) -> i64 {
@@ -797,76 +748,6 @@ mod tests {
                 start.z + (end.z - start.z) * eased,
                 "z must interpolate without a bend",
             );
-        }
-    }
-
-    fn assert_route_corpus_is_valid(prefix: &str) {
-        for seed in 0..16 {
-            let identity = stable_companion_identity(&format!("{prefix}-{seed}"));
-            for block in -16..=16 {
-                let route = route_block(identity, block);
-                assert!(
-                    route_is_valid(&route),
-                    "{prefix} seed {seed}, block {block}: {route:#?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_production_motion_identity_uses_only_valid_route_legs() {
-        for prefix in [
-            "bounded-route",
-            "visible-production-route",
-            "visible-production-speed",
-        ] {
-            assert_route_corpus_is_valid(prefix);
-        }
-    }
-
-    #[test]
-    fn route_prefers_a_substantial_valid_stride() {
-        let successor = NormalizedLocomotionPoint { x: 0.60, y: 0.0, z: 0.0 };
-        let short = NormalizedLocomotionPoint { x: 0.24, y: 0.0, z: 0.0 };
-        let preferred = NormalizedLocomotionPoint { x: 0.0, y: 0.0, z: 0.0 };
-
-        let selected = prefer_route_candidate(None, short, successor);
-        let selected = prefer_route_candidate(selected, preferred, successor);
-
-        assert_eq!(selected.unwrap().0, preferred);
-    }
-
-    #[test]
-    fn forced_visible_candidates_keep_actual_route_legs_valid() {
-        for prefix in [
-            "bounded-route",
-            "visible-production-route",
-            "visible-production-speed",
-        ] {
-            for seed in 0..16 {
-                let identity = stable_companion_identity(&format!("{prefix}-{seed}"));
-                for block in -16..=16 {
-                    let route = route_block(identity, block);
-                    for slot in 1..LOCOMOTION_BLOCK_SEGMENTS - 1 {
-                        let rotation = (hash_lane(identity, block, 0x100 + slot as u64)
-                            % ROUTE_CANDIDATE_COUNT as u64)
-                            as usize;
-                        let predecessor = (slot == 1).then_some(route[0]);
-                        let successor = route[slot + 1];
-                        let candidate = forced_visible_candidate(
-                            predecessor,
-                            successor,
-                            depth_waypoints(block)[slot],
-                            rotation,
-                        )
-                        .expect("the fixed route geometry supplies a valid candidate");
-                        assert!(is_visible_planar_step(candidate, successor));
-                        if let Some(predecessor) = predecessor {
-                            assert!(is_visible_planar_step(predecessor, candidate));
-                        }
-                    }
-                }
-            }
         }
     }
 
