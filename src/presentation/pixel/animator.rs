@@ -5,8 +5,6 @@ use super::raster::{alpha_blend_pixel, fill_circle, fill_ellipse, fill_rect};
 use super::scene::PixelPetScene;
 use crate::pet::generation::Species;
 
-const PIXEL_PET_RIM_RADIUS: u32 = 1;
-
 #[derive(Debug, Clone)]
 pub struct PixelRendererState {
     pub(crate) start: time::OffsetDateTime,
@@ -121,10 +119,18 @@ fn pixel_rim_alpha(
 ) -> Option<Vec<u8>> {
     let style =
         crate::presentation::companion_effects::pet_rim_style(activity_opacity, reduce_motion);
+    pixel_rim_alpha_for_style(body_alpha, viewport, style)
+}
+
+fn pixel_rim_alpha_for_style(
+    body_alpha: &[u8],
+    viewport: PixelViewport,
+    style: crate::presentation::companion_effects::PetRimStyle,
+) -> Option<Vec<u8>> {
     if !style.enabled {
         return None;
     }
-    let radius = PIXEL_PET_RIM_RADIUS;
+    let radius = pixel_rim_radius_pixels(style.radius_points);
     let mut rim = crate::presentation::companion_effects::exterior_dilated_alpha(
         body_alpha,
         u32::from(viewport.logical_width),
@@ -152,6 +158,13 @@ fn pixel_rim_alpha(
         }
     }
     Some(rim)
+}
+
+fn pixel_rim_radius_pixels(radius_points: f32) -> u32 {
+    // Pixel's logical grid cannot represent fractional points, so round to the
+    // nearest logical pixel (with f32 ties away from zero). The shared
+    // 1.25-point rim therefore preserves the existing one-pixel exterior extent.
+    radius_points.round() as u32
 }
 
 fn draw_pixel_rim(frame: &mut PixelFrame, rim_alpha: &[u8], mood: crate::game::metabolism::Mood) {
@@ -548,7 +561,46 @@ mod tests {
     }
 
     #[test]
-    fn pixel_rim_is_exterior_to_rendered_body_and_bounded_by_style_radius() {
+    fn pixel_raster_rim_radius_rounds_shared_points_to_nearest_logical_pixel() {
+        let style = crate::presentation::companion_effects::pet_rim_style(0.0, false);
+
+        assert_eq!(style.radius_points, 1.25);
+        assert_eq!(pixel_rim_radius_pixels(style.radius_points), 1);
+        assert_eq!(pixel_rim_radius_pixels(1.5), 2);
+    }
+
+    #[test]
+    fn pixel_rim_alpha_uses_style_radius_for_exterior_extent() {
+        let viewport = PixelViewport { logical_width: 7, logical_height: 7 };
+        let mut body_alpha = vec![0; 49];
+        body_alpha[3 * 7 + 3] = u8::MAX;
+
+        let rim = pixel_rim_alpha_for_style(
+            &body_alpha,
+            viewport,
+            crate::presentation::companion_effects::PetRimStyle {
+                enabled: true,
+                radius_points: 1.5,
+                alpha: 1.0,
+            },
+        )
+        .expect("the center body pixel must produce a rim");
+
+        assert_eq!(rim[3 * 7 + 3], 0, "the body interior remains unpainted");
+        assert_eq!(
+            rim[3 * 7 + 1],
+            u8::MAX,
+            "the radius reaches two pixels left"
+        );
+        assert_eq!(
+            rim.iter().filter(|alpha| **alpha > 0).count(),
+            24,
+            "a two-pixel square dilation produces the 5x5 exterior ring"
+        );
+    }
+
+    #[test]
+    fn pixel_rim_is_exterior_to_rendered_body_and_uses_shared_style_radius() {
         let now = datetime!(2026-07-08 12:00 UTC);
         let input = PixelPetInput::from_watch_view_model(&WatchViewModel::fixture(), now);
         let reference = empty_reference(&input);
@@ -566,14 +618,14 @@ mod tests {
         let viewport = PixelViewport::companion_default();
         let rim_alpha = pixel_rim_alpha(&body_alpha, viewport, scene.pulse_alpha, false)
             .expect("the body mask must produce an exterior rim");
+        let style = crate::presentation::companion_effects::pet_rim_style(scene.pulse_alpha, false);
         let mut expected = crate::presentation::companion_effects::exterior_dilated_alpha(
             &body_alpha,
             u32::from(viewport.logical_width),
             u32::from(viewport.logical_height),
-            PIXEL_PET_RIM_RADIUS,
+            pixel_rim_radius_pixels(style.radius_points),
         )
-        .expect("the fixed logical Pixel rim radius must be valid");
-        let style = crate::presentation::companion_effects::pet_rim_style(scene.pulse_alpha, false);
+        .expect("the shared Pixel rim radius must be valid");
         for alpha in &mut expected {
             *alpha = if *alpha == 0 {
                 0

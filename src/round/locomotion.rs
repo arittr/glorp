@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Pure locomotion contract; live scene integration lands in a later task.
+//! Deterministic locomotion shared by live companion motion and Preview Lab.
 
 pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 60;
 pub(crate) const LOCOMOTION_BLOCK_SEGMENTS: usize = 8;
@@ -402,11 +402,13 @@ fn minimum_jerk(t: f32) -> f32 {
     t * t * t * (10.0 + t * (-15.0 + 6.0 * t))
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // Used by the endpoint derivative contract test.
 fn minimum_jerk_velocity(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     30.0 * t * t * (1.0 - t) * (1.0 - t)
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // Used by the endpoint derivative contract test.
 fn minimum_jerk_acceleration(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     60.0 * t - 180.0 * t * t + 120.0 * t * t * t
