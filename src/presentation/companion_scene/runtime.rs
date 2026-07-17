@@ -1003,6 +1003,9 @@ pub(crate) fn validate_snapshot(
         let frame = &snapshot.frame.prop_instances[index];
         let authored = crate::game::habitat::catalog_prop_by_str(topology.catalog_id);
         let has_cast = frame.cast_shadow_strength > 0.0;
+        let has_any_cast_value = frame.cast_shadow_vector_points != [0.0; 2]
+            || frame.cast_shadow_softness_points != 0.0
+            || frame.cast_shadow_strength != 0.0;
         if frame.slot != topology.stable_order
             || authored.is_none_or(|spec| spec.shadow_profile != topology.shadow_profile)
             || !(0.0..=1.0).contains(&frame.opacity)
@@ -1016,6 +1019,11 @@ pub(crate) fn validate_snapshot(
             || has_cast
                 != (frame.cast_shadow_vector_points != [0.0; 2]
                     && frame.cast_shadow_softness_points > 0.0)
+            || (has_any_cast_value
+                && !matches!(
+                    topology.shadow_profile,
+                    crate::game::habitat::HabitatPropShadowProfile::Elevated { .. }
+                ))
             || (!frame.visible
                 && (frame.contact_shadow_strength != 0.0 || frame.cast_shadow_strength != 0.0))
             || (frame.opacity == 0.0 && frame.cast_shadow_strength != 0.0)
@@ -5088,6 +5096,49 @@ mod tests {
             assert!(runtime.pending.is_none());
             assert_eq!(runtime.next_request_id, RequestId(1));
         }
+    }
+
+    #[test]
+    fn snapshot_cast_lanes_require_matching_elevated_authored_profile() {
+        let cast_snapshot = |catalog_id, profile| {
+            let mut candidate = (*snapshot()).clone();
+            candidate.topology.visible_props[0].catalog_id = catalog_id;
+            candidate.topology.visible_props[0].shadow_profile = profile;
+            candidate.content.prop_animation_states[0].catalog_id = catalog_id;
+            candidate.content.prop_animation_states[0].bloom_active = None;
+            let frame = &mut candidate.frame.prop_instances[0];
+            frame.visible = true;
+            frame.opacity = 1.0;
+            frame.footprint_points = [12.0, 24.0];
+            frame.cast_shadow_vector_points = [2.0, -10.0];
+            frame.cast_shadow_softness_points = 2.0;
+            frame.cast_shadow_strength = 0.2;
+            candidate
+        };
+
+        for catalog_id in [
+            crate::game::habitat::TOKEN_LANTERN_10M,
+            crate::game::habitat::TOKEN_PEBBLE_25K,
+        ] {
+            let profile = crate::game::habitat::catalog_prop_by_str(catalog_id)
+                .unwrap()
+                .shadow_profile;
+            let forged = cast_snapshot(catalog_id, profile);
+            assert_eq!(
+                validate_snapshot(&forged),
+                Err(SnapshotRejection::InconsistentIdentity),
+                "{profile:?}",
+            );
+        }
+
+        let catalog_id = crate::game::habitat::TOKEN_TREASURE_CHEST_2M;
+        let profile = crate::game::habitat::catalog_prop_by_str(catalog_id)
+            .unwrap()
+            .shadow_profile;
+        assert_eq!(
+            validate_snapshot(&cast_snapshot(catalog_id, profile)),
+            Ok(())
+        );
     }
 
     #[test]
