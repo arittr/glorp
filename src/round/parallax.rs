@@ -101,7 +101,9 @@ fn resolve_object_parallax(
     for item in &layer.items {
         match item {
             SmoothLayerItem::LocalCell(_) => {}
-            SmoothLayerItem::Shape(_) | SmoothLayerItem::Raster(_) => {
+            SmoothLayerItem::Shape(_)
+            | SmoothLayerItem::PropShadowField(_)
+            | SmoothLayerItem::Raster(_) => {
                 return Err(ParallaxResolveError::UnsupportedObjectGeometry);
             }
         }
@@ -142,7 +144,9 @@ fn object_delta_is_safe(
                     }
                 }
             }
-            SmoothLayerItem::Shape(_) | SmoothLayerItem::Raster(_) => {
+            SmoothLayerItem::Shape(_)
+            | SmoothLayerItem::PropShadowField(_)
+            | SmoothLayerItem::Raster(_) => {
                 return Err(ParallaxResolveError::UnsupportedObjectGeometry);
             }
         }

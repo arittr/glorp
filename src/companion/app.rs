@@ -32,7 +32,8 @@ use crate::presentation::pixel::{
 use crate::presentation::smooth::{
     validate_smooth_layer, SmoothBlendMode, SmoothBounds, SmoothClip, SmoothCompanionLayer,
     SmoothCompanionScenePlan, SmoothFill, SmoothGeometryError, SmoothLayerItem,
-    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothRgba8, SmoothShapeGeometry,
+    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothPropShadowField, SmoothRgba8,
+    SmoothShapeGeometry,
 };
 #[cfg(feature = "retained-renderer")]
 use crate::round::depth::PetStatisticsOrder;
@@ -58,14 +59,15 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSAttributedStringNSStringDrawing, NSBackingStoreType, NSBezierPath, NSBitmapImageRep,
-    NSButtLineCapStyle, NSCalibratedRGBColorSpace, NSColor, NSCommandKeyMask,
-    NSCompositingOperation, NSControlKeyMask, NSEventModifierFlags, NSFloatingWindowLevel, NSFont,
-    NSFontAttributeName, NSFontWeightBold, NSForegroundColorAttributeName, NSGradient,
-    NSGraphicsContext, NSImage, NSLineCapStyle, NSMenu, NSMenuItem, NSRoundLineCapStyle, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowOcclusionState,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSAlphaNonpremultipliedBitmapFormat, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSAttributedStringNSStringDrawing, NSBackingStoreType, NSBezierPath,
+    NSBitmapFormat, NSBitmapImageRep, NSButtLineCapStyle, NSCalibratedRGBColorSpace, NSColor,
+    NSCommandKeyMask, NSCompositingOperation, NSControlKeyMask, NSEventModifierFlags,
+    NSFloatingWindowLevel, NSFont, NSFontAttributeName, NSFontWeightBold,
+    NSForegroundColorAttributeName, NSGradient, NSGraphicsContext, NSImage, NSLineCapStyle, NSMenu,
+    NSMenuItem, NSRoundLineCapStyle, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWorkspace,
 };
 // Used only by the retained-gated paired Smooth capture, which normalizes its
 // output to a faithful sRGB color space.
@@ -185,6 +187,7 @@ enum PreparedRendererFrame {
         passes: PreparedSmoothDepthPasses,
         paint_schedule: [SmoothAppKitPaintStep; 11],
         appkit_hud_volume: Option<Box<PreparedAppKitHudVolume>>,
+        appkit_prop_shadow_field: Option<Box<PreparedAppKitPropShadowField>>,
     },
 }
 
@@ -207,6 +210,18 @@ struct PreparedAppKitHudVolume {
     lines: [PreparedAppKitHudLine; 3],
     primary_coverage: Retained<NSImage>,
     bitmap_target: PreparedAppKitBitmapTarget,
+}
+
+#[derive(Clone)]
+struct PreparedAppKitPropShadowField {
+    image: Retained<NSImage>,
+    bounds: NSRect,
+}
+
+impl std::fmt::Debug for PreparedAppKitPropShadowField {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedAppKitPropShadowField(<private>)")
+    }
 }
 
 impl std::fmt::Debug for PreparedAppKitHudVolume {
@@ -727,23 +742,43 @@ fn prepare_companion_frame_at(
                 SmoothScenePlanError::InvalidLayerGeometry(_) => {
                     CompanionFramePreparationError::SmoothInvalidLayerGeometry
                 }
+                SmoothScenePlanError::InvalidPropShadow => {
+                    CompanionFramePreparationError::SmoothInvalidLayerGeometry
+                }
             })?;
             let draw_order = smooth_layer_draw_order(&plan);
             let passes = prepare_smooth_depth_passes(&plan, &draw_order);
             let composition = CompanionDepthComposition::resolve(plan.pet.effective_depth)
                 .map_err(|_| CompanionFramePreparationError::SmoothInvalidDepth)?;
             let paint_schedule = smooth_appkit_paint_schedule(composition);
-            let appkit_hud_volume = if renderer_mode.is_smooth() {
-                let target = prepare_appkit_bitmap_target(
-                    prepared_bounds,
-                    appkit_backing_scale
-                        .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
+            let appkit_target = if renderer_mode.is_smooth() {
+                Some(
+                    prepare_appkit_bitmap_target(
+                        prepared_bounds,
+                        appkit_backing_scale
+                            .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
+                    )
+                    .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
                 )
-                .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?;
+            } else {
+                None
+            };
+            let appkit_hud_volume = if let Some(target) = appkit_target {
                 Some(Box::new(
                     prepare_appkit_hud_volume(bounds, &aperture, &hud, metrics.font_size, target)
                         .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
                 ))
+            } else {
+                None
+            };
+            let appkit_prop_shadow_field = if let Some(target) = appkit_target {
+                prepare_appkit_prop_shadow_field(
+                    &plan,
+                    target,
+                    appkit_backing_scale
+                        .ok_or(CompanionFramePreparationError::AppKitHudVolumeUnavailable)?,
+                )
+                .map(Box::new)
             } else {
                 None
             };
@@ -766,6 +801,7 @@ fn prepare_companion_frame_at(
                 passes,
                 paint_schedule,
                 appkit_hud_volume,
+                appkit_prop_shadow_field,
             }
         } else {
             let companion_scene = crate::round::scene::build_round_scene_draw_list(
@@ -3484,6 +3520,7 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                 passes,
                 paint_schedule,
                 appkit_hud_volume,
+                appkit_prop_shadow_field,
                 ..
             } => {
                 for step in paint_schedule {
@@ -3493,6 +3530,7 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                             &passes.world_before_statistics,
                             metrics,
                             &aperture,
+                            appkit_prop_shadow_field.as_deref(),
                         ),
                         SmoothAppKitPaintStep::PetFront => {
                             paint_smooth_pet_front(frame, plan, passes, metrics, &aperture)
@@ -3524,9 +3562,13 @@ fn paint_prepared_frame(bounds: NSRect, frame: &PreparedCompanionFrame) {
                                 }
                             }
                         }
-                        SmoothAppKitPaintStep::Foreground => {
-                            appkit_blit_smooth_plan(plan, &passes.foreground, metrics, &aperture)
-                        }
+                        SmoothAppKitPaintStep::Foreground => appkit_blit_smooth_plan(
+                            plan,
+                            &passes.foreground,
+                            metrics,
+                            &aperture,
+                            None,
+                        ),
                         SmoothAppKitPaintStep::Gauge(lane) => {
                             paint_prepared_gauge_lane(frame, lane)
                         }
@@ -3564,7 +3606,7 @@ fn paint_smooth_pet_front(
         match step {
             SmoothPetFrontPaintStep::MoodAura => draw_mood_aura(frame, metrics),
             SmoothPetFrontPaintStep::Layers => {
-                appkit_blit_smooth_plan(plan, &passes.pet_front, metrics, aperture)
+                appkit_blit_smooth_plan(plan, &passes.pet_front, metrics, aperture, None)
             }
         }
     }
@@ -4367,6 +4409,7 @@ fn smooth_depth_bucket(role: SmoothLayerRole) -> SmoothDepthBucket {
         | SmoothLayerRole::BiomeWash
         | SmoothLayerRole::RoomGlyphs
         | SmoothLayerRole::TankBed
+        | SmoothLayerRole::PropShadows
         | SmoothLayerRole::Ambient
         | SmoothLayerRole::Motes
         | SmoothLayerRole::ActivityGlyphs
@@ -4466,6 +4509,7 @@ fn appkit_blit_smooth_plan(
     draw_order: &[usize],
     metrics: &CompanionGridMetrics,
     aperture: &RoundAperture,
+    prop_shadow_field: Option<&PreparedAppKitPropShadowField>,
 ) {
     let CompanionGridMetrics {
         font_size,
@@ -4580,6 +4624,19 @@ fn appkit_blit_smooth_plan(
                                 }
                             }
                         }
+                    }
+                }
+                SmoothLayerItem::PropShadowField(_) => {
+                    let Some(prepared) = prop_shadow_field else {
+                        continue;
+                    };
+                    unsafe {
+                        prepared.image.drawInRect_fromRect_operation_fraction(
+                            prepared.bounds,
+                            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+                            compositing_operation(layer.blend),
+                            f64::from(layer.opacity),
+                        );
                     }
                 }
                 // Rasters are descriptive only; this slice has no raster backend and
@@ -4750,11 +4807,18 @@ fn prepare_appkit_bitmap_target(
 fn allocate_srgb_bitmap_rep(
     target: PreparedAppKitBitmapTarget,
 ) -> Option<Retained<NSBitmapImageRep>> {
+    allocate_srgb_bitmap_rep_with_format(target, NSBitmapFormat(0))
+}
+
+fn allocate_srgb_bitmap_rep_with_format(
+    target: PreparedAppKitBitmapTarget,
+    bitmap_format: NSBitmapFormat,
+) -> Option<Retained<NSBitmapImageRep>> {
     let pixel_width = isize::try_from(target.pixel_width).ok()?;
     let pixel_height = isize::try_from(target.pixel_height).ok()?;
     let bytes_per_row = pixel_width.checked_mul(4)?;
     unsafe {
-        let storage = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+        let storage = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
             std::ptr::null_mut(),
             pixel_width,
@@ -4764,6 +4828,7 @@ fn allocate_srgb_bitmap_rep(
             true,
             false,
             NSCalibratedRGBColorSpace,
+            bitmap_format,
             bytes_per_row,
             32,
         )?;
@@ -4782,6 +4847,94 @@ fn allocate_srgb_bitmap_rep(
         rep.setSize(target.logical_size);
         Some(rep)
     }
+}
+
+fn prop_shadow_field_rgba(
+    field: &SmoothPropShadowField,
+    target: PreparedAppKitBitmapTarget,
+    bounds: NSRect,
+    backing_scale: f64,
+) -> Option<Vec<u8>> {
+    if !backing_scale.is_finite() || backing_scale <= 0.0 {
+        return None;
+    }
+    let pixel_count = usize::try_from(target.pixel_width)
+        .ok()?
+        .checked_mul(usize::try_from(target.pixel_height).ok()?)?;
+    let mut rgba = vec![0_u8; pixel_count.checked_mul(4)?];
+    let row_stride = usize::try_from(target.pixel_width).ok()?.checked_mul(4)?;
+    for row in 0..target.pixel_height {
+        let point_y = bounds.origin.y + bounds.size.height - (f64::from(row) + 0.5) / backing_scale;
+        for col in 0..target.pixel_width {
+            let point_x = bounds.origin.x + (f64::from(col) + 0.5) / backing_scale;
+            let coverage = crate::presentation::props::prop_shadow_union_coverage(
+                [point_x as f32, point_y as f32],
+                &field.shadows,
+            );
+            let alpha = (coverage.clamp(0.0, 1.0) * f32::from(field.tint.a)).round() as u8;
+            let offset = usize::try_from(row).ok()?.checked_mul(row_stride)?
+                + usize::try_from(col).ok()?.checked_mul(4)?;
+            rgba[offset..offset + 4].copy_from_slice(&[
+                field.tint.r,
+                field.tint.g,
+                field.tint.b,
+                alpha,
+            ]);
+        }
+    }
+    Some(rgba)
+}
+
+fn nsimage_from_straight_rgba(
+    rgba: Vec<u8>,
+    bounds: NSRect,
+    backing_scale: f64,
+) -> Option<Retained<NSImage>> {
+    let prepared_bounds = prepare_bounds(bounds).ok()?;
+    let target = prepare_appkit_bitmap_target(prepared_bounds, backing_scale)?;
+    let packed_row_bytes = usize::try_from(target.pixel_width).ok()?.checked_mul(4)?;
+    let expected_len = packed_row_bytes.checked_mul(usize::try_from(target.pixel_height).ok()?)?;
+    if rgba.len() != expected_len {
+        return None;
+    }
+    unsafe {
+        let rep =
+            allocate_srgb_bitmap_rep_with_format(target, NSAlphaNonpremultipliedBitmapFormat)?;
+        let destination_row_bytes = usize::try_from(rep.bytesPerRow()).ok()?;
+        let destination = rep.bitmapData();
+        if destination.is_null() || destination_row_bytes < packed_row_bytes {
+            return None;
+        }
+        for row in 0..usize::try_from(target.pixel_height).ok()? {
+            std::ptr::copy_nonoverlapping(
+                rgba.as_ptr().add(row * packed_row_bytes),
+                destination.add(row * destination_row_bytes),
+                packed_row_bytes,
+            );
+        }
+        let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+        image.addRepresentation(&rep);
+        Some(image)
+    }
+}
+
+fn prepare_appkit_prop_shadow_field(
+    plan: &SmoothCompanionScenePlan,
+    target: PreparedAppKitBitmapTarget,
+    backing_scale: f64,
+) -> Option<PreparedAppKitPropShadowField> {
+    let field = plan
+        .layer_by_role(SmoothLayerRole::PropShadows)?
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SmoothLayerItem::PropShadowField(field) => Some(field),
+            _ => None,
+        })?;
+    let bounds = NSRect::new(NSPoint::new(0.0, 0.0), target.logical_size);
+    let rgba = prop_shadow_field_rgba(field, target, bounds, backing_scale)?;
+    let image = nsimage_from_straight_rgba(rgba, bounds, backing_scale)?;
+    Some(PreparedAppKitPropShadowField { image, bounds })
 }
 
 fn prepare_appkit_hud_volume(
@@ -5072,6 +5225,50 @@ mod tests {
     }
 
     #[test]
+    fn appkit_prop_shadow_field_uses_max_union() {
+        let shadow = crate::presentation::props::resolve_prop_shadow(
+            crate::presentation::props::PropShadowResolveInput {
+                profile: crate::game::habitat::HabitatPropShadowProfile::Elevated {
+                    visual_height_cells: 2.25,
+                    softness_cells: 0.45,
+                },
+                visible: true,
+                grounded: true,
+                opacity: 1.0,
+                footprint_points: [4.0, 8.0],
+                cell_extent_points: [4.0, 4.0],
+                contact_strength: 0.24,
+                origin_y_up_points: [8.0, 24.0],
+            },
+        )
+        .unwrap();
+        let tint = SmoothRgba8 { r: 48, g: 52, b: 62, a: 255 };
+        let target = PreparedAppKitBitmapTarget {
+            logical_size: NSSize::new(32.0, 32.0),
+            pixel_width: 32,
+            pixel_height: 32,
+        };
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), target.logical_size);
+        let once = prop_shadow_field_rgba(
+            &SmoothPropShadowField { shadows: vec![shadow], tint },
+            target,
+            bounds,
+            1.0,
+        )
+        .unwrap();
+        let twice = prop_shadow_field_rgba(
+            &SmoothPropShadowField { shadows: vec![shadow, shadow], tint },
+            target,
+            bounds,
+            1.0,
+        )
+        .unwrap();
+
+        assert!(once.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
     fn frame_preparation_keeps_appkit_hud_smooth_only_and_carries_effective_reveal() {
         for renderer in [
             EffectiveCompanionRenderer::Pixel,
@@ -5085,10 +5282,16 @@ mod tests {
             let retained =
                 prepare_renderer_fixture(EffectiveCompanionRenderer::Retained, Some(0.68), None)
                     .expect("Retained preparation must not allocate AppKit HUD material");
-            let PreparedRendererFrame::Smooth { appkit_hud_volume, .. } = retained.renderer else {
+            let PreparedRendererFrame::Smooth {
+                appkit_hud_volume,
+                appkit_prop_shadow_field,
+                ..
+            } = retained.renderer
+            else {
                 panic!("Retained preparation must retain the shared Smooth scene payload")
             };
             assert!(appkit_hud_volume.is_none());
+            assert!(appkit_prop_shadow_field.is_none());
         }
 
         let just_in_front = f32::from_bits(0.72_f32.to_bits() + 1);
@@ -5106,6 +5309,7 @@ mod tests {
                 composition,
                 paint_schedule,
                 appkit_hud_volume,
+                appkit_prop_shadow_field,
                 ..
             } = &frame.renderer
             else {
@@ -5120,6 +5324,7 @@ mod tests {
             );
             assert_eq!(*paint_schedule, smooth_appkit_paint_schedule(*composition));
             assert!(appkit_hud_volume.is_some());
+            assert!(appkit_prop_shadow_field.is_some());
         }
     }
 

@@ -582,6 +582,7 @@ fn smooth_plan_assigns_every_current_role_its_approved_binding() {
         (BiomeWash, Parallax(Far)),
         (RoomGlyphs, Parallax(Far)),
         (TankBed, Fixed),
+        (PropShadows, Fixed),
         (Ambient, Parallax(Mid)),
         (Motes, Parallax(Mid)),
         (ActivityGlyphs, Parallax(Mid)),
@@ -778,6 +779,44 @@ fn tank_bed_layer_is_fixed_clipped_and_independent_of_pet_motion() {
 }
 
 #[test]
+fn smooth_scene_has_receiving_surface_prop_shadow_field() {
+    let vm = parity_fixture();
+    let plan = glorp::round::smooth::try_build_round_smooth_scene_plan_with_options(
+        &vm,
+        NOW,
+        GRID_COLS,
+        GRID_ROWS,
+        &CompanionMotion::default(),
+        0,
+        glorp::round::smooth::SmoothSceneBuildOptions {
+            viewport_points: Some([VIEWPORT_WIDTH_POINTS, VIEWPORT_HEIGHT_POINTS]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let bed = plan.layer_by_role(SmoothLayerRole::TankBed).unwrap();
+    let shadows = plan.layer_by_role(SmoothLayerRole::PropShadows).unwrap();
+    let props = plan.layer_by_role(SmoothLayerRole::PropsBehind).unwrap();
+
+    assert_eq!(shadows.motion_binding, SmoothLayerMotionBinding::Fixed);
+    assert_eq!(shadows.blend, SmoothBlendMode::Multiply);
+    assert_eq!(shadows.z, 1);
+    assert!(shadows.z < props.z);
+    assert_eq!(shadows.clip, bed.clip);
+    assert!(matches!(
+        shadows.items.as_slice(),
+        [SmoothLayerItem::PropShadowField(field)] if !field.shadows.is_empty()
+    ));
+
+    let checksum = plan.classic_flatten_checksum();
+    let mut without_shadow_field = plan.clone();
+    without_shadow_field
+        .layers
+        .retain(|layer| layer.role != SmoothLayerRole::PropShadows);
+    assert_eq!(checksum, without_shadow_field.classic_flatten_checksum());
+}
+
+#[test]
 fn smooth_plan_lifecycle_scale_uses_asleep_precedence() {
     let motion = glorp::round::scene::companion_roam_motion();
     let mut normal = parity_fixture();
@@ -860,6 +899,7 @@ fn smooth_round_plan_includes_classic_and_round_only_roles() {
             SmoothLayerRole::BiomeWash,
             SmoothLayerRole::RoomGlyphs,
             SmoothLayerRole::TankBed,
+            SmoothLayerRole::PropShadows,
             SmoothLayerRole::Ambient,
             SmoothLayerRole::Motes,
             SmoothLayerRole::ActivityGlyphs,

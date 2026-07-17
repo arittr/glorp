@@ -1987,6 +1987,10 @@ fn prepare_gpu_frame(
                     });
                     blends.push(layer.blend);
                 }
+                // The retained scene owns prop shadows through its existing
+                // fixed PropShadows analytic; the Smooth/AppKit field is not a
+                // second retained primitive.
+                SmoothLayerItem::PropShadowField(_) => {}
                 SmoothLayerItem::Raster(_) => {
                     return Err(RetainedFailureCategory::UnsupportedRaster)
                 }

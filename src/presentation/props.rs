@@ -38,6 +38,16 @@ pub(crate) struct PresentationPropFootprint {
 pub(crate) const PROP_CAST_SHADOW_DIRECTION_Y_UP: [f32; 2] = [0.196_116_13, -0.980_580_7];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PresentationPropShadowSource {
+    pub(crate) profile: HabitatPropShadowProfile,
+    pub(crate) bounds_cells: [f32; 4],
+    pub(crate) grounded: bool,
+    pub(crate) opacity: f32,
+    pub(crate) pet_layer: HabitatPetLayer,
+    pub(crate) contact_strength: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PropShadowResolveInput {
     pub(crate) profile: HabitatPropShadowProfile,
     pub(crate) visible: bool,
@@ -156,7 +166,6 @@ pub(crate) fn resolve_prop_shadow(
     })
 }
 
-#[allow(dead_code, reason = "consumed by follow-up prop-shadow tasks")]
 fn prop_shadow_coverage_at(point_y_up: [f32; 2], shadow: ResolvedPropShadow) -> f32 {
     if point_y_up.into_iter().any(|value| !value.is_finite()) {
         return 0.0;
@@ -205,13 +214,11 @@ fn prop_shadow_coverage_at(point_y_up: [f32; 2], shadow: ResolvedPropShadow) -> 
     contact_coverage.max(cast_coverage).clamp(0.0, 1.0)
 }
 
-#[allow(dead_code, reason = "consumed by follow-up prop-shadow tasks")]
 fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-#[allow(dead_code, reason = "consumed by follow-up prop-shadow tasks")]
 pub(crate) fn prop_shadow_union_coverage(
     point_y_up: [f32; 2],
     shadows: &[ResolvedPropShadow],

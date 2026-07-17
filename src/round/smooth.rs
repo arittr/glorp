@@ -4,13 +4,14 @@ use ratatui::layout::Rect;
 
 use crate::pet::generation::Species;
 use crate::pet::render::{FRAME_HEIGHT, FRAME_WIDTH};
+use crate::presentation::props::{resolve_prop_shadow, PropShadowResolveInput};
 use crate::presentation::smooth::{
     transformed_smooth_bounds, validate_smooth_layer, CompanionChromeReservation,
     CompanionViewport, SmoothBlendMode, SmoothBounds, SmoothClassicFlattenCompat, SmoothClip,
     SmoothCompanionLayer, SmoothCompanionPet, SmoothCompanionPrivacyClaims,
     SmoothCompanionScenePlan, SmoothGeometryError, SmoothLayerId, SmoothLayerItem,
-    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothShape, SmoothShapeGeometry,
-    SmoothTransform,
+    SmoothLayerMotionBinding, SmoothLayerRole, SmoothPoint, SmoothPropShadowField, SmoothShape,
+    SmoothShapeGeometry, SmoothTransform,
 };
 use crate::presentation::PetSceneModel;
 use crate::round::depth::{depth_lifecycle_scale, resolve_smooth_depth, SmoothDepthError};
@@ -36,6 +37,7 @@ pub enum SmoothScenePlanError {
     InvalidDepth(SmoothDepthError),
     InvalidDepthPlacement(crate::round::placement::RoundDepthPlacementError),
     InvalidLayerGeometry(SmoothGeometryError),
+    InvalidPropShadow,
 }
 
 impl std::fmt::Display for SmoothScenePlanError {
@@ -51,6 +53,9 @@ impl std::fmt::Display for SmoothScenePlanError {
             }
             SmoothScenePlanError::InvalidLayerGeometry(error) => {
                 write!(f, "smooth scene layer geometry: {error:?}")
+            }
+            SmoothScenePlanError::InvalidPropShadow => {
+                f.write_str("smooth scene has invalid prop shadow geometry")
             }
         }
     }
@@ -114,6 +119,7 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         &ctx,
         &tank_geometry,
     );
+    let prop_shadow_sources = layered.prop_shadow_sources.clone();
 
     let viewport = CompanionViewport { grid_cols, grid_rows };
     let viewport_bounds = rect_bounds(Rect::new(0, 0, grid_cols, grid_rows));
@@ -422,6 +428,86 @@ pub fn try_build_round_smooth_scene_plan_with_options(
         layer.parallax_translation = parallax_translation;
         layer.transform.translation.x += parallax_translation.x;
         layer.transform.translation.y += parallax_translation.y;
+    }
+
+    if let Some(bed) = tank_bed.as_ref() {
+        let cell_extent_points = [
+            viewport_points[0] / f32::from(grid_cols),
+            viewport_points[1] / f32::from(grid_rows),
+        ];
+        let translation_for = |pet_layer| {
+            let role = match pet_layer {
+                crate::game::habitat::HabitatPetLayer::Background
+                | crate::game::habitat::HabitatPetLayer::Behind => SmoothLayerRole::PropsBehind,
+                crate::game::habitat::HabitatPetLayer::Foreground => {
+                    SmoothLayerRole::PropsForeground
+                }
+            };
+            layers
+                .iter()
+                .find(|layer| layer.role == role)
+                .map_or(SmoothPoint::default(), |layer| layer.transform.translation)
+        };
+        let mut shadows = Vec::new();
+        for source in prop_shadow_sources {
+            let translation = translation_for(source.pet_layer);
+            let [x, y, width, height] = source.bounds_cells;
+            let resolved = resolve_prop_shadow(PropShadowResolveInput {
+                profile: source.profile,
+                visible: true,
+                grounded: source.grounded,
+                opacity: source.opacity,
+                footprint_points: [
+                    width * cell_extent_points[0],
+                    height * cell_extent_points[1],
+                ],
+                cell_extent_points,
+                contact_strength: source.contact_strength,
+                origin_y_up_points: [
+                    (x + translation.x) * cell_extent_points[0],
+                    viewport_points[1]
+                        - y * cell_extent_points[1]
+                        - cell_extent_points[1]
+                        - translation.y * cell_extent_points[1],
+                ],
+            })
+            .map_err(|_| SmoothScenePlanError::InvalidPropShadow)?;
+            if resolved.contact_strength > 0.0 || resolved.cast.is_some() {
+                shadows.push(resolved);
+            }
+        }
+
+        let prop_shadow_layer = SmoothCompanionLayer {
+            id: SmoothLayerId("round-prop-shadows".to_string()),
+            role: SmoothLayerRole::PropShadows,
+            motion_binding: SmoothLayerMotionBinding::Fixed,
+            z: 1,
+            local_bounds: viewport_bounds,
+            anchor: SmoothPoint::default(),
+            transform_origin: SmoothPoint::default(),
+            transform: SmoothTransform {
+                translation: SmoothPoint::default(),
+                scale: SmoothPoint { x: 1.0, y: 1.0 },
+                rotation_degrees: 0.0,
+            },
+            parallax_translation: SmoothPoint::default(),
+            opacity: 1.0,
+            clip: SmoothClip::Ellipse {
+                center: aperture_center,
+                radii: aperture_radii,
+            },
+            blend: SmoothBlendMode::Multiply,
+            items: vec![SmoothLayerItem::PropShadowField(SmoothPropShadowField {
+                shadows,
+                tint: bed.shadow,
+            })],
+            privacy: SmoothCompanionPrivacyClaims::external_companion(),
+        };
+        let insert_at = layers
+            .iter()
+            .position(|layer| layer.role == SmoothLayerRole::TankBed)
+            .map_or(0, |index| index + 1);
+        layers.insert(insert_at, prop_shadow_layer);
     }
 
     // Nothing malformed may reach the native draw callback.

@@ -1,13 +1,16 @@
 use ratatui::{layout::Rect, style::Color};
 
 use crate::game::habitat::HabitatPetLayer;
+use crate::game::habitat::{catalog_prop_by_str, HabitatPropZone};
+use crate::presentation::props::PresentationPropShadowSource;
 use crate::presentation::smooth::{
     LayeredPetScene, SmoothBlendMode, SmoothBounds, SmoothClip, SmoothCompanionLayer,
     SmoothCompanionPrivacyClaims, SmoothLayerId, SmoothLayerItem, SmoothLayerRole, SmoothLocalCell,
     SmoothPoint, SmoothTransform,
 };
 use crate::presentation::{DrawCell, PetSceneModel};
-use crate::tui::component::{habitat_props_for, PetSceneLayout, TankLifeSurfaceGeometry};
+use crate::tui::component::habitat_props::habitat_prop_placements_for;
+use crate::tui::component::{PetSceneLayout, TankLifeSurfaceGeometry};
 use crate::tui::life::build_prop_reactions;
 use crate::tui::render_context::RenderContext;
 use crate::tui::view_model::WatchViewModel;
@@ -74,7 +77,7 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
     let life_profile = apply_resonance_reaction(life_profile, resonant_prop.as_ref());
     let pet_rect = rendered_pet_rect_for_performance(scene, room_profile.pet_performance);
 
-    let prop_cells = habitat_props_for(
+    let prop_placements = habitat_prop_placements_for(
         &vm.habitat,
         scene,
         &silhouette_halo,
@@ -82,6 +85,38 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
         &vm.pet_render.seed,
         ctx,
     );
+    let prop_shadow_sources = prop_placements
+        .iter()
+        .filter_map(|placement| {
+            let spec = catalog_prop_by_str(placement.prop_id.as_str())?;
+            Some(PresentationPropShadowSource {
+                profile: spec.shadow_profile,
+                bounds_cells: [
+                    f32::from(placement.bounds.x),
+                    f32::from(placement.bounds.y),
+                    f32::from(placement.bounds.width),
+                    f32::from(placement.bounds.height),
+                ],
+                grounded: matches!(
+                    spec.zone,
+                    HabitatPropZone::FloorLeft
+                        | HabitatPropZone::FloorMid
+                        | HabitatPropZone::FloorRight
+                ),
+                opacity: 1.0,
+                pet_layer: placement.pet_layer,
+                contact_strength: match placement.pet_layer {
+                    HabitatPetLayer::Background => 0.0,
+                    HabitatPetLayer::Behind => 0.24,
+                    HabitatPetLayer::Foreground => 0.34,
+                },
+            })
+        })
+        .collect();
+    let prop_cells = prop_placements
+        .into_iter()
+        .flat_map(|placement| placement.cells)
+        .collect::<Vec<_>>();
     let canonical_tank_life = crate::tui::component::canonical_daily_cast(
         &vm.habitat.earned_inhabitants,
         &vm.pet_render.seed,
@@ -253,6 +288,7 @@ pub(crate) fn render_layered_pet_scene_with_tank_geometry(
         tank_life_layer_cells(&tank_life_cells, &[HabitatPetLayer::Foreground]);
 
     LayeredPetScene {
+        prop_shadow_sources,
         layers: vec![
             layer_from_draw_cells(
                 "classic-biome-wash",
@@ -477,7 +513,8 @@ fn local_bounds_for_cells(cells: &[DrawCell], anchor: SmoothPoint) -> SmoothBoun
 mod tests {
     use super::render_layered_pet_scene_with_tank_geometry;
     use crate::game::habitat::{
-        HabitatPropKind, TOKEN_FRIENDLY_CLOUD_750K, TOKEN_HANGING_VINE_25M, TOKEN_TREASURE_CHEST_2M,
+        HabitatPropKind, HabitatPropShadowProfile, TOKEN_FRIENDLY_CLOUD_750K,
+        TOKEN_HANGING_VINE_25M, TOKEN_TREASURE_CHEST_2M,
     };
     use crate::presentation::smooth::{
         SmoothBounds, SmoothLayerItem, SmoothLayerRole, SmoothPoint,
@@ -682,6 +719,42 @@ mod tests {
                 SmoothLayerRole::TankLifeForeground,
             ]
         );
+    }
+
+    #[test]
+    fn layered_scene_preserves_authored_prop_shadow_metadata() {
+        let vm = with_treasure_chest(active_prop_rich_vm());
+        let (scene_model, scene, ctx, tank_geometry) = active_scene_inputs(&vm);
+
+        let layered = render_layered_pet_scene_with_tank_geometry(
+            &scene_model,
+            &vm,
+            &scene,
+            LAYERED_NOW,
+            &ctx,
+            &tank_geometry,
+        );
+
+        let elevated = layered
+            .prop_shadow_sources
+            .iter()
+            .find(|source| {
+                source.profile
+                    == HabitatPropShadowProfile::Elevated {
+                        visual_height_cells: 2.25,
+                        softness_cells: 0.45,
+                    }
+            })
+            .expect("treasure chest placement should retain its shadow profile");
+        assert!(elevated.grounded);
+        assert_eq!(elevated.opacity, 1.0);
+        assert_eq!(
+            elevated.pet_layer,
+            crate::game::habitat::HabitatPetLayer::Behind
+        );
+        assert_eq!(elevated.contact_strength, 0.24);
+        assert!(elevated.bounds_cells[2] >= 1.0);
+        assert!(elevated.bounds_cells[3] >= 2.0);
     }
 
     #[test]

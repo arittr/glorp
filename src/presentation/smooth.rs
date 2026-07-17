@@ -1,4 +1,5 @@
 use crate::pet::palette::Rgb;
+use crate::presentation::props::{PresentationPropShadowSource, ResolvedPropShadow};
 use crate::presentation::{DrawCell, SceneDrawList};
 use serde::Serialize;
 
@@ -102,6 +103,7 @@ pub enum SmoothLayerRole {
     BiomeWash,
     RoomGlyphs,
     TankBed,
+    PropShadows,
     Ambient,
     Motes,
     ActivityGlyphs,
@@ -127,6 +129,7 @@ impl SmoothLayerRole {
             Self::BiomeWash => "biome-wash",
             Self::RoomGlyphs => "room-glyphs",
             Self::TankBed => "tank-bed",
+            Self::PropShadows => "prop-shadows",
             Self::Ambient => "ambient",
             Self::Motes => "motes",
             Self::ActivityGlyphs => "activity-glyphs",
@@ -239,9 +242,16 @@ pub struct SmoothRasterRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SmoothPropShadowField {
+    pub shadows: Vec<ResolvedPropShadow>,
+    pub tint: SmoothRgba8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum SmoothLayerItem {
     LocalCell(SmoothLocalCell),
     Shape(SmoothShape),
+    PropShadowField(SmoothPropShadowField),
     Raster(SmoothRasterRef),
 }
 
@@ -453,6 +463,7 @@ pub struct SmoothParallaxPlaneTranslations {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayeredPetScene {
     pub layers: Vec<SmoothCompanionLayer>,
+    pub(crate) prop_shadow_sources: Vec<PresentationPropShadowSource>,
 }
 
 impl LayeredPetScene {
@@ -813,6 +824,7 @@ mod tests {
     #[test]
     fn flatten_classic_cells_sorts_by_z_then_layer_index_and_keeps_item_order() {
         let scene = LayeredPetScene {
+            prop_shadow_sources: Vec::new(),
             layers: vec![
                 layer(
                     "later-high",
@@ -913,7 +925,10 @@ mod tests {
             items: vec![local_item(cell(1, 4, "X", Some(rgb(1, 2, 3)), None, false))],
             privacy: SmoothCompanionPrivacyClaims::external_companion(),
         };
-        let scene = LayeredPetScene { layers: vec![layer.clone()] };
+        let scene = LayeredPetScene {
+            layers: vec![layer.clone()],
+            prop_shadow_sources: Vec::new(),
+        };
         let plan = SmoothCompanionScenePlan {
             viewport: CompanionViewport::default(),
             layers: vec![layer],
@@ -1080,6 +1095,7 @@ mod tests {
     #[test]
     fn smooth_scene_plan_and_layered_scene_offer_method_flatten_helpers() {
         let layered_scene = LayeredPetScene {
+            prop_shadow_sources: Vec::new(),
             layers: vec![layer(
                 "pet-body",
                 SmoothLayerRole::PetBody,
