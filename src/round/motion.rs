@@ -440,7 +440,9 @@ fn normalize_facing(facing: i8) -> i8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::round::locomotion::{sample_companion_locomotion, LocomotionPhase};
+    use crate::round::locomotion::{
+        sample_companion_locomotion, stable_companion_identity, LocomotionPhase,
+    };
     use crate::tui::view_model::WatchViewModel;
     use time::macros::datetime;
 
@@ -474,6 +476,16 @@ mod tests {
                 perspective_y_max: crate::round::depth::SMOOTH_PERSPECTIVE_Y_MAX,
                 bottom_reserved_rows: 5,
             },
+        }
+    }
+
+    fn production_viewport() -> RoundCompanionMotionViewport {
+        RoundCompanionMotionViewport {
+            grid_columns: 36,
+            grid_rows: 18,
+            width_points: 360.0,
+            height_points: 360.0,
+            clearance: crate::round::scene::current_round_motion_clearance(18),
         }
     }
 
@@ -519,6 +531,39 @@ mod tests {
             projection.planar_offset_cells.y,
             sample.point.y * (4.0 * 0.6),
         );
+    }
+
+    #[test]
+    fn every_awake_route_leg_crosses_visible_production_aperture_distance() {
+        let viewport = production_viewport();
+        let motion = companion_roam_motion();
+        let center_at = |identity, segment| {
+            let now = time::OffsetDateTime::UNIX_EPOCH
+                + time::Duration::seconds(
+                    segment * crate::round::locomotion::LOCOMOTION_SEGMENT_SECS,
+                );
+            let mut input = motion_input(false, None, None, None);
+            input.identity = identity;
+            let projection = project_round_companion_motion(input, now, 0, viewport, &motion);
+            let depth = crate::round::depth::resolve_smooth_depth(projection.normalized_depth, 1.0)
+                .unwrap();
+            crate::round::placement::resolve_round_depth_placement(projection, depth, viewport)
+                .unwrap()
+                .final_center_cells
+        };
+
+        for seed in 0..16 {
+            let identity = stable_companion_identity(&format!("visible-production-route-{seed}"));
+            for segment in -16..16 {
+                let start = center_at(identity, segment);
+                let end = center_at(identity, segment + 1);
+                let distance = (end.x - start.x).hypot(end.y - start.y);
+                assert!(
+                    distance >= 2.0,
+                    "seed {seed}, segment {segment} moved only {distance} cells: {start:?} to {end:?}"
+                );
+            }
+        }
     }
 
     #[test]

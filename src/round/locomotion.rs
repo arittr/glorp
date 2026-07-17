@@ -1,19 +1,26 @@
 //! Deterministic locomotion shared by live companion motion and Preview Lab.
 
-pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 16;
+pub(crate) const LOCOMOTION_SEGMENT_SECS: i64 = 8;
 pub(crate) const LOCOMOTION_BLOCK_SEGMENTS: usize = 8;
-pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 2;
-pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 4;
-pub(crate) const LOCOMOTION_MAX_PLANAR_STEP: f32 = 0.62;
+pub(crate) const LOCOMOTION_DWELL_MIN_SECS: i64 = 1;
+pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 1;
+pub(crate) const LOCOMOTION_MAX_PLANAR_STEP: f32 = 0.85;
 pub(crate) const LOCOMOTION_MAX_DEPTH_STEP: f32 = 0.67;
 const LOCOMOTION_CONTROL_OFFSET_FRACTION: f32 = 0.12;
 const LOCOMOTION_FACING_DEADZONE: f32 = 0.06;
 const LOCOMOTION_DEPTH_EXTREME: f32 = 0.70;
 const LOCOMOTION_DEPTH_MID: f32 = 0.23;
+const LOCOMOTION_EXTREME_X_LIMIT: f32 = 0.45;
+const LOCOMOTION_MID_X_LIMIT: f32 = 0.62;
+const LOCOMOTION_NEUTRAL_X_LIMIT: f32 = 0.78;
+const MIN_HORIZONTAL_TARGET_DISTANCE: f32 = 0.20;
+const ROUTE_DIRECTIONS: usize = 16;
+const ROUTE_CANDIDATE_RADII: [f32; 4] = [0.36, 0.52, 0.68, 0.82];
+const ROUTE_CANDIDATE_COUNT: usize = ROUTE_DIRECTIONS * ROUTE_CANDIDATE_RADII.len();
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-const MIN_PLANAR_TARGET_DISTANCE: f32 = 0.12;
+const MIN_PLANAR_TARGET_DISTANCE: f32 = 0.35;
 const ROUTE_POINTS: usize = LOCOMOTION_BLOCK_SEGMENTS + 1;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
@@ -128,32 +135,29 @@ fn route_block(identity: u64, block_index: i64) -> [NormalizedLocomotionPoint; R
             y: start_anchor.y + (end_anchor.y - start_anchor.y) * t,
             z: z_waypoints[slot],
         });
-        let rotation = (hash_lane(identity, block_index, 0x100 + slot as u64) % 8) as usize;
+        let rotation = (hash_lane(identity, block_index, 0x100 + slot as u64)
+            % ROUTE_CANDIDATE_COUNT as u64) as usize;
         let mut selected = None;
 
-        for attempt in 0..8 {
-            let candidate_index = (rotation + attempt) % 8;
+        for attempt in 0..ROUTE_CANDIDATE_COUNT {
+            let candidate_index = (rotation + attempt) % ROUTE_CANDIDATE_COUNT;
             let candidate = candidate_point(interpolation, candidate_index, z_waypoints[slot]);
-            let outgoing_step = planar_vector(candidate, route[slot + 1]);
-            let outgoing_length = planar_length(outgoing_step);
-            if !(MIN_PLANAR_TARGET_DISTANCE..=LOCOMOTION_MAX_PLANAR_STEP).contains(&outgoing_length)
-            {
+            if !is_visible_planar_step(candidate, route[slot + 1]) {
                 continue;
             }
+            let outgoing_step = planar_vector(candidate, route[slot + 1]);
 
-            let has_alternative = attempt < 7;
+            let has_alternative = attempt + 1 < ROUTE_CANDIDATE_COUNT;
             let successor_step = planar_vector(route[slot + 1], route[slot + 2]);
             if reverses_too_directly(outgoing_step, successor_step) && has_alternative {
                 continue;
             }
 
             if slot == 1 {
-                let entry_step = planar_vector(route[0], candidate);
-                if !(MIN_PLANAR_TARGET_DISTANCE..=LOCOMOTION_MAX_PLANAR_STEP)
-                    .contains(&planar_length(entry_step))
-                {
+                if !is_visible_planar_step(route[0], candidate) {
                     continue;
                 }
+                let entry_step = planar_vector(route[0], candidate);
 
                 let incoming_step = final_step_for_block(identity, block_index - 1);
                 if (reverses_too_directly(incoming_step, entry_step)
@@ -168,7 +172,24 @@ fn route_block(identity: u64, block_index: i64) -> [NormalizedLocomotionPoint; R
             break;
         }
 
-        let mut point = selected.unwrap_or(interpolation);
+        // If a smooth turn is geometrically unavailable, a brief dwell permits
+        // a deliberate turn rather than silently collapsing to a tiny leg.
+        let mut point = selected
+            .or_else(|| {
+                (0..ROUTE_CANDIDATE_COUNT)
+                    .map(|attempt| {
+                        candidate_point(
+                            interpolation,
+                            (rotation + attempt) % ROUTE_CANDIDATE_COUNT,
+                            z_waypoints[slot],
+                        )
+                    })
+                    .find(|candidate| {
+                        is_visible_planar_step(*candidate, route[slot + 1])
+                            && (slot != 1 || is_visible_planar_step(route[0], *candidate))
+                    })
+            })
+            .unwrap_or(interpolation);
         point.z = z_waypoints[slot];
         route[slot] = point;
     }
@@ -195,14 +216,16 @@ fn final_route_target(
         y: start_anchor.y + (end_anchor.y - start_anchor.y) * t,
         z,
     });
-    let rotation = (hash_lane(identity, block_index, 0x100 + slot as u64) % 8) as usize;
+    let rotation = (hash_lane(identity, block_index, 0x100 + slot as u64)
+        % ROUTE_CANDIDATE_COUNT as u64) as usize;
 
-    for attempt in 0..8 {
-        let candidate = candidate_point(interpolation, (rotation + attempt) % 8, z);
-        let end_step = planar_vector(candidate, end_anchor);
-        if (MIN_PLANAR_TARGET_DISTANCE..=LOCOMOTION_MAX_PLANAR_STEP)
-            .contains(&planar_length(end_step))
-        {
+    for attempt in 0..ROUTE_CANDIDATE_COUNT {
+        let candidate = candidate_point(
+            interpolation,
+            (rotation + attempt) % ROUTE_CANDIDATE_COUNT,
+            z,
+        );
+        if is_visible_planar_step(candidate, end_anchor) {
             return candidate;
         }
     }
@@ -220,7 +243,13 @@ fn final_step_for_block(identity: u64, block_index: i64) -> (f32, f32) {
 
 fn boundary_anchor(identity: u64, block_index: i64) -> NormalizedLocomotionPoint {
     NormalizedLocomotionPoint {
-        x: hash_range(identity, block_index, 0x01, -0.55, 0.55),
+        x: hash_range(
+            identity,
+            block_index,
+            0x01,
+            -LOCOMOTION_EXTREME_X_LIMIT,
+            LOCOMOTION_EXTREME_X_LIMIT,
+        ),
         y: hash_range(identity, block_index, 0x02, -0.45, 0.45),
         z: if block_index.rem_euclid(2) == 0 {
             -LOCOMOTION_DEPTH_EXTREME
@@ -257,18 +286,28 @@ fn candidate_point(
     z: f32,
 ) -> NormalizedLocomotionPoint {
     const DIAGONAL: f32 = std::f32::consts::FRAC_1_SQRT_2;
-    const COMPASS: [(f32, f32); 8] = [
+    const SHALLOW: f32 = 0.923_879_5;
+    const STEEP: f32 = 0.382_683_43;
+    const COMPASS: [(f32, f32); ROUTE_DIRECTIONS] = [
         (1.0, 0.0),
+        (SHALLOW, STEEP),
         (DIAGONAL, DIAGONAL),
+        (STEEP, SHALLOW),
         (0.0, 1.0),
+        (-STEEP, SHALLOW),
         (-DIAGONAL, DIAGONAL),
+        (-SHALLOW, STEEP),
         (-1.0, 0.0),
+        (-SHALLOW, -STEEP),
         (-DIAGONAL, -DIAGONAL),
+        (-STEEP, -SHALLOW),
         (0.0, -1.0),
+        (STEEP, -SHALLOW),
         (DIAGONAL, -DIAGONAL),
+        (SHALLOW, -STEEP),
     ];
-    let radius = if index.is_multiple_of(2) { 0.18 } else { 0.28 };
-    let (x, y) = COMPASS[index];
+    let radius = ROUTE_CANDIDATE_RADII[index / ROUTE_DIRECTIONS];
+    let (x, y) = COMPASS[index % ROUTE_DIRECTIONS];
     clamp_xy(NormalizedLocomotionPoint {
         x: center.x + x * radius,
         y: center.y + y * radius,
@@ -433,10 +472,15 @@ fn route_is_valid(route: &[NormalizedLocomotionPoint; ROUTE_POINTS]) -> bool {
             && (-1.0..=1.0).contains(&point.y)
             && (-1.0..=1.0).contains(&point.z)
     }) && route.windows(2).all(|pair| {
-        let distance = planar_length(planar_vector(pair[0], pair[1]));
-        distance <= LOCOMOTION_MAX_PLANAR_STEP
+        is_visible_planar_step(pair[0], pair[1])
             && (pair[1].z - pair[0].z).abs() <= LOCOMOTION_MAX_DEPTH_STEP + f32::EPSILON
     })
+}
+
+fn is_visible_planar_step(from: NormalizedLocomotionPoint, to: NormalizedLocomotionPoint) -> bool {
+    let step = planar_vector(from, to);
+    (MIN_PLANAR_TARGET_DISTANCE..=LOCOMOTION_MAX_PLANAR_STEP).contains(&planar_length(step))
+        && step.0.abs() >= MIN_HORIZONTAL_TARGET_DISTANCE
 }
 
 fn neutral_route() -> [NormalizedLocomotionPoint; ROUTE_POINTS] {
@@ -460,7 +504,14 @@ fn planar_length(vector: (f32, f32)) -> f32 {
 }
 
 fn clamp_xy(mut point: NormalizedLocomotionPoint) -> NormalizedLocomotionPoint {
-    point.x = point.x.clamp(-1.0, 1.0);
+    let x_limit = if point.z.abs() >= LOCOMOTION_DEPTH_EXTREME {
+        LOCOMOTION_EXTREME_X_LIMIT
+    } else if point.z.abs() >= LOCOMOTION_DEPTH_MID {
+        LOCOMOTION_MID_X_LIMIT
+    } else {
+        LOCOMOTION_NEUTRAL_X_LIMIT
+    };
+    point.x = point.x.clamp(-x_limit, x_limit);
     point.y = point.y.clamp(-1.0, 1.0);
     point
 }
@@ -588,10 +639,7 @@ mod tests {
                 LocomotionPhase::Glide
             );
             let glide = LOCOMOTION_SEGMENT_SECS - dwell;
-            assert!(
-                (12..=14).contains(&glide),
-                "segment {segment} had a {glide}-second glide"
-            );
+            assert!(glide == 7, "segment {segment} had a {glide}-second glide");
         }
     }
 
@@ -656,20 +704,26 @@ mod tests {
     }
 
     #[test]
-    fn route_stays_normalized_and_each_move_is_bounded() {
-        let identity = stable_companion_identity("bounded-route");
-        for block in -2..3 {
-            let route = route_block(identity, block);
-            for point in route {
-                assert!((-1.0..=1.0).contains(&point.x));
-                assert!((-1.0..=1.0).contains(&point.y));
-                assert!((-1.0..=1.0).contains(&point.z));
-            }
-            for pair in route.windows(2) {
-                assert!(
-                    planar_distance(pair[0], pair[1]) <= LOCOMOTION_MAX_PLANAR_STEP + f32::EPSILON
-                );
-                assert!((pair[1].z - pair[0].z).abs() <= LOCOMOTION_MAX_DEPTH_STEP + f32::EPSILON);
+    fn route_stays_normalized_and_each_move_is_substantial_but_bounded() {
+        for seed in 0..16 {
+            let identity = stable_companion_identity(&format!("bounded-route-{seed}"));
+            for block in -16..=16 {
+                let route = route_block(identity, block);
+                for point in route {
+                    assert!((-1.0..=1.0).contains(&point.x));
+                    assert!((-1.0..=1.0).contains(&point.y));
+                    assert!((-1.0..=1.0).contains(&point.z));
+                }
+                for pair in route.windows(2) {
+                    let planar_distance = planar_distance(pair[0], pair[1]);
+                    assert!(
+                        (0.35..=0.85 + f32::EPSILON).contains(&planar_distance),
+                        "seed {seed}, block {block}, route leg {pair:?} had planar distance {planar_distance}"
+                    );
+                    assert!(
+                        (pair[1].z - pair[0].z).abs() <= LOCOMOTION_MAX_DEPTH_STEP + f32::EPSILON
+                    );
+                }
             }
         }
     }
@@ -704,16 +758,16 @@ mod tests {
             y: start.y + (end.y - start.y) * t,
             z: depth_waypoints(block)[slot],
         });
-        let rotation = (hash_lane(identity, block, 0x100 + slot as u64) % 8) as usize;
-        (0..8).any(|attempt| {
+        let rotation = (hash_lane(identity, block, 0x100 + slot as u64)
+            % ROUTE_CANDIDATE_COUNT as u64) as usize;
+        (0..ROUTE_CANDIDATE_COUNT).any(|attempt| {
             let candidate = candidate_point(
                 interpolation,
-                (rotation + attempt) % 8,
+                (rotation + attempt) % ROUTE_CANDIDATE_COUNT,
                 depth_waypoints(block)[slot],
             );
             let step = planar_vector(candidate, route[slot + 1]);
-            let distance = planar_length(step);
-            if !(MIN_PLANAR_TARGET_DISTANCE..=LOCOMOTION_MAX_PLANAR_STEP).contains(&distance)
+            if !is_visible_planar_step(candidate, route[slot + 1])
                 || reverses_too_directly(step, planar_vector(route[slot + 1], route[slot + 2]))
             {
                 return false;
@@ -722,8 +776,7 @@ mod tests {
             if slot == 1 {
                 let entry_step = planar_vector(start, candidate);
                 let incoming_step = final_step_for_block(identity, block - 1);
-                (MIN_PLANAR_TARGET_DISTANCE..=LOCOMOTION_MAX_PLANAR_STEP)
-                    .contains(&planar_length(entry_step))
+                is_visible_planar_step(start, candidate)
                     && !reverses_too_directly(incoming_step, entry_step)
                     && !reverses_too_directly(entry_step, step)
             } else {
@@ -802,32 +855,13 @@ mod tests {
     }
 
     #[test]
-    fn deadzone_facing_uses_the_next_meaningful_direction() {
-        let mut covered_deadzone = false;
-
+    fn substantial_horizontal_legs_keep_facing_unambiguous() {
         for seed in 0..64 {
             let identity = stable_companion_identity(&format!("facing-forward-{seed}"));
             for segment in -16..16 {
-                if facing_for_delta(
-                    route_target(identity, segment + 1).x - route_target(identity, segment).x,
-                )
-                .is_some()
-                {
-                    continue;
-                }
-
-                let expected = ((segment + 1)..=(segment + LOCOMOTION_BLOCK_SEGMENTS as i64))
-                    .find_map(|successor| {
-                        facing_for_delta(
-                            route_target(identity, successor + 1).x
-                                - route_target(identity, successor).x,
-                        )
-                    });
-                let Some(expected) = expected else {
-                    continue;
-                };
-
-                covered_deadzone = true;
+                let horizontal_step =
+                    route_target(identity, segment + 1).x - route_target(identity, segment).x;
+                let expected = facing_for_delta(horizontal_step).expect("substantial route leg");
                 assert_eq!(
                     sample_companion_locomotion(
                         identity,
@@ -836,12 +870,10 @@ mod tests {
                     )
                     .facing,
                     expected,
-                    "seed {seed}, segment {segment} must look forward from its deadzone"
+                    "seed {seed}, segment {segment} must face its route direction"
                 );
             }
         }
-
-        assert!(covered_deadzone, "the fixtures must exercise a deadzone");
     }
 
     #[test]
@@ -879,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn every_phase_aligned_two_minute_window_has_at_most_eight_reversals_per_axis() {
+    fn every_phase_aligned_two_minute_window_has_at_most_fifteen_reversals_per_axis() {
         for seed in 0..16 {
             let identity = stable_companion_identity(&format!("two-minute-window-{seed}"));
             for minute in [-9, -1, 0, 7, 15] {
@@ -891,11 +923,11 @@ mod tests {
                     let x_reversals = axis_reversal_count(&samples, |point| point.x);
                     let y_reversals = axis_reversal_count(&samples, |point| point.y);
                     assert!(
-                        x_reversals <= 8,
+                        x_reversals <= 15,
                         "seed {seed} at minute {minute}, phase {phase} had {x_reversals} X reversals"
                     );
                     assert!(
-                        y_reversals <= 8,
+                        y_reversals <= 15,
                         "seed {seed} at minute {minute}, phase {phase} had {y_reversals} Y reversals"
                     );
                 }
