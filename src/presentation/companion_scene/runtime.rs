@@ -3129,6 +3129,7 @@ mod tests {
                 },
                 pet_depth_override: None,
                 reduce_motion: false,
+                pet_rim_enabled: true,
             },
         };
         set_pet_depth(&mut snapshot, 0.5);
@@ -4578,7 +4579,7 @@ mod tests {
             .project_presentation_frame(
                 runtime.applied_revisions().semantic,
                 clock,
-                super::super::input::CompanionPresentationOptions { reduce_motion: true },
+                super::super::input::CompanionPresentationOptions::with_reduce_motion(true),
             )
             .unwrap();
         assert_eq!(

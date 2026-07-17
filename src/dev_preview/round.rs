@@ -1,3 +1,4 @@
+use crate::dev_preview::contract::PreviewSmoothPlanArtifact;
 use crate::dev_preview::export::{
     PreviewRoundAperture, PreviewRoundMetadata, PreviewRoundPrivacy, PreviewScenarioKind,
 };
@@ -7,6 +8,11 @@ use crate::dev_preview::scenarios::{
 };
 use crate::round::layout::{RoundAperture, RoundRenderCapabilities, SAFE_INNER_RADIUS_RATIO};
 use crate::round::preview::render_round_preview_frame_from_vm;
+use crate::round::scene::CompanionMotion;
+use crate::round::smooth::{
+    try_build_round_smooth_scene_plan_with_options, SmoothSceneBuildOptions,
+};
+use crate::tui::day::WakeResume;
 use crate::tui::identity::SourceDiversity;
 use crate::tui::view_model::{EarnedHabitatPropView, SourceStatus, WatchViewModel};
 use serde_json::{json, Value};
@@ -250,7 +256,188 @@ pub fn round_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
         RoundRenderCapabilities::preview_truecolor(),
     ));
 
+    frames.extend(spatial_cue_frames(ctx));
+
     frames
+}
+
+fn spatial_cue_frames(ctx: &PreviewRenderContext) -> Vec<PreviewFrame> {
+    let mut frames = Vec::new();
+    for (id, title, mood) in [
+        (
+            "round-spatial-rim-content-idle",
+            "Round Spatial Rim Content Idle",
+            crate::game::metabolism::Mood::Content,
+        ),
+        (
+            "round-spatial-rim-sad-idle",
+            "Round Spatial Rim Sad Idle",
+            crate::game::metabolism::Mood::Sad,
+        ),
+        (
+            "round-spatial-rim-sleepy-idle",
+            "Round Spatial Rim Sleepy Idle",
+            crate::game::metabolism::Mood::Sleepy,
+        ),
+    ] {
+        let mut vm = WatchViewModel::fixture_with_habitat_props();
+        vm.pet_render.mood = mood;
+        frames.push(render_round_preview_frame(
+            id,
+            title,
+            &vm,
+            ctx.fixed_now,
+            52,
+            52,
+            RoundRenderCapabilities::preview_truecolor(),
+        ));
+    }
+
+    let mut active = WatchViewModel::fixture_with_habitat_props();
+    active.last_feed_pulse_at = Some(ctx.fixed_now - Duration::milliseconds(400));
+    frames.push(render_round_preview_frame(
+        "round-spatial-rim-active",
+        "Round Spatial Rim Active",
+        &active,
+        ctx.fixed_now,
+        52,
+        52,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let disabled = WatchViewModel::fixture_with_habitat_props();
+    frames.push(render_round_preview_frame(
+        "round-spatial-rim-disabled",
+        "Round Spatial Rim Disabled",
+        &disabled,
+        ctx.fixed_now,
+        52,
+        52,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    for (id, title) in [
+        (
+            "round-spatial-stats-behind",
+            "Round Spatial Statistics Behind",
+        ),
+        (
+            "round-spatial-stats-interacting",
+            "Round Spatial Statistics Interacting",
+        ),
+        (
+            "round-spatial-stats-front",
+            "Round Spatial Statistics Front",
+        ),
+    ] {
+        let vm = WatchViewModel::fixture_with_habitat_props();
+        let depth = spatial_cue_statistics_depth(id)
+            .expect("statistics fixture must carry an explicit review depth");
+        frames.push(render_statistics_depth_review_frame(
+            id,
+            title,
+            &vm,
+            ctx.fixed_now,
+            depth,
+        ));
+    }
+
+    let settle = Duration::seconds(crate::pet::animator::WANDER_SETTLE_SECS);
+    let mut asleep = WatchViewModel::fixture_with_habitat_props();
+    asleep.day_context.asleep = true;
+    asleep.life_profile.calm_mode = true;
+    asleep.day_context.sleep_onset_utc = Some(ctx.fixed_now - settle);
+    asleep.pet_render.mood = crate::game::metabolism::Mood::Sleepy;
+    frames.push(render_round_preview_frame(
+        "round-spatial-sleep-settled",
+        "Round Spatial Sleep Settled",
+        &asleep,
+        ctx.fixed_now,
+        52,
+        52,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    let mut waking = WatchViewModel::fixture_with_habitat_props();
+    waking.day_context.wake_resume = Some(WakeResume {
+        from_eval_utc: ctx.fixed_now - settle * 2,
+        woke_at_utc: ctx.fixed_now - settle,
+    });
+    frames.push(render_round_preview_frame(
+        "round-spatial-wake-resume",
+        "Round Spatial Wake Resume",
+        &waking,
+        ctx.fixed_now,
+        52,
+        52,
+        RoundRenderCapabilities::preview_truecolor(),
+    ));
+
+    // Spatial review only needs the companion HUD's fixed geometry. Replace
+    // fixture-derived metrics with static redacted values before export.
+    for frame in &mut frames {
+        let aperture = RoundAperture::new(frame.width, frame.height);
+        frame.contract.hud = Some(
+            crate::dev_preview::contract::PreviewHudArtifact::redacted_spatial_cue(
+                &frame.id, aperture,
+            ),
+        );
+    }
+
+    frames
+}
+
+/// Native statistics projection pixels are only visible in the retained
+/// renderer. Preview Lab routes these review-only fixtures through its
+/// established smooth-plan seam, then applies that plan to local cells as
+/// typed depth evidence. The cells do not render the native HUD projection.
+fn render_statistics_depth_review_frame(
+    id: &str,
+    title: &str,
+    vm: &WatchViewModel,
+    now: time::OffsetDateTime,
+    depth: f32,
+) -> PreviewFrame {
+    let review_motion = CompanionMotion::default();
+    let plan = try_build_round_smooth_scene_plan_with_options(
+        vm,
+        now,
+        52,
+        52,
+        &review_motion,
+        0,
+        SmoothSceneBuildOptions {
+            depth_override: Some(depth),
+            // The square Preview Lab capture has square logical cells; its
+            // physical aperture must not inherit the grid-only 2:1 fallback.
+            viewport_points: Some([52.0, 52.0]),
+        },
+    )
+    .expect("statistics depth preview should build");
+    let transformed_cells = crate::presentation::smooth::LayeredPetScene {
+        layers: plan.layers.clone(),
+        prop_shadow_sources: Vec::new(),
+    }
+    .flatten_classic_cells();
+    let mut frame = render_round_preview_frame(
+        id,
+        title,
+        vm,
+        now,
+        52,
+        52,
+        RoundRenderCapabilities::preview_truecolor(),
+    );
+    frame.cells = crate::dev_preview::smooth::scene_draw_list_to_preview_frame(
+        id,
+        title,
+        52,
+        52,
+        &transformed_cells,
+    )
+    .cells;
+    frame.contract.smooth_plan = Some(PreviewSmoothPlanArtifact::from_scene_plan(id, vm, &plan));
+    frame
 }
 
 fn retained_composition_full_cast_fixture(local_date: time::Date) -> WatchViewModel {
@@ -280,17 +467,21 @@ pub fn round_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBundle> {
 fn round_bundle(frame: PreviewFrame, ctx: &PreviewRenderContext) -> PreviewScenarioBundle {
     let round = round_metadata(&frame);
     let inputs = round_inputs_for_frame(&frame, ctx);
+    let mut review_prompts = vec![
+        "Confirm the circular aperture masks the frame corners.".to_string(),
+        "Check that dashboard labels and source diagnostics are not visible.".to_string(),
+        "Verify privacy metadata records all visibility flags as false.".to_string(),
+    ];
+    if is_spatial_cue_frame(&frame.id) {
+        review_prompts.extend(spatial_cue_review_prompts(&frame.id));
+    }
     PreviewScenarioBundle::from_parts(
         frame,
         PreviewScenarioKind::Round,
         "Review round macOS companion preview with aperture masking and privacy metadata.",
         inputs,
         Some(round),
-        vec![
-            "Confirm the circular aperture masks the frame corners.".to_string(),
-            "Check that dashboard labels and source diagnostics are not visible.".to_string(),
-            "Verify privacy metadata records all visibility flags as false.".to_string(),
-        ],
+        review_prompts,
     )
 }
 
@@ -396,7 +587,165 @@ fn round_inputs_for_frame(
             ),
         ]);
     }
+    if let Some(cues) = spatial_cue_inputs(&frame.id) {
+        inputs.insert("spatial_cues".to_string(), cues);
+    }
     inputs
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreviewRimPresentation {
+    Production,
+    DisabledForReview,
+}
+
+impl PreviewRimPresentation {
+    fn presentation_options(
+        self,
+    ) -> crate::presentation::companion_scene::input::CompanionPresentationOptions {
+        let standard =
+            crate::presentation::companion_scene::input::CompanionPresentationOptions::STANDARD;
+        match self {
+            Self::Production => standard,
+            Self::DisabledForReview => standard.without_pet_rim_for_preview(),
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::DisabledForReview => "disabled-for-preview-review",
+        }
+    }
+}
+
+fn is_spatial_cue_frame(id: &str) -> bool {
+    id.starts_with("round-spatial-")
+}
+
+fn spatial_cue_statistics_depth(id: &str) -> Option<f32> {
+    match id {
+        "round-spatial-stats-behind" => Some(-0.5),
+        "round-spatial-stats-interacting" => Some(0.68),
+        "round-spatial-stats-front" => Some(0.9),
+        _ => None,
+    }
+}
+
+fn spatial_cue_inputs(id: &str) -> Option<Value> {
+    let (activity, rim_presentation, statistics_depth, locomotion_lifecycle) = match id {
+        "round-spatial-rim-content-idle" => {
+            (0.0, PreviewRimPresentation::Production, -0.5, "awake")
+        }
+        "round-spatial-rim-sad-idle" => (0.0, PreviewRimPresentation::Production, -0.5, "awake"),
+        "round-spatial-rim-sleepy-idle" => (0.0, PreviewRimPresentation::Production, -0.5, "awake"),
+        "round-spatial-rim-active" => (1.0, PreviewRimPresentation::Production, -0.5, "awake"),
+        "round-spatial-rim-disabled" => (
+            0.0,
+            PreviewRimPresentation::DisabledForReview,
+            -0.5,
+            "awake",
+        ),
+        "round-spatial-stats-behind"
+        | "round-spatial-stats-interacting"
+        | "round-spatial-stats-front" => (
+            0.0,
+            PreviewRimPresentation::Production,
+            spatial_cue_statistics_depth(id)
+                .expect("statistics cue inputs must use the rendered review depth"),
+            "awake",
+        ),
+        "round-spatial-sleep-settled" => (
+            0.0,
+            PreviewRimPresentation::Production,
+            0.0,
+            "sleep-settled",
+        ),
+        "round-spatial-wake-resume" => {
+            (0.0, PreviewRimPresentation::Production, 0.0, "wake-resume")
+        }
+        _ => return None,
+    };
+    let presentation_options = rim_presentation.presentation_options();
+    let production_rim = crate::presentation::companion_effects::pet_rim_style_with_presentation(
+        activity,
+        false,
+        presentation_options.pet_rim_enabled,
+    );
+    let rim_enabled = production_rim.enabled;
+    let rim_intensity = if !rim_enabled {
+        "none"
+    } else if activity > 0.0 {
+        "active"
+    } else {
+        "idle"
+    };
+    let composition = crate::round::depth::CompanionDepthComposition::resolve(statistics_depth)
+        .expect("spatial cue fixture depth should be valid");
+    let statistics_relation = if composition.statistics_interaction.reveal_mix > 0.0
+        && matches!(
+            composition.pet_statistics_order,
+            crate::round::depth::PetStatisticsOrder::BehindStatistics
+        ) {
+        "interacting"
+    } else if matches!(
+        composition.pet_statistics_order,
+        crate::round::depth::PetStatisticsOrder::InFrontOfStatistics
+    ) {
+        "front"
+    } else {
+        "behind"
+    };
+    let cell_grid_evidence = if spatial_cue_statistics_depth(id).is_some() {
+        "typed-smooth-plan-with-transformed-cells"
+    } else {
+        "round-cell-grid"
+    };
+
+    Some(json!({
+        "aura": "absent",
+        "evidence": {
+            "cell_grid": cell_grid_evidence,
+            "hud_projection": "typed-contract-redacted-hud-sidecar-no-native-pixels",
+            "pet_rim": "typed-contract-presentation-option-no-native-pixels",
+            "native_visual_verification": "native-retained-appkit-tests-or-local-companion-qa",
+        },
+        "locomotion_lifecycle": locomotion_lifecycle,
+        "prop_shadow_order": "front-of-statistics",
+        "rim_enabled": rim_enabled,
+        "rim_extent": "body-local",
+        "rim_intensity": rim_intensity,
+        "rim_presentation": rim_presentation.label(),
+        "rim_style": {
+            "enabled": production_rim.enabled,
+            "renderer_input": "presentation-options",
+        },
+        "statistics_projection": "rear-receiving-surface",
+        "statistics_relation": statistics_relation,
+    }))
+}
+
+fn spatial_cue_review_prompts(id: &str) -> Vec<String> {
+    match id {
+        "round-spatial-stats-behind"
+        | "round-spatial-stats-interacting"
+        | "round-spatial-stats-front" => vec![
+            "Use the typed Smooth plan and redacted HUD sidecar as statistics-projection contract evidence; Preview Lab cells do not render native HUD projection pixels.".to_string(),
+            "Use native retained/AppKit test evidence or final local companion visual QA to judge the native statistics-projection cue.".to_string(),
+        ],
+        "round-spatial-rim-content-idle"
+        | "round-spatial-rim-sad-idle"
+        | "round-spatial-rim-sleepy-idle"
+        | "round-spatial-rim-active"
+        | "round-spatial-rim-disabled" => vec![
+            "Preview Lab records the rim as a typed presentation-option contract; its cell grid does not render native rim pixels.".to_string(),
+            "The rim-disabled fixture proves only the private preview presentation option. Use native retained/AppKit test evidence or final local companion visual QA to judge rim extent, intensity, and the absence of a broad aura.".to_string(),
+        ],
+        "round-spatial-sleep-settled" | "round-spatial-wake-resume" => vec![
+            "Inspect the actual cell capture for a settled sleep pose or a resumed wake pose; use the purposeful locomotion strip for visual continuity.".to_string(),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 fn round_metadata(frame: &PreviewFrame) -> PreviewRoundMetadata {

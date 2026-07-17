@@ -2382,7 +2382,12 @@ impl SpatialCueGpuValue {
             rim_idle_alpha: crate::presentation::companion_effects::PET_RIM_IDLE_ALPHA,
             rim_activity_alpha_bonus:
                 crate::presentation::companion_effects::PET_RIM_ACTIVITY_ALPHA_BONUS,
-            rim_enabled: u32::from(crate::presentation::companion_effects::PET_RIM_ENABLED),
+            rim_enabled: u32::from(
+                crate::presentation::companion_effects::PET_RIM_ENABLED
+                    && frame.presentation_flags
+                        & FrameGlobalsGpuValue::PET_RIM_DISABLED_FOR_PREVIEW_PRESENTATION_FLAG
+                        == 0,
+            ),
         };
         [
             value.statistics_offset_points[0],
@@ -11309,6 +11314,44 @@ mod tests {
                 PrivateSpatialCuePass::World,
                 PrivateSpatialCuePass::PetRim,
             ]
+        );
+    }
+
+    #[test]
+    fn preview_rim_disable_presentation_flag_reaches_retained_spatial_cue() {
+        let mut content = super::super::compiler::ContentGlobalsGpuValue::zeroed();
+        content.glyph_cell_extent_points = [8.0, 16.0];
+        let mut standard_frame = FrameGlobalsGpuValue::zeroed();
+        standard_frame.viewport_points = [360.0, 360.0];
+        let mut disabled_frame = standard_frame;
+        disabled_frame.presentation_flags =
+            FrameGlobalsGpuValue::PET_RIM_DISABLED_FOR_PREVIEW_PRESENTATION_FLAG;
+        let key = SceneTargetKey::new(
+            crate::presentation::companion_scene::DeviceEpoch(4),
+            crate::presentation::companion_scene::SurfaceEpoch(9),
+            wgpu::Extent3d {
+                width: 720,
+                height: 720,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            SceneTextureContract::INTERMEDIATE,
+            SceneTextureContract::DEPTH,
+            SceneTextureContract::SAMPLE_COUNT,
+        )
+        .expect("valid retained target key");
+
+        assert_eq!(
+            SpatialCueGpuValue::from_private_mirrors(content, standard_frame, key)
+                .expect("standard spatial cue")
+                .rim_enabled,
+            1
+        );
+        assert_eq!(
+            SpatialCueGpuValue::from_private_mirrors(content, disabled_frame, key)
+                .expect("preview-disabled spatial cue")
+                .rim_enabled,
+            0
         );
     }
 

@@ -2904,7 +2904,11 @@ mod tests {
             candidate.cpu.frame_upload_sources().globals,
         );
         assert_eq!(globals.activity_opacity, 0.73);
-        assert_eq!(globals.reduce_motion, 1);
+        assert_eq!(
+            globals.presentation_flags
+                & super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG,
+            super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG
+        );
         assert!(generations.begin_activation().is_ok());
     }
 
@@ -2947,7 +2951,11 @@ mod tests {
             candidate.cpu.frame_upload_sources().globals,
         );
         assert_eq!(globals.activity_opacity, 0.41);
-        assert_eq!(globals.reduce_motion, 1);
+        assert_eq!(
+            globals.presentation_flags
+                & super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG,
+            super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG
+        );
     }
 
     #[test]
@@ -3080,9 +3088,17 @@ mod tests {
         );
         let gpu_globals = active.gpu.committed_frame_globals_for_test();
         assert_eq!(cpu_globals.activity_opacity, 0.73);
-        assert_eq!(cpu_globals.reduce_motion, 1);
+        assert_eq!(
+            cpu_globals.presentation_flags
+                & super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG,
+            super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG
+        );
         assert_eq!(gpu_globals.activity_opacity, 0.73);
-        assert_eq!(gpu_globals.reduce_motion, 1);
+        assert_eq!(
+            gpu_globals.presentation_flags
+                & super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG,
+            super::compiler::FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG
+        );
         assert_eq!(active.version, activity_version);
         assert_eq!(
             active.cpu.scene_artifacts().unwrap(),
@@ -3202,7 +3218,7 @@ mod tests {
             .project_presentation_frame(
                 semantic,
                 reveal_clock,
-                CompanionPresentationOptions { reduce_motion: true },
+                CompanionPresentationOptions::with_reduce_motion(true),
             )
             .unwrap();
         let mut hidden_latest = (*initial).clone();

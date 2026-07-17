@@ -564,6 +564,10 @@ pub struct FrameSnapshot {
     /// serialization, checksums, and Debug output.
     #[serde(skip)]
     pub(crate) reduce_motion: bool,
+    /// Renderer-only presentation state. Preview Lab may suppress the rim for
+    /// a review fixture, but normal production presentation always enables it.
+    #[serde(skip)]
+    pub(crate) pet_rim_enabled: bool,
 }
 
 impl std::fmt::Debug for FrameSnapshot {

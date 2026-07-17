@@ -177,10 +177,12 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
         PreviewSelection::Animation => {
             strips.push(crate::dev_preview::strips::scene_strip_smoke());
             strips.extend(crate::dev_preview::strips::scene_strips(&ctx));
+            strips.extend(crate::dev_preview::smooth::smooth_strips(&ctx));
         }
         PreviewSelection::Round => {
             bundles.extend(crate::dev_preview::round::round_bundles(&ctx));
             bundles.extend(crate::dev_preview::smooth::smooth_depth_bundles(&ctx));
+            strips.extend(crate::dev_preview::smooth::smooth_strips(&ctx));
         }
         PreviewSelection::Smooth => {
             bundles.extend(crate::dev_preview::smooth::smooth_bundles(&ctx));
@@ -271,13 +273,12 @@ pub fn generate_preview_bundle(out: &Path, selection: PreviewSelection) -> Resul
                     .expect("pixel frame should declare a pixel artifact path");
                 write_pixel_json(&staging_dir.join(path), pixel)?;
             }
-            if let Some(smooth_motion) = &frame.contract.smooth_motion {
-                let path = manifest_frame
-                    .files
-                    .smooth_motion
-                    .as_ref()
-                    .expect("smooth strip frames should declare a smooth motion artifact path");
-                write_json_artifact(&staging_dir.join(path), smooth_motion)?;
+            if let Some(locomotion) = &frame.contract.locomotion {
+                let path =
+                    manifest_frame.files.locomotion.as_ref().expect(
+                        "locomotion strip frames should declare a locomotion artifact path",
+                    );
+                write_json_artifact(&staging_dir.join(path), locomotion)?;
             }
         }
     }
@@ -990,12 +991,12 @@ fn artifacts_for_strips(
                 width: Some(frame.width),
                 height: Some(frame.height),
             });
-            if let Some(smooth_motion_path) = &manifest_frame.files.smooth_motion {
+            if let Some(locomotion_path) = &manifest_frame.files.locomotion {
                 artifacts.push(PreviewArtifact {
-                    id: format!("{}-frame-{index:03}-smooth-motion", strip.manifest.id),
-                    title: format!("{} Frame {index:03} Smooth Motion", strip.manifest.title),
-                    artifact_type: ArtifactType::SmoothMotion,
-                    path: smooth_motion_path.clone(),
+                    id: format!("{}-frame-{index:03}-locomotion", strip.manifest.id),
+                    title: format!("{} Frame {index:03} Locomotion", strip.manifest.title),
+                    artifact_type: ArtifactType::Locomotion,
+                    path: locomotion_path.clone(),
                     width: None,
                     height: None,
                 });
@@ -2209,6 +2210,16 @@ mod tests {
                 "round-glitch-dialect",
                 "round-crystal-dialect",
                 "round-glitch-patched-s6",
+                "round-spatial-rim-content-idle",
+                "round-spatial-rim-sad-idle",
+                "round-spatial-rim-sleepy-idle",
+                "round-spatial-rim-active",
+                "round-spatial-rim-disabled",
+                "round-spatial-stats-behind",
+                "round-spatial-stats-interacting",
+                "round-spatial-stats-front",
+                "round-spatial-sleep-settled",
+                "round-spatial-wake-resume",
                 "round-smooth-classic-baseline",
                 "round-smooth-classic-parity",
                 "round-smooth-depth-far",

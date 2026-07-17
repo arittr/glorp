@@ -2045,6 +2045,7 @@ mod tests {
                 },
                 pet_depth_override: None,
                 reduce_motion: false,
+                pet_rim_enabled: true,
             },
         }
     }

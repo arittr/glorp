@@ -2474,9 +2474,9 @@ fn prepare_scene_runtime_tick() -> std::result::Result<
             let mut snapshot = crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input_and_options(
                     &state.vm,
                     input,
-                    crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                    crate::presentation::companion_scene::input::CompanionPresentationOptions::with_reduce_motion(
                         reduce_motion,
-                    },
+                    ),
                 )
                 .map_err(|_| {
                     crate::companion::retained::RetainedFailureCategory::SceneCandidateEncode
@@ -2500,9 +2500,9 @@ fn prepare_scene_runtime_tick() -> std::result::Result<
             let projection = host
                 .project_scene_frame(
                     input.clock,
-                    crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                    crate::presentation::companion_scene::input::CompanionPresentationOptions::with_reduce_motion(
                         reduce_motion,
-                    },
+                    ),
                 )?;
             PreparedSceneProjection::Frame(Box::new(projection))
         };
@@ -3427,9 +3427,9 @@ fn run_direct_lifetime_audit_if_requested(
             crate::presentation::companion_scene::CompanionSceneSnapshot::project_with_input_and_options(
                 &vm,
                 input,
-                crate::presentation::companion_scene::input::CompanionPresentationOptions {
+                crate::presentation::companion_scene::input::CompanionPresentationOptions::with_reduce_motion(
                     reduce_motion,
-                },
+                ),
             )
             .map_err(|_| {
                 crate::companion::retained::RetainedFailureCategory::LifetimeFramePreparation
@@ -6404,7 +6404,7 @@ mod tests {
                     metrics.grid_rows,
                     crate::round::scene::current_round_motion_clearance(metrics.grid_rows),
                 ),
-                CompanionPresentationOptions { reduce_motion: true },
+                CompanionPresentationOptions::with_reduce_motion(true),
             )
             .expect("project direct retained scene at production geometry");
             (metrics, snapshot)

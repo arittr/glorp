@@ -115,6 +115,23 @@ pub(crate) fn pet_rim_style(activity_opacity: f32, reduce_motion: bool) -> PetRi
     }
 }
 
+/// Preview Lab's presentation-options path uses the same rim-style resolver as
+/// the retained renderer. The caller supplies only a fixture-local option;
+/// this never changes the production `PET_RIM_ENABLED` contract.
+#[cfg(feature = "dev-preview")]
+pub(crate) fn pet_rim_style_with_presentation(
+    activity_opacity: f32,
+    reduce_motion: bool,
+    pet_rim_enabled: bool,
+) -> PetRimStyle {
+    let mut style = pet_rim_style(activity_opacity, reduce_motion);
+    if !pet_rim_enabled {
+        style.enabled = false;
+        style.alpha = 0.0;
+    }
+    style
+}
+
 /// Returns an alpha-only rim mask, with source coverage subtracted so callers
 /// can paint the pet above it without leaving an interior glow.
 #[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.

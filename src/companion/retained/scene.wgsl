@@ -77,7 +77,7 @@ struct FrameGlobalsGpuValue {
     dim_amount: f32,
     light_count: u32,
     activity_opacity: f32,
-    reduce_motion: u32,
+    presentation_flags: u32,
 }
 
 struct SpatialCueGpuValue {
@@ -1739,7 +1739,7 @@ fn pet_rim_rgba(input: FinalVertexOutput, reveal_mask: f32) -> vec4<f32> {
     let activity = select(
         frame_buffer.globals.activity_opacity,
         0.0,
-        frame_buffer.globals.reduce_motion != 0u,
+        (frame_buffer.globals.presentation_flags & 1u) != 0u,
     );
     let alpha = exterior * clamp(reveal_mask, 0.0, 1.0) * clamp(
         spatial_cue.rim_idle_alpha + clamp(activity, 0.0, 1.0) * spatial_cue.rim_activity_alpha_bonus,

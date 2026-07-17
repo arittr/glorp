@@ -28,10 +28,25 @@ use time::{Duration, OffsetDateTime};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompanionPresentationOptions {
     pub(crate) reduce_motion: bool,
+    pub(crate) pet_rim_enabled: bool,
 }
 
 impl CompanionPresentationOptions {
-    pub(crate) const STANDARD: Self = Self { reduce_motion: false };
+    pub(crate) const STANDARD: Self = Self {
+        reduce_motion: false,
+        pet_rim_enabled: true,
+    };
+
+    pub(crate) const fn with_reduce_motion(reduce_motion: bool) -> Self {
+        Self { reduce_motion, ..Self::STANDARD }
+    }
+
+    /// Preview Lab's fixture-only switch. It is unavailable from production
+    /// builds, and every standard presentation path keeps the rim enabled.
+    #[cfg(feature = "dev-preview")]
+    pub(crate) const fn without_pet_rim_for_preview(self) -> Self {
+        Self { pet_rim_enabled: false, ..self }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,6 +370,7 @@ impl CompanionSceneSnapshot {
                 pet_motion_input: motion_input,
                 pet_depth_override: input.depth_override,
                 reduce_motion: options.reduce_motion,
+                pet_rim_enabled: options.pet_rim_enabled,
             },
         })
     }
@@ -419,6 +435,7 @@ impl CompanionSceneSnapshot {
         let mut frame = self.frame.clone();
         frame.elapsed_ms = clock.elapsed_ms;
         frame.reduce_motion = options.reduce_motion;
+        frame.pet_rim_enabled = options.pet_rim_enabled;
         frame.pet_anchor_points = depth_placement.anchor_top_left_points;
         frame.pet_depth = motion.normalized_depth;
         frame.pet_depth_cue = DepthCue {
@@ -1574,7 +1591,7 @@ mod tests {
             18,
             crate::round::scene::current_round_motion_clearance(18),
         );
-        let options = super::CompanionPresentationOptions { reduce_motion: true };
+        let options = super::CompanionPresentationOptions::with_reduce_motion(true);
         let initial = CompanionSceneSnapshot::project_with_input_and_options(&vm, input, options)
             .expect("initial reduced-motion semantic projection");
         let replay = initial
@@ -1615,6 +1632,38 @@ mod tests {
         let toggled = super::super::scene::build_scene_generation(&private_toggle, key)
             .expect("build private toggle scene");
         assert_eq!(projected.frame_checksum(), toggled.frame_checksum());
+    }
+
+    #[cfg(feature = "dev-preview")]
+    #[test]
+    fn preview_rim_disable_option_stays_private_and_reaches_frame_snapshot() {
+        let vm = fixture_with_real_pet_art();
+        let input = CompanionSceneProjectionInput::round(
+            CompanionProjectionClock::new(datetime!(2026-07-11 12:00 UTC), 0),
+            CompanionLogicalLayout::round(360.0, 360.0),
+            44,
+            18,
+            crate::round::scene::current_round_motion_clearance(18),
+        );
+        let standard = CompanionSceneSnapshot::project_with_input_and_options(
+            &vm,
+            input,
+            super::CompanionPresentationOptions::STANDARD,
+        )
+        .expect("standard presentation projection");
+        let disabled = CompanionSceneSnapshot::project_with_input_and_options(
+            &vm,
+            input,
+            super::CompanionPresentationOptions::STANDARD.without_pet_rim_for_preview(),
+        )
+        .expect("preview rim-disabled presentation projection");
+
+        assert!(standard.frame.pet_rim_enabled);
+        assert!(!disabled.frame.pet_rim_enabled);
+        let json = serde_json::to_string(&disabled).expect("serialize preview scene");
+        let debug = format!("{disabled:?}");
+        assert!(!json.contains("pet_rim_enabled"));
+        assert!(!debug.contains("pet_rim_enabled"));
     }
 
     #[test]
@@ -1676,7 +1725,7 @@ mod tests {
                 super::CompanionPresentationOptions::STANDARD,
             )
             .expect("active standard-motion frame");
-        let reduced_options = super::CompanionPresentationOptions { reduce_motion: true };
+        let reduced_options = super::CompanionPresentationOptions::with_reduce_motion(true);
         let reduced = initial
             .project_presentation_frame(SemanticRevision(1), input_at(1_778).clock, reduced_options)
             .expect("active reduced-motion frame");
@@ -2741,7 +2790,7 @@ mod tests {
                     clock: CompanionProjectionClock::new(time::OffsetDateTime::UNIX_EPOCH, 0),
                     species: Species::Fuzz,
                     asleep: false,
-                    options: super::CompanionPresentationOptions { reduce_motion },
+                    options: super::CompanionPresentationOptions::with_reduce_motion(reduce_motion),
                     semantic_revision: SemanticRevision(1),
                     previous: None,
                     composition: &composition,
@@ -3072,7 +3121,7 @@ mod tests {
         let reduced = CompanionSceneSnapshot::project_with_input_and_options(
             &vm,
             input,
-            super::CompanionPresentationOptions { reduce_motion: true },
+            super::CompanionPresentationOptions::with_reduce_motion(true),
         )
         .unwrap();
         let static_slot = standard
@@ -3301,7 +3350,7 @@ mod tests {
                     clock: CompanionProjectionClock::new(at_motion, clock.elapsed_ms + 2_000),
                     species: Species::Fuzz,
                     asleep: false,
-                    options: super::CompanionPresentationOptions { reduce_motion: true },
+                    options: super::CompanionPresentationOptions::with_reduce_motion(true),
                     semantic_revision: SemanticRevision(8),
                     previous: Some(&frames_1x),
                     composition: &composition,

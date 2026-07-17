@@ -6,6 +6,7 @@ use crate::presentation::smooth::{
     SmoothCompanionPrivacyClaims, SmoothCompanionScenePlan, SmoothLayerRole,
     SmoothParallaxPlaneTranslations, SmoothPoint, SmoothTransform,
 };
+use crate::round::locomotion::{CompanionLocomotionSample, LocomotionPhase};
 use crate::round::model::RoundSceneModel;
 use crate::tui::component::PreviewLayout;
 use crate::tui::room::{biome_symbols, derive_room_life_profile, RoomSpeciesDialect};
@@ -27,7 +28,7 @@ pub struct PreviewFrameContract {
     pub pixel_fit: Option<crate::dev_preview::export::PreviewPixelFitArtifact>,
     pub smooth_plan: Option<PreviewSmoothPlanArtifact>,
     pub smooth_parity: Option<PreviewSmoothParityArtifact>,
-    pub smooth_motion: Option<PreviewSmoothMotionArtifact>,
+    pub locomotion: Option<PreviewLocomotionArtifact>,
     pub scene: Option<PreviewSceneArtifact>,
     pub hud: Option<PreviewHudArtifact>,
     pub tank_life: Option<PreviewTankLifeArtifact>,
@@ -237,24 +238,19 @@ pub struct PreviewSmoothParityArtifact {
     pub privacy: PreviewSmoothPrivacyArtifact,
 }
 
+/// Public review facts for a purposeful locomotion sample. The physical route
+/// remains renderer-private; this surface intentionally exposes only rounded
+/// progress and normalized location buckets.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct PreviewSmoothMotionArtifact {
+pub struct PreviewLocomotionArtifact {
     pub schema_version: u32,
     pub strip_id: String,
-    pub frame_index: u16,
-    pub elapsed_ms: u64,
-    pub now_unix_ms: i128,
-    pub semantic_art_tick_index: u64,
-    pub pet_visual_checksum: u64,
-    pub pet_motion: PreviewSmoothPetMotionArtifact,
-    pub parallax_focus_offset: PreviewSmoothPointArtifact,
-    pub parallax_lifecycle_scale: f32,
-    pub parallax_planes: PreviewSmoothParallaxPlanesArtifact,
-    pub max_adjacent_parallax_delta_by_plane: PreviewSmoothParallaxPlanesArtifact,
-    pub layer_transforms: Vec<PreviewSmoothMotionLayerArtifact>,
-    pub chrome: PreviewSmoothChromeArtifact,
-    pub abstract_state: BTreeMap<String, String>,
-    pub privacy: PreviewSmoothPrivacyArtifact,
+    pub segment_index: i64,
+    pub phase: String,
+    pub segment_phase: f32,
+    pub planar_bucket: String,
+    pub depth_bucket: String,
+    pub facing: i8,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -277,39 +273,12 @@ pub struct PreviewSmoothLayerArtifact {
     pub item_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct PreviewSmoothMotionLayerArtifact {
-    pub role: String,
-    pub motion_binding: String,
-    pub depth_plane: Option<String>,
-    pub z: i16,
-    pub local_bounds: PreviewSmoothBoundsArtifact,
-    pub translation: PreviewSmoothPointArtifact,
-    pub scale: PreviewSmoothPointArtifact,
-    pub rotation_degrees: f32,
-    pub opacity: f32,
-    pub parallax_translation: PreviewSmoothPointArtifact,
-    pub item_count: usize,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct PreviewSmoothParallaxPlanesArtifact {
     pub far: PreviewSmoothPointArtifact,
     pub mid: PreviewSmoothPointArtifact,
     pub behind: PreviewSmoothPointArtifact,
     pub foreground: PreviewSmoothPointArtifact,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct PreviewSmoothPetMotionArtifact {
-    pub base_anchor: PreviewSmoothPointArtifact,
-    pub bob_offset: PreviewSmoothPointArtifact,
-    pub final_anchor: PreviewSmoothPointArtifact,
-    pub classic_snap_anchor: PreviewSmoothPointArtifact,
-    pub scale_x: f32,
-    pub scale_y: f32,
-    pub opacity: f32,
-    pub pulse: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -511,6 +480,58 @@ impl PreviewHudArtifact {
             },
         }
     }
+
+    /// Geometry-only HUD evidence for spatial review fixtures. The lane fill
+    /// and text values are intentionally static so these fixtures cannot
+    /// reveal a usage total, pace, or day-over-day comparison.
+    pub fn redacted_spatial_cue(
+        frame_id: &str,
+        aperture: crate::round::layout::RoundAperture,
+    ) -> Self {
+        let gap_deg = crate::round::hud::COMPANION_GAUGE_GAP_DEG;
+        let layout = crate::round::hud::perimeter_gauge_layout(
+            aperture.center_x as f64,
+            aperture.center_y as f64,
+            aperture.radius as f64,
+            gap_deg,
+        );
+        let colors = crate::round::hud::perimeter_gauge_colors();
+
+        Self {
+            schema_version: HUD_CONTRACT_SCHEMA_VERSION,
+            frame_id: frame_id.to_string(),
+            gap_deg,
+            aperture_radius: aperture.radius as f64,
+            lanes: BTreeMap::from([
+                (
+                    "xp".to_string(),
+                    PreviewHudLaneArtifact::from_lane(&layout.xp, &colors.xp, 0.5),
+                ),
+                (
+                    "daily".to_string(),
+                    PreviewHudLaneArtifact::from_lane(&layout.daily, &colors.daily, 0.5),
+                ),
+                (
+                    "pace".to_string(),
+                    PreviewHudLaneArtifact::from_lane(&layout.pace, &colors.pace, 0.5),
+                ),
+            ]),
+            text: PreviewHudTextArtifact {
+                today_total: "—".to_string(),
+                daily_percent: "—".to_string(),
+                pace: "—".to_string(),
+            },
+            privacy_projection: PreviewPrivacyProjection {
+                surface: "companion-hud-spatial-cue".to_string(),
+                source_names_visible: false,
+                exact_counts_visible: false,
+                diagnostic_text_visible: false,
+                feed_rows_visible: false,
+                file_paths_visible: false,
+                project_names_visible: false,
+            },
+        }
+    }
 }
 
 impl PreviewHudLaneArtifact {
@@ -623,66 +644,21 @@ impl PreviewSmoothParityArtifact {
     }
 }
 
-impl PreviewSmoothMotionArtifact {
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_scene_plan(
-        strip_id: &str,
-        frame_index: u16,
-        elapsed_ms: u64,
-        now: time::OffsetDateTime,
-        semantic_art_tick_index: u64,
-        vm: &WatchViewModel,
-        plan: &SmoothCompanionScenePlan,
-        max_adjacent_parallax_delta_by_plane: SmoothParallaxPlaneTranslations,
-    ) -> Self {
-        let pet_layer = plan
-            .layer_by_role(SmoothLayerRole::PetBody)
-            .expect("smooth plan should include a pet-body layer for motion proof");
-        let pulse = if vm.last_feed_pulse_at.is_some() {
-            "recent-feed"
-        } else if vm.day_context.asleep {
-            "asleep"
-        } else {
-            "steady"
-        };
-
+impl PreviewLocomotionArtifact {
+    pub(crate) fn from_sample(strip_id: &str, sample: CompanionLocomotionSample) -> Self {
         Self {
             schema_version: CONTRACT_SCHEMA_VERSION,
             strip_id: strip_id.to_string(),
-            frame_index,
-            elapsed_ms,
-            now_unix_ms: i128::from(now.unix_timestamp()) * 1_000 + i128::from(now.millisecond()),
-            semantic_art_tick_index,
-            pet_visual_checksum: crate::presentation::smooth::pet_visual_checksum(
-                &vm.pet_art,
-                &vm.pet_spans,
-            ),
-            pet_motion: PreviewSmoothPetMotionArtifact {
-                base_anchor: PreviewSmoothPointArtifact::from_point(plan.pet.base_anchor),
-                bob_offset: PreviewSmoothPointArtifact::from_point(plan.pet.bob_offset),
-                final_anchor: PreviewSmoothPointArtifact::from_point(plan.pet.final_anchor),
-                classic_snap_anchor: PreviewSmoothPointArtifact::from_point(
-                    plan.pet.classic_snap_anchor,
-                ),
-                scale_x: pet_layer.transform.scale.x,
-                scale_y: pet_layer.transform.scale.y,
-                opacity: pet_layer.opacity,
-                pulse: pulse.to_string(),
-            },
-            parallax_focus_offset: PreviewSmoothPointArtifact::from_point(
-                plan.pet.parallax_focus_offset,
-            ),
-            parallax_lifecycle_scale: plan.parallax_lifecycle_scale,
-            parallax_planes: plan.parallax_translations_by_plane().into(),
-            max_adjacent_parallax_delta_by_plane: max_adjacent_parallax_delta_by_plane.into(),
-            layer_transforms: plan
-                .layers
-                .iter()
-                .map(PreviewSmoothMotionLayerArtifact::from_layer)
-                .collect(),
-            chrome: PreviewSmoothChromeArtifact::from_chrome(&plan.chrome),
-            abstract_state: smooth_abstract_state(vm),
-            privacy: PreviewSmoothPrivacyArtifact::from_claims(&plan.privacy),
+            segment_index: sample.segment_index,
+            phase: match sample.phase {
+                LocomotionPhase::Dwell => "dwell",
+                LocomotionPhase::Glide => "glide",
+            }
+            .to_string(),
+            segment_phase: (sample.segment_phase.clamp(0.0, 1.0) * 100.0).round() / 100.0,
+            planar_bucket: planar_bucket(sample.point.x, sample.point.y).to_string(),
+            depth_bucket: depth_bucket(sample.point.z).to_string(),
+            facing: if sample.facing < 0 { -1 } else { 1 },
         }
     }
 }
@@ -724,29 +700,6 @@ impl PreviewSmoothLayerArtifact {
             anchor: PreviewSmoothPointArtifact::from_point(layer.anchor),
             transform_origin: PreviewSmoothPointArtifact::from_point(layer.transform_origin),
             transform: PreviewSmoothTransformArtifact::from_transform(layer.transform),
-            parallax_translation: PreviewSmoothPointArtifact::from_point(
-                layer.parallax_translation,
-            ),
-            item_count: smooth_item_count(layer),
-        }
-    }
-}
-
-impl PreviewSmoothMotionLayerArtifact {
-    fn from_layer(layer: &SmoothCompanionLayer) -> Self {
-        Self {
-            role: layer.role.as_str().to_string(),
-            motion_binding: layer.motion_binding.as_str().to_string(),
-            depth_plane: layer
-                .motion_binding
-                .depth_plane()
-                .map(|plane| plane.as_str().to_string()),
-            z: layer.z,
-            local_bounds: PreviewSmoothBoundsArtifact::from_bounds(layer.local_bounds),
-            translation: PreviewSmoothPointArtifact::from_point(layer.transform.translation),
-            scale: PreviewSmoothPointArtifact::from_point(layer.transform.scale),
-            rotation_degrees: layer.transform.rotation_degrees,
-            opacity: layer.opacity,
             parallax_translation: PreviewSmoothPointArtifact::from_point(
                 layer.parallax_translation,
             ),
@@ -1076,6 +1029,45 @@ fn vital_bucket(value: f64) -> &'static str {
     }
 }
 
+fn planar_bucket(x: f32, y: f32) -> &'static str {
+    let horizontal = if x < -0.33 {
+        "west"
+    } else if x > 0.33 {
+        "east"
+    } else {
+        "center"
+    };
+    let vertical = if y < -0.33 {
+        "upper"
+    } else if y > 0.33 {
+        "lower"
+    } else {
+        "middle"
+    };
+    match (vertical, horizontal) {
+        ("upper", "west") => "upper-west",
+        ("upper", "center") => "upper-center",
+        ("upper", "east") => "upper-east",
+        ("middle", "west") => "middle-west",
+        ("middle", "center") => "middle-center",
+        ("middle", "east") => "middle-east",
+        ("lower", "west") => "lower-west",
+        ("lower", "center") => "lower-center",
+        ("lower", "east") => "lower-east",
+        _ => unreachable!("locomotion planar buckets are exhaustive"),
+    }
+}
+
+fn depth_bucket(depth: f32) -> &'static str {
+    if depth <= -0.33 {
+        "far"
+    } else if depth >= 0.33 {
+        "near"
+    } else {
+        "mid"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1237,24 +1229,26 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "smooth plan should include a pet-body layer for motion proof")]
-    fn smooth_motion_artifact_requires_pet_body_layer() {
-        let now = datetime!(2026-07-08 18:00 UTC);
-        let vm = WatchViewModel::fixture_with_habitat_props();
-        let motion = CompanionMotion::default();
-        let mut plan = build_round_smooth_scene_plan(&vm, now, 52, 52, &motion, 0);
-        plan.layers
-            .retain(|layer| !matches!(layer.role, SmoothLayerRole::PetBody));
-
-        let _artifact = PreviewSmoothMotionArtifact::from_scene_plan(
-            "round-smooth-motion",
-            0,
-            0,
-            now,
-            0,
-            &vm,
-            &plan,
-            SmoothParallaxPlaneTranslations::default(),
+    fn locomotion_artifact_rounds_location_into_public_buckets() {
+        let artifact = PreviewLocomotionArtifact::from_sample(
+            "round-purposeful-locomotion",
+            CompanionLocomotionSample {
+                point: crate::round::locomotion::NormalizedLocomotionPoint {
+                    x: 0.62,
+                    y: -0.71,
+                    z: 0.51,
+                },
+                facing: -4,
+                phase: LocomotionPhase::Glide,
+                segment_index: 42,
+                segment_phase: 0.236,
+            },
         );
+
+        assert_eq!(artifact.phase, "glide");
+        assert_eq!(artifact.segment_phase, 0.24);
+        assert_eq!(artifact.planar_bucket, "upper-east");
+        assert_eq!(artifact.depth_bucket, "near");
+        assert_eq!(artifact.facing, -1);
     }
 }

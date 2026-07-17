@@ -2141,9 +2141,9 @@ impl<Semantic> DirectLifetimeAuditExecutor<'_, Semantic> {
                     now,
                     lifetime_elapsed_ms(now),
                 ),
-                crate::presentation::companion_scene::input::CompanionPresentationOptions {
-                    reduce_motion: self.reduce_motion,
-                },
+                crate::presentation::companion_scene::input::CompanionPresentationOptions::with_reduce_motion(
+                    self.reduce_motion,
+                ),
             )
             .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
         Arc::make_mut(&mut snapshot).frame = projection.frame;
@@ -2334,9 +2334,9 @@ where
                     now,
                     lifetime_elapsed_ms(now),
                 ),
-                crate::presentation::companion_scene::input::CompanionPresentationOptions {
-                    reduce_motion: self.reduce_motion,
-                },
+                crate::presentation::companion_scene::input::CompanionPresentationOptions::with_reduce_motion(
+                    self.reduce_motion,
+                ),
             )
             .map_err(|_| RetainedFailureCategory::LifetimeFramePreparation)?;
         let (effects, regenerated) = self

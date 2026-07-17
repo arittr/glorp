@@ -1,5 +1,5 @@
 use crate::dev_preview::contract::{
-    PreviewSmoothMotionArtifact, PreviewSmoothParityArtifact, PreviewSmoothPlanArtifact,
+    PreviewLocomotionArtifact, PreviewSmoothParityArtifact, PreviewSmoothPlanArtifact,
 };
 use crate::dev_preview::export::{
     PreviewDimensions, PreviewPlayback, PreviewRoundAperture, PreviewRoundMetadata,
@@ -9,40 +9,37 @@ use crate::dev_preview::export::{
 use crate::dev_preview::frame::{mark_continuations, PreviewCell, PreviewFrame};
 use crate::dev_preview::scenarios::{PreviewRenderContext, PreviewScenarioBundle};
 use crate::dev_preview::strips::PreviewStripBundle;
-use crate::presentation::smooth::{
-    classic_flatten_checksum, SmoothLayerMotionBinding, SmoothParallaxPlaneTranslations,
-    SmoothPoint,
-};
+use crate::presentation::smooth::classic_flatten_checksum;
 use crate::round::layout::{RoundAperture, SAFE_INNER_RADIUS_RATIO};
+use crate::round::locomotion::{
+    sample_companion_locomotion, stable_companion_identity, CompanionLocomotionSample,
+    LOCOMOTION_SEGMENT_SECS,
+};
 use crate::round::scene::{build_round_scene_draw_list, CompanionMotion};
 use crate::round::smooth::{build_round_smooth_scene_plan, try_build_round_smooth_scene_plan};
 use crate::tui::view_model::WatchViewModel;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const GRID_COLS: u16 = 52;
 const GRID_ROWS: u16 = 52;
 const DEPTH_GRID_COLS: u16 = 44;
 const DEPTH_GRID_ROWS: u16 = 18;
-const MOTION_FRAME_DURATION_MS: u64 = 160;
-const MOTION_FRAME_COUNT: usize = 12;
-const ROUTE_SEGMENT_SEARCH_WINDOW_MS: u64 =
-    crate::round::locomotion::LOCOMOTION_SEGMENT_SECS as u64 * 1_000;
-const REVIEWED_MOTION_START_UNIX_MS: i128 = 1_760_000_007_720;
+const LOCOMOTION_FRAME_DURATION_MS: u16 = 160;
+const REVIEWED_LOCOMOTION_ROUTE_START_UNIX_SECONDS: i64 = 1_760_000_000;
 
 pub const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 pub const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
-pub const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
+pub const PURPOSEFUL_LOCOMOTION_ID: &str = "round-purposeful-locomotion";
 pub const SMOOTH_DEPTH_FAR_ID: &str = "round-smooth-depth-far";
 pub const SMOOTH_DEPTH_NEUTRAL_ID: &str = "round-smooth-depth-neutral";
 pub const SMOOTH_DEPTH_FRONT_ID: &str = "round-smooth-depth-front";
 
-struct SmoothMotionSample {
+struct PurposefulLocomotionSample {
     index: usize,
-    elapsed_ms: u64,
-    now: time::OffsetDateTime,
-    semantic_art_tick_index: u64,
+    phase_label: &'static str,
+    locomotion: CompanionLocomotionSample,
     plan: crate::presentation::smooth::SmoothCompanionScenePlan,
 }
 
@@ -190,48 +187,43 @@ pub fn smooth_depth_bundles(ctx: &PreviewRenderContext) -> Vec<PreviewScenarioBu
     .collect()
 }
 
-pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
+pub fn smooth_strips(_ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
     let vm = WatchViewModel::fixture_with_habitat_props();
     let motion = crate::round::scene::companion_roam_motion();
-    let motion_start_now = smooth_motion_start_now(ctx.fixed_now, &vm, &motion);
-    let samples = smooth_motion_samples(motion_start_now, &vm, &motion);
-    let max_adjacent_parallax_delta_by_plane = max_adjacent_parallax_delta(&samples);
-    let mut frames = Vec::with_capacity(MOTION_FRAME_COUNT);
-    let mut manifest_frames = Vec::with_capacity(MOTION_FRAME_COUNT);
+    let samples = purposeful_locomotion_samples(&vm, &motion);
+    let mut frames = Vec::with_capacity(samples.len());
+    let mut manifest_frames = Vec::with_capacity(samples.len());
 
     for sample in samples {
         let mut frame = scene_draw_list_to_preview_frame(
-            format!("{SMOOTH_MOTION_ID}-frame-{:03}", sample.index),
-            format!("Smooth Motion Frame {:03}", sample.index),
+            format!("{PURPOSEFUL_LOCOMOTION_ID}-frame-{:03}", sample.index),
+            format!("Purposeful Locomotion {}", sample.phase_label),
             GRID_COLS,
             GRID_ROWS,
             &sample.plan.flatten_classic_cells(),
         );
-        frame.contract.smooth_motion = Some(PreviewSmoothMotionArtifact::from_scene_plan(
-            SMOOTH_MOTION_ID,
-            sample.index as u16,
-            sample.elapsed_ms,
-            sample.now,
-            sample.semantic_art_tick_index,
-            &vm,
-            &sample.plan,
-            max_adjacent_parallax_delta_by_plane,
+        frame.contract.locomotion = Some(PreviewLocomotionArtifact::from_sample(
+            PURPOSEFUL_LOCOMOTION_ID,
+            sample.locomotion,
         ));
         frames.push(frame);
         manifest_frames.push(PreviewStripFrame {
             index: sample.index as u16,
-            phase: format!("motion-{:03}", sample.index),
-            elapsed_ms: sample.elapsed_ms as u16,
-            files: smooth_strip_frame_paths(sample.index),
+            phase: sample.phase_label.to_string(),
+            // The review timeline is deliberately compact and public. It does
+            // not reveal the physical route timestamps used to sample the
+            // deterministic production locomotion contract.
+            elapsed_ms: sample.index as u16 * LOCOMOTION_FRAME_DURATION_MS,
+            files: purposeful_locomotion_frame_paths(sample.index),
         });
     }
 
     vec![PreviewStripBundle {
         manifest: PreviewStrip {
-            id: SMOOTH_MOTION_ID.to_string(),
-            kind: PreviewStripKind::SmoothMotion,
-            title: "Smooth Motion".to_string(),
-            intent: "Review deterministic smooth pet bob metadata across a parity strip."
+            id: PURPOSEFUL_LOCOMOTION_ID.to_string(),
+            kind: PreviewStripKind::PurposefulLocomotion,
+            title: "Purposeful Locomotion".to_string(),
+            intent: "Review paused, deterministic locomotion choices across dwell, turn, glide, and depth samples."
                 .to_string(),
             dimensions: PreviewDimensions {
                 width: GRID_COLS,
@@ -240,32 +232,23 @@ pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
             target_id: "pet-body".to_string(),
             playback: PreviewPlayback {
                 starts_paused: true,
-                frame_duration_ms: MOTION_FRAME_DURATION_MS as u16,
+                frame_duration_ms: LOCOMOTION_FRAME_DURATION_MS,
             },
             inputs: BTreeMap::from([
                 (
                     "fixture".to_string(),
-                    Value::String("round-smooth-motion".to_string()),
+                    Value::String("purposeful-locomotion".to_string()),
                 ),
                 (
-                    "frame_duration_ms".to_string(),
-                    json!(MOTION_FRAME_DURATION_MS),
-                ),
-                ("frame_count".to_string(), json!(MOTION_FRAME_COUNT)),
-                ("now_advances_with_elapsed".to_string(), json!(true)),
-                (
-                    "motion_start_unix_ms".to_string(),
-                    json!(
-                        i128::from(motion_start_now.unix_timestamp()) * 1_000
-                            + i128::from(motion_start_now.millisecond())
-                    ),
+                    "review_facts".to_string(),
+                    json!(["dwell", "turn", "glide", "depth"]),
                 ),
             ]),
             frames: manifest_frames,
             review_prompts: vec![
-                "Step through the strip and compare bob metadata even when the cell grid barely changes."
+                "Step through dwell, turn, glide, and depth samples; confirm the strip reads like an animal choosing a destination rather than an oscillator."
                     .to_string(),
-                "Confirm pet-body motion stays fractional and deterministic across frames."
+                "Confirm facing changes at a boundary and depth changes only during the later glide."
                     .to_string(),
             ],
         },
@@ -273,205 +256,151 @@ pub fn smooth_strips(ctx: &PreviewRenderContext) -> Vec<PreviewStripBundle> {
     }]
 }
 
-fn smooth_motion_start_now(
-    fixed_now: time::OffsetDateTime,
+fn purposeful_locomotion_samples(
     vm: &WatchViewModel,
     motion: &CompanionMotion,
-) -> time::OffsetDateTime {
-    first_smooth_motion_start_satisfying_preview_contract(reviewed_motion_start_now(), vm, motion)
-        .unwrap_or(fixed_now)
+) -> Vec<PurposefulLocomotionSample> {
+    let identity = stable_companion_identity(&vm.pet_render.seed);
+    let route_start = segment_boundary_at_or_after(reviewed_locomotion_route_start());
+    let planar = find_planar_segment(identity, route_start, vm, motion)
+        .expect("review fixture should include a planar locomotion segment");
+    let turn = planar + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
+    let depth = find_depth_excursion(
+        identity,
+        planar + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS),
+        vm,
+        motion,
+    )
+    .expect("review fixture should include a later depth excursion");
+    let glide_start = first_glide_in_segment(identity, planar)
+        .expect("planar segment should transition from dwell to glide");
+    let next_boundary = planar + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
+    let glide_duration = next_boundary - glide_start;
+    let dwell_end = glide_start - time::Duration::milliseconds(1);
+    let glide_end = next_boundary - time::Duration::milliseconds(1);
+    let depth_glide_start = first_glide_in_segment(identity, depth)
+        .expect("depth segment should transition from dwell to glide");
+    let depth_glide_end = depth + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
+    let depth_midpoint = depth_glide_start + (depth_glide_end - depth_glide_start) / 2;
+
+    [
+        ("dwell-start", planar),
+        ("dwell-end", dwell_end),
+        ("glide-quarter", glide_start + glide_duration / 4),
+        ("glide-half", glide_start + glide_duration / 2),
+        ("glide-three-quarters", glide_start + glide_duration * 3 / 4),
+        ("glide-end", glide_end),
+        ("turn-boundary", turn),
+        ("depth-excursion", depth_midpoint),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (phase_label, now))| {
+        let locomotion = sample_companion_locomotion(identity, now, vm.facing);
+        let plan = preview_plan(vm, motion, now)
+            .expect("purposeful locomotion preview frame should build");
+        PurposefulLocomotionSample { index, phase_label, locomotion, plan }
+    })
+    .collect()
 }
 
-fn first_smooth_motion_start_satisfying_preview_contract(
-    start_now: time::OffsetDateTime,
+fn reviewed_locomotion_route_start() -> time::OffsetDateTime {
+    time::OffsetDateTime::from_unix_timestamp(REVIEWED_LOCOMOTION_ROUTE_START_UNIX_SECONDS)
+        .expect("review locomotion route timestamp should parse")
+}
+
+fn segment_boundary_at_or_after(now: time::OffsetDateTime) -> time::OffsetDateTime {
+    let seconds = now.unix_timestamp();
+    let seconds_into_segment = seconds.rem_euclid(LOCOMOTION_SEGMENT_SECS);
+    let boundary_seconds = if seconds_into_segment == 0 {
+        seconds
+    } else {
+        seconds + LOCOMOTION_SEGMENT_SECS - seconds_into_segment
+    };
+    time::OffsetDateTime::from_unix_timestamp(boundary_seconds)
+        .expect("review segment boundary should parse")
+}
+
+fn first_glide_in_segment(
+    identity: u64,
+    segment_start: time::OffsetDateTime,
+) -> Option<time::OffsetDateTime> {
+    (0..LOCOMOTION_SEGMENT_SECS)
+        .map(|second| segment_start + time::Duration::seconds(second))
+        .find(|now| {
+            matches!(
+                sample_companion_locomotion(identity, *now, 1).phase,
+                crate::round::locomotion::LocomotionPhase::Glide
+            )
+        })
+}
+
+fn find_planar_segment(
+    identity: u64,
+    start: time::OffsetDateTime,
     vm: &WatchViewModel,
     motion: &CompanionMotion,
 ) -> Option<time::OffsetDateTime> {
-    if smooth_motion_window_satisfies_preview_contract(start_now, vm, motion) {
-        return Some(start_now);
-    }
-
-    (MOTION_FRAME_DURATION_MS..=ROUTE_SEGMENT_SEARCH_WINDOW_MS)
-        .step_by(MOTION_FRAME_DURATION_MS as usize)
-        .map(|offset_ms| start_now + time::Duration::milliseconds(offset_ms as i64))
-        .find(|candidate| smooth_motion_window_satisfies_preview_contract(*candidate, vm, motion))
-}
-
-fn reviewed_motion_start_now() -> time::OffsetDateTime {
-    time::OffsetDateTime::from_unix_timestamp_nanos(REVIEWED_MOTION_START_UNIX_MS * 1_000_000)
-        .expect("reviewed motion start timestamp should parse")
-}
-
-fn smooth_motion_samples(
-    start_now: time::OffsetDateTime,
-    vm: &WatchViewModel,
-    motion: &CompanionMotion,
-) -> Vec<SmoothMotionSample> {
-    try_smooth_motion_samples(start_now, vm, motion)
-        .expect("selected smooth motion window should build every preview frame")
-}
-
-fn try_smooth_motion_samples(
-    start_now: time::OffsetDateTime,
-    vm: &WatchViewModel,
-    motion: &CompanionMotion,
-) -> Option<Vec<SmoothMotionSample>> {
-    (0..MOTION_FRAME_COUNT)
-        .map(|index| {
-            let elapsed_ms = index as u64 * MOTION_FRAME_DURATION_MS;
-            let now = start_now + time::Duration::milliseconds(elapsed_ms as i64);
-            let plan = try_build_round_smooth_scene_plan(
-                vm, now, GRID_COLS, GRID_ROWS, motion, elapsed_ms,
-            )
-            .ok()?;
-
-            Some(SmoothMotionSample {
-                index,
-                elapsed_ms,
-                now,
-                semantic_art_tick_index: elapsed_ms / 250,
-                plan,
-            })
+    (0..64)
+        .map(|offset| start + time::Duration::seconds(offset * LOCOMOTION_SEGMENT_SECS))
+        .find(|segment_start| {
+            let Some(glide_start) = first_glide_in_segment(identity, *segment_start) else {
+                return false;
+            };
+            let glide_end = *segment_start + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS)
+                - time::Duration::milliseconds(1);
+            let next_boundary = *segment_start + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
+            let start_sample = sample_companion_locomotion(identity, glide_start, 1);
+            let end_sample = sample_companion_locomotion(identity, glide_end, 1);
+            let glide_duration = next_boundary - glide_start;
+            let preview_times = [
+                *segment_start,
+                glide_start - time::Duration::milliseconds(1),
+                glide_start + glide_duration / 4,
+                glide_start + glide_duration / 2,
+                glide_start + glide_duration * 3 / 4,
+                glide_end,
+            ];
+            (start_sample.point.z - end_sample.point.z).abs() < 0.01
+                && sample_companion_locomotion(identity, *segment_start, 1).facing
+                    != sample_companion_locomotion(identity, next_boundary, 1).facing
+                && preview_times
+                    .into_iter()
+                    .all(|now| preview_plan(vm, motion, now).is_ok())
+                && preview_plan(vm, motion, next_boundary).is_ok()
         })
-        .collect()
 }
 
-fn point_delta(previous: SmoothPoint, current: SmoothPoint) -> SmoothPoint {
-    SmoothPoint {
-        x: (current.x - previous.x).abs(),
-        y: (current.y - previous.y).abs(),
-    }
-}
-
-fn max_point(left: SmoothPoint, right: SmoothPoint) -> SmoothPoint {
-    SmoothPoint {
-        x: left.x.max(right.x),
-        y: left.y.max(right.y),
-    }
-}
-
-fn plane_delta(
-    previous: SmoothParallaxPlaneTranslations,
-    current: SmoothParallaxPlaneTranslations,
-) -> SmoothParallaxPlaneTranslations {
-    SmoothParallaxPlaneTranslations {
-        far: point_delta(previous.far, current.far),
-        mid: point_delta(previous.mid, current.mid),
-        behind: point_delta(previous.behind, current.behind),
-        foreground: point_delta(previous.foreground, current.foreground),
-    }
-}
-
-fn max_planes(
-    left: SmoothParallaxPlaneTranslations,
-    right: SmoothParallaxPlaneTranslations,
-) -> SmoothParallaxPlaneTranslations {
-    SmoothParallaxPlaneTranslations {
-        far: max_point(left.far, right.far),
-        mid: max_point(left.mid, right.mid),
-        behind: max_point(left.behind, right.behind),
-        foreground: max_point(left.foreground, right.foreground),
-    }
-}
-
-fn max_adjacent_parallax_delta(samples: &[SmoothMotionSample]) -> SmoothParallaxPlaneTranslations {
-    samples.windows(2).fold(
-        SmoothParallaxPlaneTranslations::default(),
-        |maximum, pair| {
-            let previous = pair[0].plan.parallax_translations_by_plane();
-            let current = pair[1].plan.parallax_translations_by_plane();
-            max_planes(maximum, plane_delta(previous, current))
-        },
-    )
-}
-
-fn point_is_nonzero(point: SmoothPoint) -> bool {
-    point.x != 0.0 || point.y != 0.0
-}
-
-fn points_have_strict_ordering(planes: SmoothParallaxPlaneTranslations) -> bool {
-    fn strictly_ordered(far: f32, mid: f32, behind: f32, foreground: f32) -> bool {
-        far != 0.0
-            && far.abs() < mid.abs()
-            && mid.abs() < behind.abs()
-            && behind.abs() < foreground.abs()
-    }
-
-    strictly_ordered(
-        planes.far.x,
-        planes.mid.x,
-        planes.behind.x,
-        planes.foreground.x,
-    ) || strictly_ordered(
-        planes.far.y,
-        planes.mid.y,
-        planes.behind.y,
-        planes.foreground.y,
-    )
-}
-
-fn planes_are_within_adjacent_limits(planes: SmoothParallaxPlaneTranslations) -> bool {
-    [planes.far, planes.mid, planes.behind, planes.foreground]
-        .into_iter()
-        .all(|point| point.x <= 0.15 && point.y <= 0.10)
-}
-
-fn smooth_motion_window_satisfies_preview_contract(
-    start_now: time::OffsetDateTime,
+fn find_depth_excursion(
+    identity: u64,
+    start: time::OffsetDateTime,
     vm: &WatchViewModel,
     motion: &CompanionMotion,
-) -> bool {
-    let Some(samples) = try_smooth_motion_samples(start_now, vm, motion) else {
-        return false;
-    };
-    let mut classic_snap_anchors = BTreeSet::new();
-    let mut saw_nonzero_focus = false;
-    let mut saw_nonzero_planes = [false; 4];
-    let mut saw_strict_resolved_ordering = false;
+) -> Option<time::OffsetDateTime> {
+    (0..64)
+        .map(|offset| start + time::Duration::seconds(offset * LOCOMOTION_SEGMENT_SECS))
+        .find(|segment_start| {
+            let Some(glide_start) = first_glide_in_segment(identity, *segment_start) else {
+                return false;
+            };
+            let end = *segment_start + time::Duration::seconds(LOCOMOTION_SEGMENT_SECS);
+            let midpoint = glide_start + (end - glide_start) / 2;
+            let start_sample = sample_companion_locomotion(identity, glide_start, 1);
+            let midpoint_sample = sample_companion_locomotion(identity, midpoint, 1);
+            (start_sample.point.z - midpoint_sample.point.z).abs() >= 0.10
+                && preview_plan(vm, motion, midpoint).is_ok()
+        })
+}
 
-    for sample in &samples {
-        let plan = &sample.plan;
-
-        classic_snap_anchors.insert((
-            plan.pet.classic_snap_anchor.x.round() as i32,
-            plan.pet.classic_snap_anchor.y.round() as i32,
-        ));
-        saw_nonzero_focus |= point_is_nonzero(plan.pet.parallax_focus_offset);
-
-        let planes = plan.parallax_translations_by_plane();
-        saw_nonzero_planes[0] |= point_is_nonzero(planes.far);
-        saw_nonzero_planes[1] |= point_is_nonzero(planes.mid);
-        saw_nonzero_planes[2] |= point_is_nonzero(planes.behind);
-        saw_nonzero_planes[3] |= point_is_nonzero(planes.foreground);
-        saw_strict_resolved_ordering |= points_have_strict_ordering(planes);
-
-        if plan.layers.iter().any(|layer| {
-            matches!(
-                layer.motion_binding,
-                SmoothLayerMotionBinding::Fixed
-                    | SmoothLayerMotionBinding::PetAttached
-                    | SmoothLayerMotionBinding::FloorProjected
-            ) && point_is_nonzero(layer.parallax_translation)
-        }) {
-            return false;
-        }
-    }
-
-    if samples.windows(2).any(|pair| {
-        let dx = (pair[1].plan.pet.final_anchor.x - pair[0].plan.pet.final_anchor.x).abs();
-        let dy = (pair[1].plan.pet.final_anchor.y - pair[0].plan.pet.final_anchor.y).abs();
-        dx >= 1.0 || dy >= 1.0
-    }) {
-        return false;
-    }
-
-    classic_snap_anchors.len() >= 2
-        && saw_nonzero_focus
-        && saw_nonzero_planes
-            .into_iter()
-            .all(|saw_nonzero| saw_nonzero)
-        && saw_strict_resolved_ordering
-        && planes_are_within_adjacent_limits(max_adjacent_parallax_delta(&samples))
+fn preview_plan(
+    vm: &WatchViewModel,
+    motion: &CompanionMotion,
+    now: time::OffsetDateTime,
+) -> Result<
+    crate::presentation::smooth::SmoothCompanionScenePlan,
+    crate::round::smooth::SmoothScenePlanError,
+> {
+    try_build_round_smooth_scene_plan(vm, now, GRID_COLS, GRID_ROWS, motion, 0)
 }
 
 fn smooth_inputs(ctx: &PreviewRenderContext, mode: &str) -> BTreeMap<String, Value> {
@@ -515,20 +444,22 @@ fn smooth_round_metadata(width: u16, height: u16) -> PreviewRoundMetadata {
     }
 }
 
-fn smooth_strip_frame_paths(index: usize) -> PreviewStripFrameFiles {
+fn purposeful_locomotion_frame_paths(index: usize) -> PreviewStripFrameFiles {
     PreviewStripFrameFiles {
-        text: PathBuf::from(format!("strips/{SMOOTH_MOTION_ID}/frame-{index:03}.txt")),
+        text: PathBuf::from(format!(
+            "strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-{index:03}.txt"
+        )),
         cells: PathBuf::from(format!(
-            "strips/{SMOOTH_MOTION_ID}/frame-{index:03}.cells.json"
+            "strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-{index:03}.cells.json"
         )),
         pixel: None,
-        smooth_motion: Some(PathBuf::from(format!(
-            "strips/{SMOOTH_MOTION_ID}/frame-{index:03}.smooth-motion.json"
+        locomotion: Some(PathBuf::from(format!(
+            "strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-{index:03}.locomotion.json"
         ))),
     }
 }
 
-fn scene_draw_list_to_preview_frame(
+pub(crate) fn scene_draw_list_to_preview_frame(
     id: impl Into<String>,
     title: impl Into<String>,
     width: u16,
@@ -596,73 +527,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pinned_reviewed_motion_start_satisfies_preview_contract() {
+    fn purposeful_locomotion_fixture_covers_dwell_turn_glide_and_depth() {
         let vm = WatchViewModel::fixture_with_habitat_props();
         let motion = crate::round::scene::companion_roam_motion();
-        let reviewed_start = reviewed_motion_start_now();
-
-        assert!(smooth_motion_window_satisfies_preview_contract(
-            reviewed_start,
-            &vm,
-            &motion,
-        ));
-    }
-
-    #[test]
-    fn smooth_motion_start_now_prefers_reviewed_start_when_it_passes_contract() {
-        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
-        let vm = WatchViewModel::fixture_with_habitat_props();
-        let motion = crate::round::scene::companion_roam_motion();
-        let reviewed_start = reviewed_motion_start_now();
+        let samples = purposeful_locomotion_samples(&vm, &motion);
+        let labels = samples
+            .iter()
+            .map(|sample| sample.phase_label)
+            .collect::<Vec<_>>();
 
         assert_eq!(
-            smooth_motion_start_now(fixed_now, &vm, &motion),
-            reviewed_start
+            labels,
+            vec![
+                "dwell-start",
+                "dwell-end",
+                "glide-quarter",
+                "glide-half",
+                "glide-three-quarters",
+                "glide-end",
+                "turn-boundary",
+                "depth-excursion",
+            ]
         );
-    }
-
-    #[test]
-    fn smooth_motion_start_now_falls_back_when_reviewed_start_fails_contract() {
-        let fixed_now = time::macros::datetime!(2026-07-08 18:00:00 UTC);
-        let vm = WatchViewModel::fixture_with_habitat_props();
-        let motion = CompanionMotion {
-            drift_x_frac: 0.0,
-            drift_y_frac: 0.0,
-            ..CompanionMotion::default()
-        };
-
-        assert_eq!(smooth_motion_start_now(fixed_now, &vm, &motion), fixed_now);
-    }
-
-    #[test]
-    fn route_search_returns_first_aligned_window_for_task_two_fixture() {
-        let mut vm = WatchViewModel::fixture_with_habitat_props();
-        vm.pet_render.seed = "preview-route-search-fixture".to_string();
-        let route_start = time::macros::datetime!(2025-10-09 8:53:21 UTC);
-        let motion = crate::round::scene::companion_roam_motion();
-        let first_passing_offset_ms = 3_680;
-        let expected = route_start + time::Duration::milliseconds(first_passing_offset_ms);
-
-        assert!(!smooth_motion_window_satisfies_preview_contract(
-            route_start,
-            &vm,
-            &motion,
+        assert!(matches!(
+            samples[0].locomotion.phase,
+            crate::round::locomotion::LocomotionPhase::Dwell
         ));
-        for offset_ms in (MOTION_FRAME_DURATION_MS..first_passing_offset_ms as u64)
-            .step_by(MOTION_FRAME_DURATION_MS as usize)
-        {
-            let candidate = route_start + time::Duration::milliseconds(offset_ms as i64);
-            assert!(
-                !smooth_motion_window_satisfies_preview_contract(candidate, &vm, &motion),
-                "offset {offset_ms}ms should fail before the first route window"
-            );
-        }
-        assert!(smooth_motion_window_satisfies_preview_contract(
-            expected, &vm, &motion,
+        assert!(matches!(
+            samples[2].locomotion.phase,
+            crate::round::locomotion::LocomotionPhase::Glide
         ));
-        assert_eq!(
-            first_smooth_motion_start_satisfying_preview_contract(route_start, &vm, &motion),
-            Some(expected)
+        assert!(
+            (samples[7].locomotion.point.z - samples[6].locomotion.point.z).abs() > 0.10,
+            "later sample should show a depth excursion"
         );
     }
 }

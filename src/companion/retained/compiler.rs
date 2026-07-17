@@ -245,7 +245,12 @@ pub(super) struct FrameGlobalsGpuValue {
     // Private retained spatial-cue inputs. They never enter scene artifacts,
     // checksums, or Debug output.
     pub(super) activity_opacity: f32,
-    pub(super) reduce_motion: u32,
+    pub(super) presentation_flags: u32,
+}
+
+impl FrameGlobalsGpuValue {
+    pub(super) const REDUCE_MOTION_PRESENTATION_FLAG: u32 = 1 << 0;
+    pub(super) const PET_RIM_DISABLED_FOR_PREVIEW_PRESENTATION_FLAG: u32 = 1 << 1;
 }
 
 impl std::fmt::Debug for FrameGlobalsGpuValue {
@@ -683,6 +688,7 @@ pub(super) struct CpuSceneCandidate {
 pub(super) struct PrivateSpatialFrame {
     activity_opacity: f32,
     reduce_motion: bool,
+    pet_rim_enabled: bool,
 }
 
 impl PrivateSpatialFrame {
@@ -690,7 +696,19 @@ impl PrivateSpatialFrame {
     const NEUTRAL: Self = Self {
         activity_opacity: 0.0,
         reduce_motion: false,
+        pet_rim_enabled: true,
     };
+
+    const fn presentation_flags(self) -> u32 {
+        let mut flags = 0;
+        if self.reduce_motion {
+            flags |= FrameGlobalsGpuValue::REDUCE_MOTION_PRESENTATION_FLAG;
+        }
+        if !self.pet_rim_enabled {
+            flags |= FrameGlobalsGpuValue::PET_RIM_DISABLED_FOR_PREVIEW_PRESENTATION_FLAG;
+        }
+        flags
+    }
 
     pub(super) fn from_snapshot(
         snapshot: &crate::presentation::companion_scene::CompanionSceneSnapshot,
@@ -698,6 +716,7 @@ impl PrivateSpatialFrame {
         Self {
             activity_opacity: snapshot.frame.activity_opacity,
             reduce_motion: snapshot.frame.reduce_motion,
+            pet_rim_enabled: snapshot.frame.pet_rim_enabled,
         }
     }
 }
@@ -1500,7 +1519,7 @@ impl CpuSceneCandidate {
                 .frame_globals
                 .unwrap_or(self.frame.globals.as_slice()[0]);
             globals.activity_opacity = private_spatial_frame.activity_opacity;
-            globals.reduce_motion = u32::from(private_spatial_frame.reduce_motion);
+            globals.presentation_flags = private_spatial_frame.presentation_flags();
             record_single(
                 &self.frame.globals,
                 &mut mirrors.frame_globals,
@@ -3012,7 +3031,7 @@ fn compile_frame_mirrors(
             dim_amount: frame.dim_amount,
             light_count: u32::try_from(frame.lights.len()).expect("fixed light count fits u32"),
             activity_opacity: private_spatial_frame.activity_opacity,
-            reduce_motion: u32::from(private_spatial_frame.reduce_motion),
+            presentation_flags: private_spatial_frame.presentation_flags(),
         }],
     );
 
@@ -3981,7 +4000,7 @@ mod tests {
             184
         );
         assert_eq!(
-            std::mem::offset_of!(FrameGlobalsGpuValue, reduce_motion),
+            std::mem::offset_of!(FrameGlobalsGpuValue, presentation_flags),
             188
         );
     }
@@ -5256,8 +5275,8 @@ mod tests {
             before_frame_globals.activity_opacity
         );
         assert_eq!(
-            after_frame_globals.reduce_motion,
-            before_frame_globals.reduce_motion
+            after_frame_globals.presentation_flags,
+            before_frame_globals.presentation_flags
         );
         assert_eq!(after_frame_globals.light_count, 1);
         assert_eq!(
@@ -6032,7 +6051,7 @@ mod tests {
         assert_eq!(after.viewport_pixels, before.viewport_pixels);
         assert_eq!(after.aperture, before.aperture);
         assert_eq!(after.activity_opacity, before.activity_opacity);
-        assert_eq!(after.reduce_motion, before.reduce_motion);
+        assert_eq!(after.presentation_flags, before.presentation_flags);
     }
 
     #[test]

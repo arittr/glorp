@@ -3,7 +3,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 
@@ -77,17 +77,30 @@ const PIXEL_CAST_IDS: [&str; 6] = [
 
 const SMOOTH_BASELINE_ID: &str = "round-smooth-classic-baseline";
 const SMOOTH_PARITY_ID: &str = "round-smooth-classic-parity";
-const SMOOTH_MOTION_ID: &str = "round-smooth-motion";
+const PURPOSEFUL_LOCOMOTION_ID: &str = "round-purposeful-locomotion";
+const ROUND_SPATIAL_CUE_IDS: [&str; 10] = [
+    "round-spatial-rim-content-idle",
+    "round-spatial-rim-sad-idle",
+    "round-spatial-rim-sleepy-idle",
+    "round-spatial-rim-active",
+    "round-spatial-rim-disabled",
+    "round-spatial-stats-behind",
+    "round-spatial-stats-interacting",
+    "round-spatial-stats-front",
+    "round-spatial-sleep-settled",
+    "round-spatial-wake-resume",
+];
 const SMOOTH_DEPTH_ENDPOINTS: [(&str, &str, f64); 3] = [
     ("round-smooth-depth-far", "far", -1.0),
     ("round-smooth-depth-neutral", "neutral", 0.0),
     ("round-smooth-depth-front", "front", 1.0),
 ];
-const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 19] = [
+const SMOOTH_CANONICAL_LAYER_BINDINGS: [(&str, &str, Option<&str>); 20] = [
     ("depth-rings", "fixed", None),
     ("biome-wash", "parallax", Some("far")),
     ("room-glyphs", "parallax", Some("far")),
     ("tank-bed", "fixed", None),
+    ("prop-shadows", "fixed", None),
     ("ambient", "parallax", Some("mid")),
     ("motes", "parallax", Some("mid")),
     ("activity-glyphs", "parallax", Some("mid")),
@@ -248,9 +261,25 @@ fn collect_smooth_sidecar_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if name.ends_with(".smooth-plan.json")
-            || name.ends_with(".smooth-parity.json")
-            || name.ends_with(".smooth-motion.json")
+        if name.ends_with(".smooth-plan.json") || name.ends_with(".smooth-parity.json") {
+            paths.push(path);
+        }
+    }
+}
+
+fn collect_locomotion_sidecar_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            collect_locomotion_sidecar_paths(&path, paths);
+            continue;
+        }
+
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".locomotion.json"))
         {
             paths.push(path);
         }
@@ -372,7 +401,7 @@ fn assert_canonical_smooth_layer_mapping(layers: &Value, surface: &str) {
 
     assert_eq!(
         actual, SMOOTH_CANONICAL_LAYER_BINDINGS,
-        "{surface} should serialize the canonical 19-role motion mapping"
+        "{surface} should serialize the canonical 20-role motion mapping"
     );
 
     for (layer, (_, expected_binding, _)) in layers.iter().zip(SMOOTH_CANONICAL_LAYER_BINDINGS) {
@@ -437,7 +466,7 @@ fn dev_preview_smooth_enum_path_validation_rejects_abstract_state_motion_binding
 #[test]
 fn dev_preview_smooth_enum_path_validation_rejects_nested_depth_plane() {
     let sidecar = serde_json::json!({
-        "strip_id": "smooth-motion",
+        "strip_id": "purposeful-locomotion",
         "layer_transforms": [{
             "metadata": {
                 "depth_plane": "far"
@@ -1557,6 +1586,16 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/round-glitch-dialect.txt",
         "frames/round-crystal-dialect.txt",
         "frames/round-glitch-patched-s6.txt",
+        "frames/round-spatial-rim-content-idle.txt",
+        "frames/round-spatial-rim-sad-idle.txt",
+        "frames/round-spatial-rim-sleepy-idle.txt",
+        "frames/round-spatial-rim-active.txt",
+        "frames/round-spatial-rim-disabled.txt",
+        "frames/round-spatial-stats-behind.txt",
+        "frames/round-spatial-stats-interacting.txt",
+        "frames/round-spatial-stats-front.txt",
+        "frames/round-spatial-sleep-settled.txt",
+        "frames/round-spatial-wake-resume.txt",
         "frames/round-smooth-classic-baseline.txt",
         "frames/round-smooth-classic-baseline.cells.json",
         "frames/round-smooth-classic-parity.txt",
@@ -1602,7 +1641,7 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
         "frames/pixel-mech-s5-hardbody.pixel-art.json",
         "frames/pixel-mech-s5-hardbody.pixel-fit.json",
         "frames/pixel-tank-composition.pixel-composition.json",
-        "strips/round-smooth-motion/frame-000.smooth-motion.json",
+        "strips/round-purposeful-locomotion/frame-000.locomotion.json",
     ] {
         assert!(run.out.join(file).is_file(), "missing {file}");
     }
@@ -1691,6 +1730,16 @@ fn dev_preview_all_writes_watch_and_pet_artifacts() {
             "round-glitch-dialect".to_string(),
             "round-crystal-dialect".to_string(),
             "round-glitch-patched-s6".to_string(),
+            "round-spatial-rim-content-idle".to_string(),
+            "round-spatial-rim-sad-idle".to_string(),
+            "round-spatial-rim-sleepy-idle".to_string(),
+            "round-spatial-rim-active".to_string(),
+            "round-spatial-rim-disabled".to_string(),
+            "round-spatial-stats-behind".to_string(),
+            "round-spatial-stats-interacting".to_string(),
+            "round-spatial-stats-front".to_string(),
+            "round-spatial-sleep-settled".to_string(),
+            "round-spatial-wake-resume".to_string(),
             "round-smooth-classic-baseline".to_string(),
             "round-smooth-classic-parity".to_string(),
             "round-smooth-depth-far".to_string(),
@@ -2846,9 +2895,9 @@ fn dev_preview_smooth_writes_manifest_and_review_artifacts() {
         "frames/round-smooth-depth-front.txt".to_string(),
         "frames/round-smooth-depth-front.cells.json".to_string(),
         "frames/round-smooth-depth-front.smooth-plan.json".to_string(),
-        format!("strips/{SMOOTH_MOTION_ID}/frame-000.txt"),
-        format!("strips/{SMOOTH_MOTION_ID}/frame-000.cells.json"),
-        format!("strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json"),
+        format!("strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-000.txt"),
+        format!("strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-000.cells.json"),
+        format!("strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-000.locomotion.json"),
     ] {
         assert!(run.out.join(&file).is_file(), "missing {file}");
     }
@@ -2898,28 +2947,28 @@ fn dev_preview_smooth_writes_manifest_and_review_artifacts() {
     );
 
     let strips = manifest["strips"].as_array().unwrap();
-    let motion = strips
+    let locomotion = strips
         .iter()
-        .find(|strip| strip["id"] == SMOOTH_MOTION_ID)
-        .expect("smooth motion strip");
-    assert_eq!(motion["kind"], "smooth-motion");
-    assert_eq!(motion["target_id"], "pet-body");
-    assert!(motion["frames"].as_array().unwrap().len() >= 5);
+        .find(|strip| strip["id"] == PURPOSEFUL_LOCOMOTION_ID)
+        .expect("purposeful locomotion strip");
+    assert_eq!(locomotion["kind"], "purposeful-locomotion");
+    assert_eq!(locomotion["target_id"], "pet-body");
+    assert_eq!(locomotion["frames"].as_array().unwrap().len(), 8);
     assert_eq!(
-        motion["frames"][0]["files"]["smooth_motion"],
-        format!("strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json")
+        locomotion["frames"][0]["files"]["locomotion"],
+        format!("strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-000.locomotion.json")
     );
     assert_artifact_type(
         &manifest,
-        &format!("{SMOOTH_MOTION_ID}-frame-000-smooth-motion"),
-        "smooth-motion",
+        &format!("{PURPOSEFUL_LOCOMOTION_ID}-frame-000-locomotion"),
+        "locomotion",
     );
 
     let review = std::fs::read_to_string(run.out.join("review.md")).unwrap();
     for needle in [
         format!("frames/{SMOOTH_PARITY_ID}.smooth-plan.json"),
         format!("frames/{SMOOTH_PARITY_ID}.smooth-parity.json"),
-        format!("strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json"),
+        format!("strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-000.locomotion.json"),
     ] {
         assert!(review.contains(&needle), "review.md missing {needle}");
     }
@@ -3003,13 +3052,13 @@ fn dev_preview_smooth_sidecars_are_sanitized_and_report_parity() {
 }
 
 #[test]
-fn dev_preview_smooth_privacy_scan_covers_motion_sidecars() {
+fn dev_preview_locomotion_privacy_scan_covers_route_sidecars() {
     let run = PreviewRun::new();
     run.run_success("smooth");
 
     let manifest = run.manifest();
     let mut scanned = Vec::new();
-    collect_smooth_sidecar_paths(&run.out, &mut scanned);
+    collect_locomotion_sidecar_paths(&run.out, &mut scanned);
 
     let scanned_rel: BTreeSet<String> = scanned
         .into_iter()
@@ -3021,272 +3070,80 @@ fn dev_preview_smooth_privacy_scan_covers_motion_sidecars() {
         })
         .collect();
 
-    let expected_motion: BTreeSet<String> = manifest["strips"]
+    let expected_locomotion: BTreeSet<String> = manifest["strips"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|strip| strip["id"] == SMOOTH_MOTION_ID)
+        .filter(|strip| strip["id"] == PURPOSEFUL_LOCOMOTION_ID)
         .flat_map(|strip| strip["frames"].as_array().unwrap().iter())
-        .map(|frame| {
-            frame["files"]["smooth_motion"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
+        .map(|frame| frame["files"]["locomotion"].as_str().unwrap().to_string())
         .collect();
 
     assert!(
-        !expected_motion.is_empty(),
-        "smooth manifest should declare motion sidecars"
+        !expected_locomotion.is_empty(),
+        "purposeful locomotion manifest should declare route sidecars"
     );
     assert!(
-        expected_motion.is_subset(&scanned_rel),
-        "privacy scan missed smooth motion sidecars: expected {expected_motion:?}, scanned {scanned_rel:?}"
+        expected_locomotion.is_subset(&scanned_rel),
+        "privacy scan missed purposeful locomotion sidecars: expected {expected_locomotion:?}, scanned {scanned_rel:?}"
     );
 }
 
 #[test]
-fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle_includes_them() {
-    let run = PreviewRun::new();
-    run.run_success("smooth");
+fn dev_preview_purposeful_locomotion_sidecars_are_deterministic_and_all_bundle_includes_them() {
+    let first = PreviewRun::new();
+    let second = PreviewRun::new();
+    first.run_success("smooth");
+    second.run_success("smooth");
 
-    let manifest = run.manifest();
-    let motion = manifest["strips"]
+    let first_manifest = first.manifest();
+    let second_manifest = second.manifest();
+    let first_strip = first_manifest["strips"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|strip| strip["id"] == SMOOTH_MOTION_ID)
-        .expect("smooth motion strip");
-    let frames = motion["frames"].as_array().unwrap();
-    assert!(
-        frames.len() >= 5,
-        "smooth motion strip should export at least five frames"
-    );
-
-    let mut pet_visual_checksums = BTreeSet::new();
-    let mut base_anchors = Vec::new();
-    let mut final_anchors = Vec::new();
-    let mut classic_snap_anchors = BTreeSet::new();
-    let mut bob_offsets = BTreeSet::new();
-    let mut semantic_tick_indices = Vec::new();
-    let mut checksums_by_semantic_tick = BTreeMap::<u64, BTreeSet<u64>>::new();
-    let mut saw_nonzero_focus = false;
-    let mut saw_nonzero_plane = BTreeMap::from([
-        ("far", false),
-        ("mid", false),
-        ("behind", false),
-        ("foreground", false),
-    ]);
-    let mut saw_strict_resolved_ordering = false;
-    let mut parallax_plane_summaries = Vec::<[(f32, f32); 4]>::new();
-    let mut exported_parallax_aggregates = Vec::<[(f32, f32); 4]>::new();
-    for frame in frames {
-        let path = frame["files"]["smooth_motion"].as_str().unwrap();
-        let artifact = run.read_json(path);
-        assert_eq!(artifact["schema_version"], 1);
-        assert_eq!(artifact["strip_id"], SMOOTH_MOTION_ID);
-        assert_eq!(artifact["parallax_lifecycle_scale"], 1.0);
-        assert!(artifact["now_unix_ms"].as_i64().is_some());
-        let semantic_tick_index = artifact["semantic_art_tick_index"].as_u64().unwrap();
-        let pet_visual_checksum = artifact["pet_visual_checksum"].as_u64().unwrap();
-        assert_eq!(artifact["privacy"]["source_names_visible"], false);
-        assert_eq!(artifact["privacy"]["exact_token_strings_visible"], false);
-        assert_sidecar_json_values_are_sanitized(&artifact, "smooth-motion");
-        assert_smooth_enum_strings_only_in_typed_fields(&artifact, "smooth-motion");
-
-        let focus_x = artifact["parallax_focus_offset"]["x"].as_f64().unwrap();
-        let focus_y = artifact["parallax_focus_offset"]["y"].as_f64().unwrap();
-        saw_nonzero_focus |= focus_x != 0.0 || focus_y != 0.0;
-
-        let mut plane_points = BTreeMap::new();
-        let mut exported_aggregate = [(0.0_f32, 0.0_f32); 4];
-        for (plane_index, plane) in ["far", "mid", "behind", "foreground"]
-            .into_iter()
-            .enumerate()
-        {
-            let x = artifact["parallax_planes"][plane]["x"].as_f64().unwrap();
-            let y = artifact["parallax_planes"][plane]["y"].as_f64().unwrap();
-            *saw_nonzero_plane.get_mut(plane).unwrap() |= x != 0.0 || y != 0.0;
-            plane_points.insert(plane, (x, y));
-
-            let max_x = artifact["max_adjacent_parallax_delta_by_plane"][plane]["x"]
-                .as_f64()
-                .unwrap();
-            let max_y = artifact["max_adjacent_parallax_delta_by_plane"][plane]["y"]
-                .as_f64()
-                .unwrap();
-            exported_aggregate[plane_index] = (max_x as f32, max_y as f32);
-            assert!(
-                max_x <= 0.15,
-                "{plane} adjacent parallax x delta exceeded 0.15: {max_x}"
-            );
-            assert!(
-                max_y <= 0.10,
-                "{plane} adjacent parallax y delta exceeded 0.10: {max_y}"
-            );
-        }
-        parallax_plane_summaries.push(
-            ["far", "mid", "behind", "foreground"]
-                .map(|plane| (plane_points[plane].0 as f32, plane_points[plane].1 as f32)),
-        );
-        exported_parallax_aggregates.push(exported_aggregate);
-
-        let [far, mid, behind, foreground] =
-            ["far", "mid", "behind", "foreground"].map(|plane| plane_points[plane]);
-        let strict_x = far.0 != 0.0
-            && far.0.abs() < mid.0.abs()
-            && mid.0.abs() < behind.0.abs()
-            && behind.0.abs() < foreground.0.abs();
-        let strict_y = far.1 != 0.0
-            && far.1.abs() < mid.1.abs()
-            && mid.1.abs() < behind.1.abs()
-            && behind.1.abs() < foreground.1.abs();
-        saw_strict_resolved_ordering |= strict_x || strict_y;
-
-        let base = &artifact["pet_motion"]["base_anchor"];
-        let final_anchor = &artifact["pet_motion"]["final_anchor"];
-        let snap = &artifact["pet_motion"]["classic_snap_anchor"];
-        let bob = &artifact["pet_motion"]["bob_offset"];
-
-        base_anchors.push((base["x"].as_f64().unwrap(), base["y"].as_f64().unwrap()));
-        final_anchors.push((
-            final_anchor["x"].as_f64().unwrap(),
-            final_anchor["y"].as_f64().unwrap(),
-        ));
-        classic_snap_anchors.insert(format!(
-            "{:.1}:{:.1}",
-            snap["x"].as_f64().unwrap(),
-            snap["y"].as_f64().unwrap()
-        ));
-        bob_offsets.insert(format!(
-            "{:.4}:{:.4}",
-            bob["x"].as_f64().unwrap(),
-            bob["y"].as_f64().unwrap()
-        ));
-        semantic_tick_indices.push(semantic_tick_index);
-        pet_visual_checksums.insert(pet_visual_checksum);
-        checksums_by_semantic_tick
-            .entry(semantic_tick_index)
-            .or_default()
-            .insert(pet_visual_checksum);
-        assert_canonical_smooth_layer_mapping(&artifact["layer_transforms"], "smooth-motion");
-        let mut saw_pet_body = false;
-        for layer in artifact["layer_transforms"].as_array().unwrap() {
-            let motion_binding = layer["motion_binding"].as_str().unwrap();
-            assert!(matches!(
-                motion_binding,
-                "fixed" | "pet-attached" | "floor-projected" | "parallax"
-            ));
-            let parallax_x = layer["parallax_translation"]["x"].as_f64().unwrap();
-            let parallax_y = layer["parallax_translation"]["y"].as_f64().unwrap();
-            match motion_binding {
-                "fixed" | "pet-attached" | "floor-projected" => {
-                    assert!(layer["depth_plane"].is_null());
-                    assert_eq!(parallax_x, 0.0);
-                    assert_eq!(parallax_y, 0.0);
-                }
-                "parallax" => assert!(matches!(
-                    layer["depth_plane"].as_str().unwrap(),
-                    "far" | "mid" | "behind" | "foreground"
-                )),
-                _ => unreachable!(),
-            }
-            saw_pet_body |= layer["role"] == "pet-body"
-                && layer["translation"]["y"].is_number()
-                && layer["item_count"].as_u64().unwrap() > 0;
-        }
-        assert!(saw_pet_body);
-    }
-
-    let recomputed_aggregate =
-        parallax_plane_summaries
-            .windows(2)
-            .fold([(0.0_f32, 0.0_f32); 4], |mut maximum, pair| {
-                for plane_index in 0..4 {
-                    let adjacent_x = (pair[1][plane_index].0 - pair[0][plane_index].0).abs();
-                    let adjacent_y = (pair[1][plane_index].1 - pair[0][plane_index].1).abs();
-                    maximum[plane_index].0 = maximum[plane_index].0.max(adjacent_x);
-                    maximum[plane_index].1 = maximum[plane_index].1.max(adjacent_y);
-                }
-                maximum
-            });
-    for (frame_index, exported_aggregate) in exported_parallax_aggregates.iter().enumerate() {
-        assert_eq!(
-            *exported_aggregate, recomputed_aggregate,
-            "frame {frame_index} should export the exact component-wise adjacent maximum"
-        );
-        assert_eq!(
-            exported_aggregate, &exported_parallax_aggregates[0],
-            "every motion sidecar should carry the same strip aggregate"
-        );
-    }
-
-    assert!(
-        base_anchors.windows(2).any(|pair| pair[0] != pair[1]),
-        "expected base anchors to move across adjacent frames, got {base_anchors:?}"
-    );
-    assert!(
-        classic_snap_anchors.len() >= 2,
-        "expected classic snap anchor to cross at least two rounded cells, got {classic_snap_anchors:?}"
-    );
-    assert!(
-        saw_nonzero_focus,
-        "expected at least one non-zero parallax focus"
-    );
-    assert!(
-        saw_nonzero_plane.values().all(|saw_nonzero| *saw_nonzero),
-        "expected non-zero evidence for all four parallax planes, got {saw_nonzero_plane:?}"
-    );
-    assert!(
-        saw_strict_resolved_ordering,
-        "expected strict resolved Far < Mid < Behind < Foreground ordering on a non-zero axis"
-    );
-    assert!(
-        bob_offsets.len() >= 5,
-        "expected at least five distinct bob offsets, got {bob_offsets:?}"
-    );
-    let unique_semantic_tick_count = semantic_tick_indices
+        .find(|strip| strip["id"] == PURPOSEFUL_LOCOMOTION_ID)
+        .expect("first purposeful locomotion strip");
+    let second_strip = second_manifest["strips"]
+        .as_array()
+        .unwrap()
         .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .len();
-    assert!(
-        unique_semantic_tick_count < frames.len(),
-        "expected paint frames to outnumber semantic ticks, got {unique_semantic_tick_count} ticks across {} frames",
-        frames.len()
-    );
-    let mut paint_frames_per_tick = BTreeMap::<u64, usize>::new();
-    for semantic_tick_index in semantic_tick_indices {
-        *paint_frames_per_tick
-            .entry(semantic_tick_index)
-            .or_default() += 1;
-    }
-    assert!(
-        paint_frames_per_tick.values().any(|count| *count > 1),
-        "expected at least one semantic tick bucket to include multiple paint frames, got {paint_frames_per_tick:?}"
-    );
-    assert_eq!(
-        pet_visual_checksums.len(),
-        1,
-        "Preview strip should prove paint motion changes without semantic art flashing"
-    );
-    for (semantic_tick_index, checksums) in checksums_by_semantic_tick {
+        .find(|strip| strip["id"] == PURPOSEFUL_LOCOMOTION_ID)
+        .expect("second purposeful locomotion strip");
+    let first_frames = first_strip["frames"].as_array().unwrap();
+    let second_frames = second_strip["frames"].as_array().unwrap();
+
+    assert_eq!(first_frames.len(), 8);
+    assert_eq!(first_frames, second_frames);
+    for (first_frame, second_frame) in first_frames.iter().zip(second_frames) {
+        let first_path = first_frame["files"]["locomotion"].as_str().unwrap();
+        let second_path = second_frame["files"]["locomotion"].as_str().unwrap();
+        let first_artifact = first.read_json(first_path);
+        let second_artifact = second.read_json(second_path);
         assert_eq!(
-            checksums.len(),
-            1,
-            "expected stable paint checksum within semantic tick bucket {semantic_tick_index}, got {checksums:?}"
+            first_artifact, second_artifact,
+            "{first_path} should be deterministic"
         );
-    }
-    for pair in final_anchors.windows(2) {
-        let dx = (pair[1].0 - pair[0].0).abs();
-        let dy = (pair[1].1 - pair[0].1).abs();
-        assert!(
-            dx < 1.0,
-            "adjacent smooth x delta should stay sub-cell: {dx}"
-        );
-        assert!(
-            dy < 1.0,
-            "adjacent smooth y delta should stay sub-cell: {dy}"
+        assert_eq!(first_artifact["schema_version"], 1);
+        assert_eq!(first_artifact["strip_id"], PURPOSEFUL_LOCOMOTION_ID);
+        assert_sidecar_json_values_are_sanitized(&first_artifact, "purposeful-locomotion");
+        assert_eq!(
+            first_artifact
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "depth_bucket".to_string(),
+                "facing".to_string(),
+                "phase".to_string(),
+                "planar_bucket".to_string(),
+                "schema_version".to_string(),
+                "segment_index".to_string(),
+                "segment_phase".to_string(),
+                "strip_id".to_string(),
+            ])
         );
     }
 
@@ -3299,7 +3156,7 @@ fn dev_preview_smooth_motion_sidecars_show_fractional_progression_and_all_bundle
     assert!(all
         .out
         .join(format!(
-            "strips/{SMOOTH_MOTION_ID}/frame-000.smooth-motion.json"
+            "strips/{PURPOSEFUL_LOCOMOTION_ID}/frame-000.locomotion.json"
         ))
         .is_file());
 }
@@ -3390,7 +3247,7 @@ fn dev_preview_watch_daycontext_heavy_day_evening_frame_snapshot() {
     insta::assert_snapshot!("watch_daycontext_heavy_day_evening_frame", frame);
 }
 
-const ROUND_IDS: [&str; 15] = [
+const ROUND_IDS: [&str; 25] = [
     "round-normal",
     "round-hud-missing-yesterday",
     "round-hud-stale-yesterday",
@@ -3406,6 +3263,16 @@ const ROUND_IDS: [&str; 15] = [
     "round-glitch-dialect",
     "round-crystal-dialect",
     "round-glitch-patched-s6",
+    "round-spatial-rim-content-idle",
+    "round-spatial-rim-sad-idle",
+    "round-spatial-rim-sleepy-idle",
+    "round-spatial-rim-active",
+    "round-spatial-rim-disabled",
+    "round-spatial-stats-behind",
+    "round-spatial-stats-interacting",
+    "round-spatial-stats-front",
+    "round-spatial-sleep-settled",
+    "round-spatial-wake-resume",
 ];
 
 #[test]
@@ -3627,6 +3494,358 @@ fn dev_preview_round_aperture_corners_are_masked() {
         !center["outside_aperture"].as_bool().unwrap_or(false),
         "center cell should be inside the aperture"
     );
+}
+
+#[test]
+fn dev_preview_purposeful_locomotion_strip_exports_only_bucketed_route_facts() {
+    let run = PreviewRun::new();
+
+    run.run_success("animation");
+
+    let manifest = run.manifest();
+    let strip = manifest["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|strip| strip["id"] == PURPOSEFUL_LOCOMOTION_ID)
+        .expect("purposeful locomotion strip");
+    assert_eq!(strip["kind"], "purposeful-locomotion");
+    assert_eq!(strip["target_id"], "pet-body");
+    assert_eq!(strip["playback"]["starts_paused"], true);
+
+    let phases: BTreeSet<&str> = strip["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|frame| frame["phase"].as_str().unwrap())
+        .collect();
+    for phase in [
+        "dwell-start",
+        "dwell-end",
+        "glide-quarter",
+        "glide-half",
+        "glide-three-quarters",
+        "glide-end",
+        "turn-boundary",
+        "depth-excursion",
+    ] {
+        assert!(phases.contains(phase), "missing purposeful phase {phase}");
+    }
+
+    let mut planar_dwell_depths = BTreeSet::new();
+    let mut dwell_start_segment = None;
+    let mut turn_segment = None;
+    let mut saw_depth_excursion = false;
+    for frame in strip["frames"].as_array().unwrap() {
+        let path = frame["files"]["locomotion"]
+            .as_str()
+            .expect("locomotion artifact path");
+        let artifact = run.read_json(path);
+        assert_eq!(artifact["strip_id"], PURPOSEFUL_LOCOMOTION_ID);
+        assert!(artifact["segment_index"].is_i64());
+        assert!(matches!(
+            artifact["phase"].as_str(),
+            Some("dwell" | "glide")
+        ));
+        assert!(artifact["segment_phase"].is_number());
+        assert!(artifact["planar_bucket"].is_string());
+        assert!(artifact["depth_bucket"].is_string());
+        assert!(matches!(artifact["facing"].as_i64(), Some(-1 | 1)));
+        let expected_locomotion_phase = match frame["phase"].as_str().unwrap() {
+            "dwell-start" | "dwell-end" | "turn-boundary" => "dwell",
+            "glide-quarter"
+            | "glide-half"
+            | "glide-three-quarters"
+            | "glide-end"
+            | "depth-excursion" => "glide",
+            phase => panic!("unexpected purposeful review phase {phase}"),
+        };
+        assert_eq!(
+            artifact["phase"],
+            expected_locomotion_phase,
+            "{} should sample the matching production locomotion phase",
+            frame["phase"].as_str().unwrap()
+        );
+        if frame["phase"].as_str().unwrap().starts_with("dwell-") {
+            planar_dwell_depths.insert(artifact["depth_bucket"].as_str().unwrap().to_string());
+        }
+        match frame["phase"].as_str().unwrap() {
+            "dwell-start" => dwell_start_segment = artifact["segment_index"].as_i64(),
+            "turn-boundary" => turn_segment = artifact["segment_index"].as_i64(),
+            _ => {}
+        }
+        saw_depth_excursion |= frame["phase"] == "depth-excursion";
+
+        let artifact_text = serde_json::to_string(&artifact).unwrap();
+        for forbidden in [
+            "bob_offset",
+            "now_unix_ms",
+            "semantic_art_tick_index",
+            "pet_visual_checksum",
+            "seed",
+            "hud",
+            "coverage",
+            "mask",
+            "atlas",
+            "target_x",
+            "target_y",
+        ] {
+            assert!(
+                !artifact_text.contains(forbidden),
+                "locomotion sidecar leaked {forbidden}: {artifact_text}"
+            );
+        }
+    }
+    assert_eq!(
+        planar_dwell_depths.len(),
+        1,
+        "the initial dwell samples should stay on one planar route segment"
+    );
+    assert!(
+        saw_depth_excursion,
+        "strip should include a later depth-excursion sample"
+    );
+    assert_eq!(
+        turn_segment,
+        dwell_start_segment.map(|segment| segment + 1),
+        "turn sample should be the next production segment boundary"
+    );
+
+    let manifest_text = serde_json::to_string(&manifest).unwrap();
+    assert!(!manifest_text.contains("round-smooth-motion"));
+    assert!(!manifest_text.contains("bob_offset"));
+    assert!(!manifest_text.contains("mood-aura"));
+    let prompts = strip["review_prompts"].as_array().unwrap();
+    assert!(prompts.iter().any(|prompt| {
+        prompt
+            .as_str()
+            .unwrap()
+            .contains("animal choosing a destination")
+    }));
+}
+
+#[test]
+fn dev_preview_spatial_cues_frames_cover_rims_statistics_and_locomotion_lifecycle() {
+    let run = PreviewRun::new();
+
+    run.run_success("round");
+
+    let manifest = run.manifest();
+    for id in ROUND_SPATIAL_CUE_IDS {
+        let scenario = scenario(&manifest, id);
+        assert_eq!(scenario["kind"], "round");
+        assert!(run.out.join(format!("frames/{id}.txt")).is_file());
+        let cues = &scenario["inputs"]["spatial_cues"];
+        assert_eq!(cues["aura"], "absent", "{id} must not restore an aura");
+        assert_eq!(cues["statistics_projection"], "rear-receiving-surface");
+        assert_eq!(cues["prop_shadow_order"], "front-of-statistics");
+        assert_eq!(cues["rim_extent"], "body-local");
+        let statistics_fixture = id.starts_with("round-spatial-stats-");
+        let evidence = &cues["evidence"];
+        assert_eq!(
+            evidence["cell_grid"],
+            if statistics_fixture {
+                "typed-smooth-plan-with-transformed-cells"
+            } else {
+                "round-cell-grid"
+            },
+            "{id} must classify the cells it actually exports"
+        );
+        assert_eq!(
+            evidence["hud_projection"],
+            "typed-contract-redacted-hud-sidecar-no-native-pixels"
+        );
+        assert_eq!(
+            evidence["pet_rim"],
+            "typed-contract-presentation-option-no-native-pixels"
+        );
+        assert_eq!(
+            evidence["native_visual_verification"],
+            "native-retained-appkit-tests-or-local-companion-qa"
+        );
+        assert!(matches!(
+            cues["statistics_relation"].as_str(),
+            Some("behind" | "interacting" | "front")
+        ));
+        let prompts = scenario["review_prompts"].as_array().unwrap();
+        let has_statistics_prompt = prompts.iter().any(|prompt| {
+            prompt
+                .as_str()
+                .unwrap()
+                .contains("statistics-projection contract")
+        });
+        assert_eq!(has_statistics_prompt, statistics_fixture);
+        let spatial_pixel_fixture = statistics_fixture || id.starts_with("round-spatial-rim-");
+        assert_eq!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.as_str().unwrap().contains(
+                    "native retained/AppKit test evidence or final local companion visual QA"
+                )),
+            spatial_pixel_fixture,
+            "{id} must send native-pixel review to a native evidence surface"
+        );
+        for prompt in prompts {
+            let prompt = prompt.as_str().unwrap();
+            assert!(
+                !prompt.contains("Confirm the statistics projection reads")
+                    && !prompt.contains("Confirm the rim stays")
+                    && !prompt.contains("Confirm feed activity changes rim intensity"),
+                "{id} must not claim that Preview Lab cells visually verify native spatial pixels: {prompt}"
+            );
+        }
+        assert!(
+            !prompts.iter().any(|prompt| prompt
+                .as_str()
+                .unwrap()
+                .contains("animal choosing a destination")),
+            "locomotion review belongs to its animation strip, not static frame {id}"
+        );
+
+        let hud = run.read_json(scenario["files"]["hud"].as_str().unwrap());
+        assert_eq!(hud["text"]["today_total"], "—");
+        assert_eq!(hud["text"]["daily_percent"], "—");
+        assert_eq!(hud["text"]["pace"], "—");
+        assert_eq!(hud["privacy_projection"]["exact_counts_visible"], false);
+        for lane in ["xp", "daily", "pace"] {
+            assert_eq!(hud["lanes"][lane]["fill_fraction"], 0.5);
+            let rollovers = &hud["lanes"][lane]["rollover_layers"];
+            assert!(rollovers.is_null() || rollovers.as_array().unwrap().is_empty());
+        }
+    }
+
+    let content = scenario(&manifest, "round-spatial-rim-content-idle");
+    let sad = scenario(&manifest, "round-spatial-rim-sad-idle");
+    let sleepy = scenario(&manifest, "round-spatial-rim-sleepy-idle");
+    let active = scenario(&manifest, "round-spatial-rim-active");
+    let disabled = scenario(&manifest, "round-spatial-rim-disabled");
+    for scenario in [content, sad, sleepy] {
+        assert_eq!(scenario["inputs"]["spatial_cues"]["rim_enabled"], true);
+        assert_eq!(scenario["inputs"]["spatial_cues"]["rim_intensity"], "idle");
+    }
+    let normal_scene = run.read_json("frames/round-normal.scene.json");
+    for (id, mood) in [
+        ("round-spatial-rim-content-idle", "content"),
+        ("round-spatial-rim-sad-idle", "sad"),
+        ("round-spatial-rim-sleepy-idle", "sleepy"),
+    ] {
+        let spatial_scene = run.read_json(&format!("frames/{id}.scene.json"));
+        assert_eq!(spatial_scene["pet"]["mood"], mood);
+        assert_eq!(
+            spatial_scene["pet"]["art_text"],
+            normal_scene["pet"]["art_text"]
+        );
+    }
+    assert_eq!(active["inputs"]["spatial_cues"]["rim_enabled"], true);
+    assert_eq!(active["inputs"]["spatial_cues"]["rim_intensity"], "active");
+    assert_eq!(disabled["inputs"]["spatial_cues"]["rim_enabled"], false);
+    assert_eq!(disabled["inputs"]["spatial_cues"]["rim_intensity"], "none");
+    assert_eq!(
+        disabled["inputs"]["spatial_cues"]["rim_presentation"],
+        "disabled-for-preview-review"
+    );
+    assert_eq!(
+        disabled["inputs"]["spatial_cues"]["rim_style"]["enabled"],
+        false
+    );
+    assert_eq!(
+        disabled["inputs"]["spatial_cues"]["rim_style"]["renderer_input"],
+        "presentation-options"
+    );
+    assert_eq!(
+        scenario(&manifest, "round-spatial-stats-behind")["inputs"]["spatial_cues"]
+            ["statistics_relation"],
+        "behind"
+    );
+    assert_eq!(
+        scenario(&manifest, "round-spatial-stats-interacting")["inputs"]["spatial_cues"]
+            ["statistics_relation"],
+        "interacting"
+    );
+    assert_eq!(
+        scenario(&manifest, "round-spatial-stats-front")["inputs"]["spatial_cues"]
+            ["statistics_relation"],
+        "front"
+    );
+
+    let mut statistics_cells = Vec::new();
+    let mut statistics_translations = Vec::new();
+    let mut statistics_scales = Vec::new();
+    for id in [
+        "round-spatial-stats-behind",
+        "round-spatial-stats-interacting",
+        "round-spatial-stats-front",
+    ] {
+        let stats = scenario(&manifest, id);
+        let plan_path = stats["files"]["smooth_plan"]
+            .as_str()
+            .expect("statistics fixtures must export their renderer depth plan");
+        assert!(run.out.join(plan_path).is_file(), "missing {plan_path}");
+        statistics_cells.push(read_cells(&run, id));
+
+        let plan = run.read_json(plan_path);
+        let pet = plan["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|layer| layer["role"] == "pet-body")
+            .expect("statistics plan must retain the pet body layer");
+        statistics_translations.push(pet["transform"]["translation"]["y"].as_f64().unwrap());
+        statistics_scales.push(pet["transform"]["scale"]["y"].as_f64().unwrap());
+    }
+    assert_ne!(statistics_cells[0], statistics_cells[1]);
+    assert_ne!(statistics_cells[1], statistics_cells[2]);
+    assert!(statistics_translations[0] < statistics_translations[1]);
+    assert!(statistics_translations[1] < statistics_translations[2]);
+    assert!(statistics_scales[0] < statistics_scales[1]);
+    assert!(statistics_scales[1] < statistics_scales[2]);
+    assert_eq!(
+        scenario(&manifest, "round-spatial-sleep-settled")["inputs"]["spatial_cues"]
+            ["locomotion_lifecycle"],
+        "sleep-settled"
+    );
+    assert_eq!(
+        scenario(&manifest, "round-spatial-wake-resume")["inputs"]["spatial_cues"]
+            ["locomotion_lifecycle"],
+        "wake-resume"
+    );
+
+    let manifest_text = serde_json::to_string(&manifest).unwrap();
+    for forbidden in [
+        "mood-aura",
+        "hud_coverage",
+        "atlas_index",
+        "shadow_mask",
+        "pet_seed",
+    ] {
+        assert!(
+            !manifest_text.contains(forbidden),
+            "spatial cue fixtures leaked {forbidden}: {manifest_text}"
+        );
+    }
+
+    for id in ROUND_SPATIAL_CUE_IDS {
+        let spatial = scenario(&manifest, id);
+        for field in ["scene", "hud"] {
+            let artifact_text =
+                std::fs::read_to_string(run.out.join(spatial["files"][field].as_str().unwrap()))
+                    .unwrap();
+            for forbidden in [
+                "18.4k",
+                "115% yday",
+                "2.3k/10m",
+                "hud_coverage",
+                "atlas_index",
+                "shadow_mask",
+                "glorp-preview",
+            ] {
+                assert!(
+                    !artifact_text.contains(forbidden),
+                    "{id} {field} artifact leaked {forbidden}: {artifact_text}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

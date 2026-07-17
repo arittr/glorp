@@ -136,7 +136,7 @@ pub struct PreviewStrip {
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewStripKind {
     SceneMoment,
-    SmoothMotion,
+    PurposefulLocomotion,
     PixelAnimation,
 }
 
@@ -159,7 +159,7 @@ pub struct PreviewStripFrameFiles {
     pub text: PathBuf,
     pub cells: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub smooth_motion: Option<PathBuf>,
+    pub locomotion: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pixel: Option<PathBuf>,
 }
@@ -280,7 +280,7 @@ pub enum ArtifactType {
     Cells,
     SmoothPlan,
     SmoothParity,
-    SmoothMotion,
+    Locomotion,
     PixelFrame,
     PixelArt,
     PixelComposition,
@@ -497,8 +497,8 @@ pub fn write_review_markdown(path: &Path, manifest: &PreviewManifest) -> Result<
                     frame.files.text.display(),
                     frame.files.cells.display()
                 ));
-                if let Some(smooth_motion) = &frame.files.smooth_motion {
-                    markdown.push_str(&format!("  smooth motion `{}`\n", smooth_motion.display()));
+                if let Some(locomotion) = &frame.files.locomotion {
+                    markdown.push_str(&format!("  locomotion `{}`\n", locomotion.display()));
                 }
                 if let Some(pixel) = &frame.files.pixel {
                     markdown.push_str(&format!("  pixel `{}`\n", pixel.display()));
@@ -531,7 +531,7 @@ fn scenario_kind_label(kind: PreviewScenarioKind) -> &'static str {
 fn strip_kind_label(kind: PreviewStripKind) -> &'static str {
     match kind {
         PreviewStripKind::SceneMoment => "scene-moment",
-        PreviewStripKind::SmoothMotion => "smooth-motion",
+        PreviewStripKind::PurposefulLocomotion => "purposeful-locomotion",
         PreviewStripKind::PixelAnimation => "pixel-animation",
     }
 }
@@ -758,10 +758,10 @@ fn render_strip_html(strip: &PreviewStripBundle) -> String {
                     .to_string()
             )
         ));
-        if let Some(smooth_motion) = &strip.manifest.frames[index].files.smooth_motion {
+        if let Some(locomotion) = &strip.manifest.frames[index].files.locomotion {
             html.push_str(&format!(
-                r#" · <a href="{}">smooth motion</a>"#,
-                escape_html(&smooth_motion.display().to_string())
+                r#" · <a href="{}">locomotion</a>"#,
+                escape_html(&locomotion.display().to_string())
             ));
         }
         if let Some(pixel_path) = &strip.manifest.frames[index].files.pixel {
