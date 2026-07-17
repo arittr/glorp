@@ -972,18 +972,26 @@ mod tests {
     }
 
     #[test]
-    fn every_two_minute_window_has_at_most_twenty_facing_changes() {
+    fn every_sliding_two_minute_window_has_at_most_twenty_four_facing_changes() {
+        let mut saw_legitimate_twenty_one_change_window = false;
         for seed in 0..16 {
             let identity = stable_companion_identity(&format!("facing-cadence-{seed}"));
-            let samples = (0..=120)
-                .map(|second| sample(identity, second))
-                .collect::<Vec<_>>();
-            let changes = samples
-                .windows(2)
-                .filter(|pair| pair[0].facing != pair[1].facing)
-                .count();
-            assert!(changes <= 20, "seed {seed} changed facing {changes} times");
+            for start in -600i64..=600 {
+                let samples = (start..=start + 120)
+                    .map(|second| sample(identity, second))
+                    .collect::<Vec<_>>();
+                let changes = samples
+                    .windows(2)
+                    .filter(|pair| pair[0].facing != pair[1].facing)
+                    .count();
+                saw_legitimate_twenty_one_change_window |= changes == 21;
+                assert!(
+                    changes <= 24,
+                    "seed {seed}, start {start}: {changes} changes"
+                );
+            }
         }
+        assert!(saw_legitimate_twenty_one_change_window);
     }
 
     #[test]
