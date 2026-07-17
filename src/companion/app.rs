@@ -5022,19 +5022,30 @@ fn prepare_appkit_hud_volume(
     }
 }
 
-fn draw_prepared_hud_lines(prepared: &PreparedAppKitHudVolume, echo: bool) {
-    unsafe {
-        for line in &prepared.lines {
-            if echo {
-                for offset_y in APPKIT_HUD_ECHO_OFFSET_Y_UP {
-                    line.echo
-                        .drawAtPoint(NSPoint::new(line.origin.x, line.origin.y + offset_y));
-                }
-            } else {
-                line.primary.drawAtPoint(line.origin);
-            }
+fn for_each_prepared_hud_line_draw(
+    prepared: &PreparedAppKitHudVolume,
+    echo: bool,
+    mut draw: impl FnMut(&Retained<NSAttributedString>, NSPoint),
+) {
+    for line in &prepared.lines {
+        if echo {
+            draw(
+                &line.echo,
+                NSPoint::new(
+                    line.origin.x + APPKIT_HUD_ECHO_OFFSET_Y_UP[0],
+                    line.origin.y + APPKIT_HUD_ECHO_OFFSET_Y_UP[1],
+                ),
+            );
+        } else {
+            draw(&line.primary, line.origin);
         }
     }
+}
+
+fn draw_prepared_hud_lines(prepared: &PreparedAppKitHudVolume, echo: bool) {
+    for_each_prepared_hud_line_draw(prepared, echo, |attributed, origin| unsafe {
+        attributed.drawAtPoint(origin);
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -5466,6 +5477,24 @@ mod tests {
         let debug = format!("{prepared:?}");
         assert_eq!(debug, "PreparedAppKitHudVolume(<private>)");
         assert!(!debug.contains("981.7M"));
+    }
+
+    #[test]
+    fn appkit_hud_echo_draws_once_per_line_at_the_rear_offset() {
+        let prepared = prepared_appkit_hud_volume_fixture("981.7M", "49% yday", "349.4k/10m");
+        let mut echo_origins = Vec::new();
+
+        for_each_prepared_hud_line_draw(&prepared, true, |_, origin| {
+            echo_origins.push(origin);
+        });
+
+        assert_eq!(echo_origins.len(), prepared.lines.len());
+        for (line, echo_origin) in prepared.lines.iter().zip(echo_origins) {
+            assert_eq!(
+                echo_origin,
+                NSPoint::new(line.origin.x + 0.60, line.origin.y - 0.60)
+            );
+        }
     }
 
     #[test]
