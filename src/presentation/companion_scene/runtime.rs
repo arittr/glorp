@@ -711,9 +711,12 @@ pub enum SnapshotRejection {
 
 fn snapshot_pet_clearance(
     snapshot: &CompanionSceneSnapshot,
-) -> crate::presentation::smooth::SmoothBounds {
+) -> (
+    crate::round::motion::MotionPoint,
+    crate::round::motion::MotionPoint,
+) {
     let cell = snapshot.topology.glyph_grid.cell_extent_points;
-    let final_center = crate::presentation::smooth::SmoothPoint {
+    let final_center = crate::round::motion::MotionPoint {
         x: snapshot.frame.pet_anchor_points[0] / cell[0] + f32::from(PET_LATTICE_WIDTH) / 2.0,
         // `pet_transform` converts the top-left anchor into Y-up space after
         // adding downward bob, then applies the signed Y-up perspective cue.
@@ -728,16 +731,16 @@ fn snapshot_pet_clearance(
         crate::pet::render::ART_WIDTH as f32 / 2.0 * crate::round::depth::SMOOTH_PET_NEAR_SCALE;
     let half_h =
         crate::pet::render::ART_HEIGHT as f32 / 2.0 * crate::round::depth::SMOOTH_PET_NEAR_SCALE;
-    crate::presentation::smooth::SmoothBounds {
-        min: crate::presentation::smooth::SmoothPoint {
+    (
+        crate::round::motion::MotionPoint {
             x: final_center.x - half_w,
             y: final_center.y - half_h,
         },
-        max: crate::presentation::smooth::SmoothPoint {
+        crate::round::motion::MotionPoint {
             x: final_center.x + half_w,
             y: final_center.y + half_h,
         },
-    }
+    )
 }
 
 pub(crate) fn validate_snapshot(
@@ -930,8 +933,10 @@ pub(crate) fn validate_snapshot(
         height_points: layout.height_points,
         clearance: crate::round::scene::current_round_motion_clearance(grid.rows),
     };
-    if !crate::round::placement::bounds_inside_round_aperture(
-        snapshot_pet_clearance(snapshot),
+    let (pet_clearance_min, pet_clearance_max) = snapshot_pet_clearance(snapshot);
+    if !crate::round::placement::cell_bounds_inside_round_aperture(
+        pet_clearance_min,
+        pet_clearance_max,
         motion_viewport,
     ) {
         return Err(SnapshotRejection::InvalidValue);

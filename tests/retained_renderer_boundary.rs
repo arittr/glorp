@@ -166,7 +166,9 @@ fn reduce_motion_is_refreshed_dynamically_and_gates_scene_projection() {
     let projection = function_body_from(&app, "fn prepare_scene_runtime_tick()");
     assert_eq!(projection.matches("reduce_motion,").count(), 2);
     assert_eq!(
-        projection.matches("CompanionPresentationOptions {").count(),
+        projection
+            .matches("CompanionPresentationOptions::with_reduce_motion(")
+            .count(),
         2
     );
 }

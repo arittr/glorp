@@ -33,8 +33,8 @@ impl Default for CompanionMotion {
 pub fn companion_roam_motion() -> CompanionMotion {
     CompanionMotion {
         wander_half: 8,
-        drift_x_frac: 0.92,
-        drift_y_frac: 0.6,
+        drift_x_frac: 0.98,
+        drift_y_frac: 0.66,
         drift_period_secs: 22,
         upward_bias: 0.5,
         wander: true,
@@ -441,7 +441,6 @@ fn normalize_facing(facing: i8) -> i8 {
 mod tests {
     use super::*;
     use crate::round::locomotion::{sample_companion_locomotion, stable_companion_identity};
-    use crate::tui::view_model::WatchViewModel;
     use time::macros::datetime;
 
     fn motion_input(
@@ -488,30 +487,6 @@ mod tests {
     }
 
     #[test]
-    fn activity_and_calm_do_not_change_awake_locomotion_geometry() {
-        let mut active = WatchViewModel::fixture_with_habitat_props();
-        active.life_profile.calm_mode = false;
-        active.progress.rate_per_hour = 80_000_000.0;
-        let mut calm = active.clone();
-        calm.life_profile.calm_mode = true;
-        calm.progress.rate_per_hour = 0.0;
-        let motion = companion_roam_motion();
-        let now = datetime!(2026-07-17 12:34:56 UTC);
-        let active = crate::round::scene::companion_pet_placement(&active, now, 44, 18, &motion);
-        let calm = crate::round::scene::companion_pet_placement(&calm, now, 44, 18, &motion);
-
-        assert_eq!(
-            active.fractional_motion_top_left,
-            calm.fractional_motion_top_left
-        );
-        assert_eq!(active.raw_depth, calm.raw_depth);
-        assert_eq!(
-            active.motion_projection.facing,
-            calm.motion_projection.facing
-        );
-    }
-
-    #[test]
     fn projection_uses_one_locomotion_sample_for_planar_and_depth_intent() {
         let now = datetime!(2026-07-17 12:34:56 UTC);
         let input = motion_input(false, None, None, None);
@@ -523,11 +498,11 @@ mod tests {
         assert_eq!(projection.facing, sample.facing);
         assert_close(
             projection.planar_offset_cells.x,
-            sample.point.x * (16.0 * 0.92),
+            sample.point.x * (16.0 * 0.98),
         );
         assert_close(
             projection.planar_offset_cells.y,
-            sample.point.y * (4.0 * 0.6),
+            sample.point.y * (4.0 * 0.66),
         );
     }
 

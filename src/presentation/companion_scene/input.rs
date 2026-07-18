@@ -1579,6 +1579,73 @@ mod tests {
     }
 
     #[test]
+    fn statistics_hud_compiles_once_as_world_read_only_at_the_shared_plane() {
+        use crate::presentation::companion_scene::scene::{
+            build_scene_generation, DepthBehavior, InstanceGroupBinding, PetArtFilter,
+            PrimitiveBinding, PrimitiveSpace,
+        };
+        use crate::presentation::companion_scene::{
+            DeviceEpoch, LayoutGeneration, ResourceGeneration, SceneGenerationKey,
+        };
+
+        let snapshot = project_snapshot(
+            &fixture_with_real_pet_art(),
+            time::OffsetDateTime::UNIX_EPOCH,
+            CompanionLogicalLayout::round(360.0, 360.0),
+        )
+        .unwrap();
+        let generation = build_scene_generation(
+            &snapshot,
+            SceneGenerationKey {
+                device: DeviceEpoch(1),
+                layout: LayoutGeneration(1),
+                resources: ResourceGeneration(1),
+            },
+        )
+        .unwrap();
+        let template = generation.template();
+        let hud = template
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    &primitive.binding,
+                    PrimitiveBinding::Instances(InstanceGroupBinding::Hud)
+                )
+            })
+            .unwrap();
+        let pet = template
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    &primitive.binding,
+                    PrimitiveBinding::Instances(InstanceGroupBinding::PetArt(PetArtFilter::Body))
+                )
+            })
+            .unwrap();
+
+        assert!(hud.authored_order > pet.authored_order);
+        assert_eq!(hud.depth, DepthBehavior::WorldReadOnly);
+        assert_eq!(hud.space, PrimitiveSpace::World);
+        let hud_node = template
+            .nodes
+            .iter()
+            .find(|node| node.id == hud.node)
+            .unwrap();
+        let root = template
+            .nodes
+            .iter()
+            .find(|node| node.alias.as_str() == "scene.root")
+            .unwrap();
+        assert_eq!(hud_node.parent, Some(root.id));
+        assert_eq!(
+            hud_node.base_transform.translation[2],
+            crate::round::depth::COMPANION_STATISTICS_Z
+        );
+    }
+
+    #[test]
     fn initial_semantic_projection_applies_reduce_motion_before_first_frame() {
         use crate::presentation::companion_scene::SemanticRevision;
 

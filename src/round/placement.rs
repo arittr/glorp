@@ -222,6 +222,20 @@ pub(crate) fn bounds_inside_round_aperture(
     })
 }
 
+pub(crate) fn cell_bounds_inside_round_aperture(
+    min: MotionPoint,
+    max: MotionPoint,
+    viewport: RoundCompanionMotionViewport,
+) -> bool {
+    bounds_inside_round_aperture(
+        SmoothBounds {
+            min: SmoothPoint { x: min.x, y: min.y },
+            max: SmoothPoint { x: max.x, y: max.y },
+        },
+        viewport,
+    )
+}
+
 fn round_aperture_geometry(
     viewport: RoundCompanionMotionViewport,
 ) -> Option<(SmoothPoint, SmoothPoint)> {
@@ -358,8 +372,8 @@ mod tests {
             0,
         );
 
-        assert_close(projection.planar_offset_cells.x, 294.4);
-        assert_close(projection.planar_offset_cells.y, -48.0);
+        assert_close(projection.planar_offset_cells.x, 313.6);
+        assert_close(projection.planar_offset_cells.y, -52.8);
         assert_ne!(
             projection.planar_offset_cells,
             MotionPoint {

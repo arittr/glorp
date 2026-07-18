@@ -450,44 +450,8 @@ fn smooth_depth_motion_is_deterministic_continuous_bounded_and_separately_salted
     }
 }
 
-fn legacy_wander_offsets(now: time::OffsetDateTime, period_secs: u64) -> (f32, f32) {
-    use std::f64::consts::TAU;
-    let t = (now.unix_timestamp() as f64 + now.nanosecond() as f64 / 1_000_000_000.0)
-        / period_secs.max(1) as f64;
-    let fx = 0.72 * (TAU * t).cos() + 0.28 * (TAU * t * 1.93 + 0.6).sin();
-    let fy = 0.72 * (TAU * t * 1.21 + 0.3).sin() + 0.28 * (TAU * t * 2.41 + 1.5).cos();
-    (fx as f32, fy as f32)
-}
-
-fn legacy_classic_rect(
-    vm: &WatchViewModel,
-    now: time::OffsetDateTime,
-    grid_cols: u16,
-    grid_rows: u16,
-    motion: &CompanionMotion,
-) -> ratatui::layout::Rect {
-    let (fx, fy) = legacy_wander_offsets(now, motion.drift_period_secs);
-    let cx = grid_cols / 2;
-    let cy = grid_rows / 2;
-    let half_w = PET_W / 2;
-    let half_h = PET_H / 2;
-    let safe_x = cx.saturating_sub(half_w) as f32;
-    let safe_y = cy.saturating_sub(half_h) as f32;
-    let x_radius = safe_x * motion.drift_x_frac;
-    let y_radius = safe_y * motion.drift_y_frac;
-    let bias = motion.upward_bias * safe_y;
-    let max_x = grid_cols.saturating_sub(PET_W);
-    let max_y = grid_rows.saturating_sub(PET_H);
-    let classic_x =
-        (cx as i32 - half_w as i32 + (fx * x_radius) as i32).clamp(0, max_x as i32) as u16;
-    let classic_drift_y = (cy as i32 - half_h as i32 - bias as i32 + (fy * y_radius) as i32)
-        .clamp(0, max_y as i32) as u16;
-    let classic_y = (classic_drift_y + u16::from(vm.breath_offset_y)).min(max_y);
-    ratatui::layout::Rect::new(classic_x, classic_y, PET_W, PET_H)
-}
-
 #[test]
-fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
+fn maximum_scale_smooth_placement_preserves_shared_classic_snap_and_protected_clearance() {
     let mut vm = parity_fixture();
     vm.day_context.asleep = false;
     vm.life_profile.calm_mode = false;
@@ -501,11 +465,6 @@ fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
         let now = NOW + time::Duration::milliseconds((step * 50) as i64);
         let placement =
             glorp::round::scene::companion_pet_placement(&vm, now, GRID_COLS, GRID_ROWS, &motion);
-        assert_eq!(
-            placement.classic_rect,
-            legacy_classic_rect(&vm, now, GRID_COLS, GRID_ROWS, &motion),
-            "adding Z must not change Classic placement at {now}"
-        );
 
         let plan = glorp::round::smooth::try_build_round_smooth_scene_plan_with_options(
             &vm,
@@ -520,6 +479,14 @@ fn maximum_scale_smooth_placement_preserves_classic_and_protected_clearance() {
             },
         )
         .expect("production viewport resolves depth placement");
+        assert_eq!(
+            plan.pet.classic_snap_anchor,
+            SmoothPoint {
+                x: f32::from(placement.classic_rect.x),
+                y: f32::from(placement.classic_rect.y),
+            },
+            "Smooth and Classic must share the same snapped placement at {now}"
+        );
         let clearance = plan.pet.max_scale_clearance;
         let rendered_center_y = center_y(clearance);
         lowest_center_y = lowest_center_y.min(rendered_center_y);
@@ -925,27 +892,6 @@ fn smooth_plan_has_no_mood_aura_layer_or_required_role() {
 }
 
 #[test]
-fn smooth_round_plan_gives_pet_body_a_fractional_bob_transform() {
-    let vm = parity_fixture();
-    let plan = glorp::round::smooth::build_round_smooth_scene_plan(
-        &vm,
-        NOW,
-        GRID_COLS,
-        GRID_ROWS,
-        &CompanionMotion::default(),
-        250,
-    );
-    let pet_body = plan
-        .layers
-        .iter()
-        .find(|layer| layer.role == SmoothLayerRole::PetBody)
-        .expect("pet body layer should exist");
-
-    assert!(pet_body.transform.translation.y != 0.0);
-    assert!(pet_body.transform.translation.y.fract() != 0.0);
-}
-
-#[test]
 fn smooth_round_plan_keeps_classic_cell_art_in_pet_body() {
     let vm = parity_fixture();
     let plan = glorp::round::smooth::build_round_smooth_scene_plan(
@@ -1037,8 +983,8 @@ fn smooth_round_plan_floor_projection_stays_below_props_and_moves_pet_attached_l
             < 1e-4
     );
     // The projection is a bed-anchored ellipse positioned in viewport coordinates
-    // from the pet centre and the depth sample, so it carries no transform of its
-    // own and cannot inherit the pet's bob.
+    // from the pet centre and the depth sample, so it carries no pet-attached
+    // transform of its own.
     assert_eq!(
         floor_projection.transform.translation,
         SmoothPoint { x: 0.0, y: 0.0 },
@@ -1186,12 +1132,11 @@ fn smooth_round_plan_uses_posture_shifted_pet_body_for_metadata() {
         plan.pet.base_anchor.x,
         pet_body.anchor.x + pet_body.transform.translation.x
     );
-    let expected_base_y = pet_body.anchor.y + pet_body.transform.translation.y
-        - plan.pet.bob_offset.y
-        - plan.pet.perspective_offset.y;
+    let expected_base_y =
+        pet_body.anchor.y + pet_body.transform.translation.y - plan.pet.perspective_offset.y;
     assert!(
         (plan.pet.base_anchor.y - expected_base_y).abs() < 1e-5,
-        "prepared anchor must precompensate bob and perspective"
+        "prepared anchor must precompensate perspective"
     );
     assert_eq!(plan.pet.final_anchor, fractional_anchor);
     assert_eq!(plan.pet.fractional_bounds, fractional_bounds);
@@ -1446,11 +1391,11 @@ fn depth_transform_maps_far_neutral_and_near_onto_scale_and_perspective() {
     }
 }
 
-fn depth_center_without_bob(plan: &glorp::presentation::smooth::SmoothCompanionScenePlan) -> f32 {
+fn resolved_pet_center_y(plan: &glorp::presentation::smooth::SmoothCompanionScenePlan) -> f32 {
     // Depth placement is defined around the centered 13x10 particle frame. The
     // fixture's sparse pet glyph bounds are intentionally smaller and asymmetric,
     // so their bounding-box center is not the renderer-neutral pet center.
-    plan.pet.final_anchor.y + f32::from(PET_H) / 2.0 - plan.pet.bob_offset.y
+    plan.pet.final_anchor.y + f32::from(PET_H) / 2.0
 }
 
 #[test]
@@ -1460,18 +1405,21 @@ fn depth_transform_reaches_the_full_rear_and_front_visual_envelope() {
     let neutral = plan_at_depth(&vm, 0, 0.0);
     let near = plan_at_depth(&vm, 0, 1.0);
 
-    let fractions = [
-        depth_center_without_bob(&far) / f32::from(GRID_ROWS),
-        depth_center_without_bob(&neutral) / f32::from(GRID_ROWS),
-        depth_center_without_bob(&near) / f32::from(GRID_ROWS),
-    ];
-    for (actual, expected) in fractions.into_iter().zip([0.27, 0.50, 0.73]) {
+    for (actual, expected) in [
+        (resolved_pet_center_y(&far) / f32::from(GRID_ROWS), 0.27),
+        (resolved_pet_center_y(&near) / f32::from(GRID_ROWS), 0.73),
+    ] {
         assert!(
             (actual - expected).abs() < 0.015,
             "expected {expected}, got {actual}"
         );
     }
-    assert!(depth_center_without_bob(&near) > f32::from(GRID_ROWS) / 2.0);
+    let neutral_fraction = resolved_pet_center_y(&neutral) / f32::from(GRID_ROWS);
+    assert!(
+        (0.35..0.65).contains(&neutral_fraction),
+        "neutral depth should preserve bounded planar travel, got {neutral_fraction}"
+    );
+    assert!(resolved_pet_center_y(&near) > f32::from(GRID_ROWS) / 2.0);
 }
 
 #[test]
@@ -1504,13 +1452,6 @@ fn smooth_and_direct_scene_share_depth_driven_pet_centers() {
         .with_depth_override(depth);
         let direct = CompanionSceneSnapshot::project_with_input(&vm, input).unwrap();
         let cell = direct.topology.glyph_grid.cell_extent_points;
-        assert_ne!(
-            direct.frame.bob_offset_y_points, 0.0,
-            "the parity fixture must exercise retained idle bob"
-        );
-        assert!(
-            (smooth.pet.bob_offset.y - direct.frame.bob_offset_y_points / cell[1]).abs() < 1.0e-4
-        );
 
         let smooth_center = SmoothPoint {
             x: smooth.pet.final_anchor.x + f32::from(PET_W) / 2.0,
@@ -1518,9 +1459,7 @@ fn smooth_and_direct_scene_share_depth_driven_pet_centers() {
         };
         let direct_center = SmoothPoint {
             x: direct.frame.pet_anchor_points[0] / cell[0] + f32::from(PET_W) / 2.0,
-            y: direct.frame.pet_anchor_points[1] / cell[1]
-                + f32::from(PET_H) / 2.0
-                + direct.frame.bob_offset_y_points / cell[1]
+            y: direct.frame.pet_anchor_points[1] / cell[1] + f32::from(PET_H) / 2.0
                 - direct.frame.pet_depth_cue.y_offset_points_up / cell[1],
         };
         assert!(
@@ -1555,7 +1494,7 @@ fn awake_calm_depth_reaches_the_same_tank_endpoints_as_active() {
             active_plan.pet.perspective_offset
         );
         assert!(
-            (depth_center_without_bob(&calm_plan) - depth_center_without_bob(&active_plan)).abs()
+            (resolved_pet_center_y(&calm_plan) - resolved_pet_center_y(&active_plan)).abs()
                 < 1.0e-4
         );
     }
@@ -1600,9 +1539,7 @@ fn wall_shadow_detachment_and_strength_encode_wall_distance() {
         let shadow = plan.layer_by_role(SmoothLayerRole::WallShadow).unwrap();
         let body = plan.layer_by_role(SmoothLayerRole::PetBody).unwrap();
         let extra_x = shadow.transform.translation.x - body.transform.translation.x;
-        // The body carries the idle bob; the shadow does not.
-        let extra_y =
-            shadow.transform.translation.y - (body.transform.translation.y - plan.pet.bob_offset.y);
+        let extra_y = shadow.transform.translation.y - body.transform.translation.y;
         assert!(
             (extra_x - extra_y).abs() < 1e-4,
             "detachment must be diagonal, got x={extra_x} y={extra_y}"
@@ -1620,62 +1557,6 @@ fn wall_shadow_detachment_and_strength_encode_wall_distance() {
     assert_eq!(strength(&far), 1.0);
     assert_eq!(strength(&near), 0.0);
     assert!(strength(&far) > strength(&neutral) && strength(&neutral) > strength(&near));
-}
-
-#[test]
-fn depth_transform_keeps_idle_bob_on_the_pet_body_alone() {
-    let vm = normal_lifecycle_fixture();
-    let early = plan_at_depth(&vm, 250, 0.0);
-    let late = plan_at_depth(&vm, 1250, 0.0);
-
-    assert_ne!(
-        early.pet.bob_offset.y, late.pet.bob_offset.y,
-        "fixture must straddle a bob phase or this test proves nothing"
-    );
-
-    let body_step = late
-        .layer_by_role(SmoothLayerRole::PetBody)
-        .unwrap()
-        .transform
-        .translation
-        .y
-        - early
-            .layer_by_role(SmoothLayerRole::PetBody)
-            .unwrap()
-            .transform
-            .translation
-            .y;
-    assert!(
-        (body_step - (late.pet.bob_offset.y - early.pet.bob_offset.y)).abs() < 1e-5,
-        "the pet body must carry the idle bob"
-    );
-
-    for role in [
-        SmoothLayerRole::WallShadow,
-        SmoothLayerRole::PerformanceCue,
-        SmoothLayerRole::FloorProjection,
-    ] {
-        let early_y = early.layer_by_role(role).unwrap().transform.translation.y;
-        let late_y = late.layer_by_role(role).unwrap().transform.translation.y;
-        assert!(
-            (early_y - late_y).abs() < 1e-5,
-            "{role:?} must not inherit the pet's idle bob"
-        );
-    }
-    assert_eq!(
-        only_ellipse(
-            early
-                .layer_by_role(SmoothLayerRole::FloorProjection)
-                .unwrap()
-        )
-        .0,
-        only_ellipse(
-            late.layer_by_role(SmoothLayerRole::FloorProjection)
-                .unwrap()
-        )
-        .0,
-        "the bed projection geometry must not inherit the pet's idle bob"
-    );
 }
 
 #[test]
@@ -1846,8 +1727,8 @@ fn composed_plan_publishes_max_scale_clearance_inside_the_aperture() {
             glorp::round::placement::bounds_inside_round_aperture_for_test(clearance, viewport,)
         );
 
-        // Clearance is bob-inclusive maximum-scale creature ink at the validated
-        // rendered center; perspective is pre-accounted in the prepared anchor.
+        // Clearance is maximum-scale creature ink at the validated rendered
+        // center; perspective is pre-accounted in the prepared anchor.
         let expected_w = f32::from(PET_INK_W) * SMOOTH_PET_NEAR_SCALE;
         let expected_h = f32::from(PET_INK_H) * SMOOTH_PET_NEAR_SCALE;
         assert!((clearance.max.x - clearance.min.x - expected_w).abs() < 1e-3);

@@ -21,22 +21,22 @@ const WALL_SHADOW_DETACH_NEAR: f32 = 1.2;
 const WALL_SHADOW_STRENGTH_FAR: f32 = 1.0;
 const WALL_SHADOW_STRENGTH_NEAR: f32 = 0.0;
 
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 pub(crate) const PET_RIM_ENABLED: bool = true;
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 pub(crate) const PET_RIM_RADIUS_POINTS: f32 = 1.25;
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 pub(crate) const PET_RIM_IDLE_ALPHA: f32 = 0.09;
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 pub(crate) const PET_RIM_ACTIVITY_ALPHA_BONUS: f32 = 0.07;
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 const STATISTICS_REAR_SHADOW_LENGTH_CELLS: f32 = 0.90;
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 const STATISTICS_REAR_SHADOW_SOFTNESS_CELLS: f32 = 0.75;
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 const STATISTICS_REAR_SHADOW_OPACITY: f32 = 0.10;
 
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct StatisticsRearShadowStyle {
     pub(crate) offset_y_up_points: [f32; 2],
@@ -44,7 +44,7 @@ pub(crate) struct StatisticsRearShadowStyle {
     pub(crate) opacity: f32,
 }
 
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PetRimStyle {
     pub(crate) enabled: bool,
@@ -56,7 +56,7 @@ pub(crate) struct PetRimStyle {
 ///
 /// The shared prop key-light direction is the only authored direction for
 /// cast shadows, so each renderer receives the same backend-neutral vector.
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 pub(crate) fn statistics_rear_shadow_style(
     cell_extent_points: [f32; 2],
 ) -> Option<StatisticsRearShadowStyle> {
@@ -91,7 +91,7 @@ pub(crate) fn statistics_rear_shadow_style(
 
 /// Resolves the single optional pet rim. Activity may lift opacity, but never
 /// changes its body-local radius; reduced motion keeps the idle opacity.
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 pub(crate) fn pet_rim_style(activity_opacity: f32, reduce_motion: bool) -> PetRimStyle {
     let disabled = PetRimStyle {
         enabled: false,
@@ -134,7 +134,7 @@ pub(crate) fn pet_rim_style_with_presentation(
 
 /// Returns an alpha-only rim mask, with source coverage subtracted so callers
 /// can paint the pet above it without leaving an interior glow.
-#[allow(dead_code)] // Consumed by the staged AppKit, Pixel, and retained integrations.
+#[allow(dead_code)] // Consumed by the staged native, pixel, and retained integrations.
 pub(crate) fn exterior_dilated_alpha(
     source: &[u8],
     width: u32,

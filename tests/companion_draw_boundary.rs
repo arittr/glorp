@@ -141,7 +141,7 @@ fn ui_tick_owns_preparation_and_smooth_uses_the_fallible_planner() {
     assert!(hidden_return < animate && hidden_return < prepare);
     assert!(prepare_current.contains("prepare_companion_frame("));
     assert!(prepare_current.contains("state.last_good_frame = Some(frame)"));
-    assert!(prepare_frame.contains("try_build_round_smooth_scene_plan_with_options("));
+    assert!(prepare_frame.contains("try_build_round_smooth_scene_plan_with_grid_points("));
 }
 
 #[cfg(feature = "retained-renderer")]

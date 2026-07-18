@@ -7,6 +7,7 @@ pub(crate) const LOCOMOTION_DWELL_MAX_SECS: i64 = 0;
 pub(crate) const LOCOMOTION_MAX_PLANAR_STEP: f32 = 0.85;
 pub(crate) const LOCOMOTION_MAX_DEPTH_STEP: f32 = 0.67;
 const LOCOMOTION_CONTROL_OFFSET_FRACTION: f32 = 0.12;
+const SWIM_RAMP_FRACTION: f32 = 0.14;
 const LOCOMOTION_FACING_DEADZONE: f32 = 0.06;
 const LOCOMOTION_DEPTH_EXTREME: f32 = 0.70;
 const LOCOMOTION_DEPTH_MID: f32 = 0.23;
@@ -471,38 +472,40 @@ fn control_axis_monotonic_limit(
 /// minimum-jerk curve while preserving a continuous turn at waypoints.
 fn swim_progress(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    const RAMP: f32 = 0.10;
-    let cruise_velocity = 1.0 / (1.0 - RAMP);
+    let cruise_velocity = 1.0 / (1.0 - SWIM_RAMP_FRACTION);
 
-    if t < RAMP {
+    if t < SWIM_RAMP_FRACTION {
         return cruise_velocity
             * 0.5
-            * (t - RAMP / std::f32::consts::PI * (std::f32::consts::PI * t / RAMP).sin());
+            * (t - SWIM_RAMP_FRACTION / std::f32::consts::PI
+                * (std::f32::consts::PI * t / SWIM_RAMP_FRACTION).sin());
     }
-    if t <= 1.0 - RAMP {
-        return cruise_velocity * (0.5 * RAMP + t - RAMP);
+    if t <= 1.0 - SWIM_RAMP_FRACTION {
+        return cruise_velocity * (0.5 * SWIM_RAMP_FRACTION + t - SWIM_RAMP_FRACTION);
     }
 
     let remaining = 1.0 - t;
     1.0 - cruise_velocity
         * 0.5
         * (remaining
-            - RAMP / std::f32::consts::PI * (std::f32::consts::PI * remaining / RAMP).sin())
+            - SWIM_RAMP_FRACTION / std::f32::consts::PI
+                * (std::f32::consts::PI * remaining / SWIM_RAMP_FRACTION).sin())
 }
 
 #[cfg_attr(not(test), allow(dead_code))] // Used by the swim-profile contract test.
 fn swim_velocity(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    const RAMP: f32 = 0.10;
-    let cruise_velocity = 1.0 / (1.0 - RAMP);
+    let cruise_velocity = 1.0 / (1.0 - SWIM_RAMP_FRACTION);
 
-    if t < RAMP {
-        return cruise_velocity * 0.5 * (1.0 - (std::f32::consts::PI * t / RAMP).cos());
+    if t < SWIM_RAMP_FRACTION {
+        return cruise_velocity
+            * 0.5
+            * (1.0 - (std::f32::consts::PI * t / SWIM_RAMP_FRACTION).cos());
     }
-    if t <= 1.0 - RAMP {
+    if t <= 1.0 - SWIM_RAMP_FRACTION {
         return cruise_velocity;
     }
-    cruise_velocity * 0.5 * (1.0 - (std::f32::consts::PI * (1.0 - t) / RAMP).cos())
+    cruise_velocity * 0.5 * (1.0 - (std::f32::consts::PI * (1.0 - t) / SWIM_RAMP_FRACTION).cos())
 }
 
 fn route_is_valid(route: &[NormalizedLocomotionPoint; ROUTE_POINTS]) -> bool {
@@ -710,13 +713,21 @@ mod tests {
     }
 
     #[test]
-    fn swim_profile_has_a_short_ramp_and_a_steady_middle() {
+    fn swim_profile_accelerates_gently_to_a_brisker_cruise() {
         for t in [0.0, 1.0] {
             assert_close(swim_velocity(t), 0.0, "endpoint velocity");
         }
         assert_close(swim_progress(0.0), 0.0, "start position");
         assert_close(swim_progress(1.0), 1.0, "end position");
-        assert!(swim_velocity(0.5) > 1.0, "the middle should cruise");
+        let cruise_velocity = swim_velocity(0.5);
+        assert!(
+            swim_velocity(0.10) < cruise_velocity,
+            "the pet should still be accelerating after half a second"
+        );
+        assert!(
+            cruise_velocity >= 1.16,
+            "the middle cruise should be at least 16% faster than the leg average"
+        );
     }
 
     #[test]

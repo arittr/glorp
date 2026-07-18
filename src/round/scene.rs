@@ -429,6 +429,30 @@ mod tests {
     }
 
     #[test]
+    fn activity_and_calm_do_not_change_awake_locomotion_geometry() {
+        let mut active = WatchViewModel::fixture_with_habitat_props();
+        active.life_profile.calm_mode = false;
+        active.progress.rate_per_hour = 80_000_000.0;
+        let mut calm = active.clone();
+        calm.life_profile.calm_mode = true;
+        calm.progress.rate_per_hour = 0.0;
+        let motion = companion_roam_motion();
+        let now = datetime!(2026-07-17 12:34:56 UTC);
+        let active = companion_pet_placement(&active, now, 44, 18, &motion);
+        let calm = companion_pet_placement(&calm, now, 44, 18, &motion);
+
+        assert_eq!(
+            active.fractional_motion_top_left,
+            calm.fractional_motion_top_left
+        );
+        assert_eq!(active.raw_depth, calm.raw_depth);
+        assert_eq!(
+            active.motion_projection.facing,
+            calm.motion_projection.facing
+        );
+    }
+
+    #[test]
     fn build_round_scene_draw_list_produces_nonempty_cells() {
         let vm = WatchViewModel::fixture_with_habitat_props();
         let m = CompanionMotion::default();
