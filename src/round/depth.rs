@@ -249,11 +249,13 @@ mod tests {
         assert_eq!(COMPANION_GAUGE_PACE_Z, 1.55);
         assert_eq!(COMPANION_GAUGE_DAILY_Z, 1.65);
         assert_eq!(COMPANION_GAUGE_XP_Z, 1.75);
-        assert!(COMPANION_STATISTICS_Z < 1.0);
-        assert!(1.0 < COMPANION_GAUGE_PACE_Z);
-        assert!(COMPANION_GAUGE_PACE_Z < COMPANION_GAUGE_DAILY_Z);
-        assert!(COMPANION_GAUGE_DAILY_Z < COMPANION_GAUGE_XP_Z);
-        assert!(COMPANION_GAUGE_XP_Z < 2.0);
+        const {
+            assert!(COMPANION_STATISTICS_Z < 1.0);
+            assert!(1.0 < COMPANION_GAUGE_PACE_Z);
+            assert!(COMPANION_GAUGE_PACE_Z < COMPANION_GAUGE_DAILY_Z);
+            assert!(COMPANION_GAUGE_DAILY_Z < COMPANION_GAUGE_XP_Z);
+            assert!(COMPANION_GAUGE_XP_Z < 2.0);
+        }
     }
 
     #[test]
@@ -306,9 +308,11 @@ mod tests {
             StatisticsDepthInteraction::resolve(f32::NAN),
             Err(CompanionDepthCompositionError::InvalidEffectiveDepth)
         );
-        assert!(COMPANION_PET_MIN_Z < COMPANION_STATISTICS_INTERACTION_START_Z);
-        assert!(COMPANION_STATISTICS_INTERACTION_START_Z < COMPANION_STATISTICS_Z);
-        assert!(COMPANION_STATISTICS_Z < COMPANION_PET_MAX_Z);
+        const {
+            assert!(COMPANION_PET_MIN_Z < COMPANION_STATISTICS_INTERACTION_START_Z);
+            assert!(COMPANION_STATISTICS_INTERACTION_START_Z < COMPANION_STATISTICS_Z);
+            assert!(COMPANION_STATISTICS_Z < COMPANION_PET_MAX_Z);
+        }
     }
 
     #[test]
